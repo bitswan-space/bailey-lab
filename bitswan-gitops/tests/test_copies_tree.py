@@ -1162,6 +1162,1124 @@ def test_merge_to_parent_refuses_a_bp_that_is_not_the_experiments(env):
     assert "bpa" in ei.value.detail
 
 
+# ── adopt: take a version wholesale, without losing the old one ─────────────
+
+
+def _adopt(copy, **kw):
+    from app.routes.copies import AdoptRequest
+
+    return lambda: copies.adopt_version(copy, AdoptRequest(**kw))
+
+
+def test_adopting_an_experiment_parks_my_work_and_consumes_the_experiment(
+    env, delete_env
+):
+    """ "Use this version without merging": the experiment BECOMES my copy.
+
+    Two things must both be true afterwards, and the second is the one that
+    makes the button safe to press: my copy holds the experiment's content, and
+    the work my copy had is not gone — it is an experiment of its own.
+    """
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "alice-work\n", "alice work")
+    exp = env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+    _commit(os.path.join(exp, "bpa"), "file.txt", "experiment-work\n", "exp work")
+    # …and my copy moves on again AFTER the experiment branched, so there is
+    # genuinely something the experiment does not contain.
+    _commit(os.path.join(alice, "bpa"), "later.txt", "later\n", "alice later")
+
+    res = _as(
+        OWNER,
+        _adopt(
+            "alice",
+            bp="bpa",
+            source="experiment",
+            experiment="exp-try-ab12",
+            park_name="exp-my-previous-bpa-cd34",
+            park_title="My previous Compost work — 2026-08-07 14:32",
+        ),
+    )
+
+    assert res.adopted == "experiment"
+    # My copy is now the experiment, byte for byte.
+    assert _read(os.path.join(alice, "bpa", "file.txt")) == "experiment-work\n"
+    assert not os.path.exists(os.path.join(alice, "bpa", "later.txt"))
+    # My previous work was parked, and is REACHABLE — the whole point.
+    assert res.parked == {
+        "name": "exp-my-previous-bpa-cd34",
+        "title": "My previous Compost work — 2026-08-07 14:32",
+    }
+    parked = os.path.join(env["copies_dir"], "exp-my-previous-bpa-cd34")
+    assert _read(os.path.join(parked, "bpa", "later.txt")) == "later\n"
+    parked_meta = json.loads(_read(os.path.join(parked, COPY_META_FILE)))
+    assert parked_meta["kind"] == "experiment"
+    assert parked_meta["parent"] == "alice"
+    assert parked_meta["bp"] == "bpa"
+    assert parked_meta["owner"] == OWNER
+    # The adopted experiment is consumed — it IS my copy now, so keeping it
+    # would leave two copies claiming to be the same thing.
+    assert res.teardown_task_id
+    assert delete_env and delete_env[-1][0] == "exp-try-ab12"
+
+
+def test_adopting_parks_nothing_when_there_is_nothing_to_lose(env, delete_env):
+    """An experiment branched from my copy and moved on: everything of mine is
+    already in it. Parking would create an experiment that duplicates the
+    source — clutter, and a toast that claims to have saved something it
+    didn't."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "alice-work\n", "alice work")
+    exp = env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+    _commit(os.path.join(exp, "bpa"), "file.txt", "experiment-work\n", "exp work")
+
+    res = _as(
+        OWNER,
+        _adopt("alice", bp="bpa", source="experiment", experiment="exp-try-ab12"),
+    )
+
+    assert res.parked is None
+    assert "Nothing needed saving" in res.message
+    assert _read(os.path.join(alice, "bpa", "file.txt")) == "experiment-work\n"
+    assert not os.path.exists(
+        os.path.join(env["copies_dir"], "exp-my-previous-bpa-cd34")
+    )
+
+
+def test_adopting_main_parks_my_work_and_takes_main_as_it_stands(env, tmp_path):
+    """ "Edit the main version without merging my changes": the opposite of a
+    pull. A pull replays my work on top of main; this takes main as it stands
+    and keeps mine to one side."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "alice-work\n", "alice work")
+    _advance_main(env, tmp_path, "bpa", ["main-work\n"])
+
+    res = _as(
+        OWNER,
+        _adopt(
+            "alice",
+            bp="bpa",
+            source="main",
+            park_name="exp-my-previous-bpa-cd34",
+            park_title="My previous Compost work — 2026-08-07 14:32",
+        ),
+    )
+
+    assert res.adopted == "main"
+    assert res.teardown_task_id is None, "main is not consumed by being adopted"
+    assert _read(os.path.join(alice, "bpa", "file.txt")) == "main-work\n"
+    # Level with main afterwards: this is how it differs from a pull, which
+    # would have left me one commit ahead.
+    div = asyncio.run(copies.get_bp_divergence("alice", bp="bpa"))
+    assert (div["ahead_bp"], div["behind_bp"]) == (0, 0)
+    parked = os.path.join(env["copies_dir"], "exp-my-previous-bpa-cd34")
+    assert _read(os.path.join(parked, "bpa", "file.txt")) == "alice-work\n"
+
+
+def test_adopting_touches_only_the_one_business_process(env, tmp_path):
+    """Everything here is per business process. The copy's OTHER processes are
+    not part of the question and must not move."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpb"), "file.txt", "my-bpb-work\n", "alice bpb")
+    bpb_tip = _head(os.path.join(alice, "bpb"))
+    _advance_main(env, tmp_path, "bpa", ["main-work\n"])
+    _advance_main(env, tmp_path, "bpb", ["main-bpb\n"])
+
+    _as(OWNER, _adopt("alice", bp="bpa", source="main"))
+
+    assert _read(os.path.join(alice, "bpa", "file.txt")) == "main-work\n"
+    # bpb is exactly where it was — same tip, same content, still behind main.
+    assert _head(os.path.join(alice, "bpb")) == bpb_tip
+    assert _read(os.path.join(alice, "bpb", "file.txt")) == "my-bpb-work\n"
+    assert asyncio.run(copies.get_bp_divergence("alice", bp="bpb"))["behind_bp"] == 1
+
+
+def test_adopting_commits_uncommitted_work_on_both_sides(env):
+    """What the user SEES is what moves: uncommitted edits in the experiment are
+    adopted, and uncommitted edits in my copy are parked rather than destroyed
+    by the reset."""
+    alice = env["user_copy"]("alice")
+    exp = env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+    _write(os.path.join(exp, "bpa"), "file.txt", "experiment-draft\n")
+    _write(os.path.join(alice, "bpa"), "mine.txt", "my-draft\n")
+
+    res = _as(
+        OWNER,
+        _adopt(
+            "alice",
+            bp="bpa",
+            source="experiment",
+            experiment="exp-try-ab12",
+            park_name="exp-my-previous-bpa-cd34",
+            park_title="My previous work",
+        ),
+    )
+
+    assert _read(os.path.join(alice, "bpa", "file.txt")) == "experiment-draft\n"
+    assert not os.path.exists(os.path.join(alice, "bpa", "mine.txt"))
+    assert res.parked is not None
+    parked = os.path.join(env["copies_dir"], "exp-my-previous-bpa-cd34")
+    assert _read(os.path.join(parked, "bpa", "mine.txt")) == "my-draft\n"
+
+
+def test_a_failed_adopt_leaves_the_parked_work_and_says_so(env, monkeypatch):
+    """The one thing this must never do is leave the user with neither version.
+    If the adopt fails after parking, the parked experiment still exists and the
+    error names it."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "alice-work\n", "alice work")
+    exp = env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+    _commit(os.path.join(exp, "bpa"), "file.txt", "experiment-work\n", "exp work")
+    _commit(os.path.join(alice, "bpa"), "later.txt", "later\n", "alice later")
+
+    exp_tip = _head(os.path.join(exp, "bpa"))
+    real = copies.call_git_command_with_output
+
+    async def _fail_the_ref_move(*args, **kwargs):
+        # ONLY the adopt's ref move: `refs/heads/alice` -> the experiment tip.
+        # Both of the other update-refs in this flow look similar and must
+        # still work — publishing the experiment's own branch before reading
+        # its tip, and publishing MY tip before the parked experiment branches
+        # off it. The question here is what happens when the park SUCCEEDED and
+        # the adopt did not.
+        if "update-ref" in args and "refs/heads/alice" in args and exp_tip in args:
+            return "", "disk on fire", 1
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(copies, "call_git_command_with_output", _fail_the_ref_move)
+
+    with pytest.raises(HTTPException) as ei:
+        _as(
+            OWNER,
+            _adopt(
+                "alice",
+                bp="bpa",
+                source="experiment",
+                experiment="exp-try-ab12",
+                park_name="exp-my-previous-bpa-cd34",
+                park_title="My previous work",
+            ),
+        )
+
+    assert ei.value.status_code == 500
+    assert "your previous work on 'bpa' is safe" in ei.value.detail
+    assert "My previous work" in ei.value.detail
+    # And it really is there.
+    parked = os.path.join(env["copies_dir"], "exp-my-previous-bpa-cd34")
+    assert _read(os.path.join(parked, "bpa", "later.txt")) == "later\n"
+    # Nothing was adopted: my copy is untouched, and so is the experiment.
+    assert _read(os.path.join(alice, "bpa", "file.txt")) == "alice-work\n"
+    assert os.path.isdir(os.path.join(env["copies_dir"], "exp-try-ab12"))
+
+
+def test_adopting_requires_the_owner_and_refuses_an_experiment_target(env):
+    env["user_copy"]("alice")
+    env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+
+    # Somebody else's copy is not theirs to overwrite.
+    with pytest.raises(HTTPException) as ei:
+        _as(OTHER, _adopt("alice", bp="bpa", source="main"))
+    assert ei.value.status_code == 403
+
+    # A version is adopted INTO a person's copy, never into an experiment.
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _adopt("exp-try-ab12", bp="bpa", source="main"))
+    assert ei.value.status_code == 400
+    assert "is an experiment" in ei.value.detail
+
+
+def test_adopting_refuses_an_experiment_that_is_not_mine_or_not_on_this_bp(env):
+    env["user_copy"]("alice")
+    env["user_copy"]("bob", owner=OTHER)
+    env["experiment"]("exp-bobs-ab12", "bob", owner=OTHER, bps=["bpa"])
+    env["experiment"]("exp-mine-cd34", "alice", bps=["bpb"])
+
+    # Not my experiment (owner guard fires first).
+    with pytest.raises(HTTPException) as ei:
+        _as(
+            OWNER,
+            _adopt("alice", bp="bpa", source="experiment", experiment="exp-bobs-ab12"),
+        )
+    assert ei.value.status_code == 403
+
+    # My experiment, but on a different business process.
+    with pytest.raises(HTTPException) as ei:
+        _as(
+            OWNER,
+            _adopt("alice", bp="bpa", source="experiment", experiment="exp-mine-cd34"),
+        )
+    assert ei.value.status_code == 409
+    assert "bpb" in ei.value.detail
+
+
+def test_adopting_refuses_to_overwrite_work_without_somewhere_to_put_it(env, tmp_path):
+    """park_name/park_title are not decoration: without them there is nowhere
+    for the work to go, so the answer is a 400 that says how much is at stake —
+    never a silent overwrite."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "alice-work\n", "alice work")
+    _advance_main(env, tmp_path, "bpa", ["main-work\n"])
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _adopt("alice", bp="bpa", source="main"))
+    assert ei.value.status_code == 400
+    assert "must be parked" in ei.value.detail
+    assert _read(os.path.join(alice, "bpa", "file.txt")) == "alice-work\n"
+
+
+def _tree(repo, ref="HEAD"):
+    """The TREE a ref points at — what the files actually are, independent of
+    history. Two commits with the same tree hold byte-identical content."""
+    if os.path.isdir(os.path.join(repo, ".git")):
+        return _git("rev-parse", f"{ref}^{{tree}}", cwd=repo).stdout.strip()
+    return _git("-C", repo, "rev-parse", f"{ref}^{{tree}}").stdout.strip()
+
+
+def _ahead_behind(clone, bare):
+    """(ahead, behind) of a clone against its repo's main, read from git."""
+    _git("fetch", "-q", bare, "main", cwd=clone)
+    out = _git("rev-list", "--left-right", "--count", "FETCH_HEAD...HEAD", cwd=clone)
+    behind, ahead = out.stdout.split()
+    return int(ahead), int(behind)
+
+
+@pytest.fixture()
+def deployed(monkeypatch, tmp_path):
+    """The DEPLOYMENT RECORDS — the only non-git thing the commit sources read.
+
+    A live dict the test fills in as `deployed[(bp, stage)] = [sha, …]` once it
+    knows the shas, newest first. Git itself is never mocked in these tests;
+    this stands in for bitswan.yaml's audit log, which would need a whole
+    deployed workspace to exist for real — but it answers in the SHAPE the real
+    `bp_history` answers in (`{"history": [...]}`, entries carrying `source`
+    and `deployed_at`), because reading it wrongly is exactly the sort of bug a
+    stub can hide.
+    """
+    records: dict[tuple[str, str], list[str]] = {}
+
+    class _Svc:
+        gitops_dir = str(tmp_path)
+        workspace_name = "ws"
+
+        async def bp_history(self, bp, stage, limit=200):
+            history = [
+                {
+                    "commit": f"audit-{c[:7]}",
+                    "source_commit": c,
+                    "deployed_at": "2026-08-01T09:15:00+00:00",
+                    "deployed_by": OWNER,
+                    "status": "deployed",
+                    "source": "deploy",
+                    "members": {},
+                }
+                for c in records.get((bp, stage), [])
+            ]
+            # The audit timeline also carries things that are NOT deployments.
+            history.append(
+                {
+                    "commit": "audit-firewall",
+                    "source_commit": None,
+                    "deployed_at": "2026-08-01T08:00:00+00:00",
+                    "deployed_by": OWNER,
+                    "status": "firewall",
+                    "source": "firewall",
+                    "members": {},
+                }
+            )
+            return {
+                "bp": bp,
+                "stage": stage,
+                "current": history[0]["commit"] if records.get((bp, stage)) else None,
+                "history": history,
+            }
+
+    import app.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_automation_service", lambda: _Svc())
+    return records
+
+
+def test_adopting_leaves_the_copy_on_top_of_main_ready_to_deploy(
+    env, tmp_path, deployed
+):
+    """THE INVARIANT: after any adopt, your copy is main plus your own changes.
+
+    Never behind. Adopting an older version by moving the branch backwards
+    would have made a hotpatch unpublishable until you had synced first; a
+    restore commit on top of main makes the very next Deploy a fast-forward.
+    Asserted on git state: the tree is the target's, the counts are 1/0, and the
+    publish really does fast-forward."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    bare = env["bares"]["bpa"]
+    # A version that WAS deployed, then main moved on past it.
+    _commit(clone, "file.txt", "v1\n", "v1")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    old_deployed = _head(clone)
+    deployed[("bpa", "production")] = [old_deployed]
+    _advance_main(env, tmp_path, "bpa", ["v2\n"], label="main moves past it")
+    _as(OWNER, lambda: copies.rebase_copy("alice", SyncCopyRequest(bp="bpa")))
+    assert _ahead_behind(clone, bare) == (0, 0)
+
+    res = _as(
+        OWNER,
+        _adopt("alice", bp="bpa", source="commit", commit=old_deployed),
+    )
+
+    assert res.method == "restore"
+    # The CONTENT is the old version…
+    assert _read(os.path.join(clone, "file.txt")) == "v1\n"
+    assert _tree(clone) == _tree(bare, old_deployed)
+    # …and the ANCESTRY is main's: exactly one commit ahead, nothing behind.
+    assert _ahead_behind(clone, bare) == (1, 0)
+    # So publishing it is a plain fast-forward, with no Sync in between.
+    sync = _as(
+        OWNER, lambda: sync_copy("alice", SyncCopyRequest(deployer=OWNER, bp="bpa"))
+    )
+    assert sync.status == "success" and sync.method == "fast-forward"
+    assert _read(os.path.join(env["copies_dir"], "main", "bpa", "file.txt")) == "v1\n"
+
+
+def test_a_restore_deletes_files_main_added_and_restores_files_main_removed(
+    env, tmp_path, deployed
+):
+    """A restore is the whole TREE, not an overlay. Files main gained since the
+    target must go, and files main dropped must come back — a checkout of paths
+    alone would leave the first kind behind."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "keep.txt", "keep\n", "add keep")
+    _commit(clone, "gone-later.txt", "here\n", "add one main will delete")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    target = _head(clone)
+    deployed[("bpa", "production")] = [target]
+
+    # main: delete one file, add another.
+    other = tmp_path / "mover"
+    _git("clone", "-q", env["bares"]["bpa"], str(other))
+    os.remove(os.path.join(str(other), "gone-later.txt"))
+    _commit(str(other), "added-later.txt", "new\n", "main moves on")
+    asyncio.run(bp_git.publish_main_from_clone(str(other), "bpa"))
+    _as(OWNER, lambda: copies.rebase_copy("alice", SyncCopyRequest(bp="bpa")))
+    assert os.path.exists(os.path.join(clone, "added-later.txt"))
+    assert not os.path.exists(os.path.join(clone, "gone-later.txt"))
+
+    _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=target))
+
+    assert not os.path.exists(os.path.join(clone, "added-later.txt")), (
+        "a file main added after the target must be gone — the restore is the "
+        "target's whole tree"
+    )
+    assert _read(os.path.join(clone, "gone-later.txt")) == "here\n"
+    assert _tree(clone) == _tree(env["bares"]["bpa"], target)
+
+
+def test_adopting_a_version_main_already_has_commits_nothing(env, deployed):
+    """No empty commit that claims to have restored something."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "v1\n", "v1")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    target = _head(clone)
+    deployed[("bpa", "production")] = [target]
+    before = _head(clone)
+
+    res = _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=target))
+
+    assert res.method == "already-main"
+    assert _head(clone) == before, "no commit was added"
+    assert _ahead_behind(clone, env["bares"]["bpa"]) == (0, 0)
+
+
+def test_adopting_the_same_version_twice_adds_nothing_the_second_time(
+    env, tmp_path, deployed
+):
+    """Idempotent: pressing it again must not pile up identical restore
+    commits."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "v1\n", "v1")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    target = _head(clone)
+    deployed[("bpa", "production")] = [target]
+    _advance_main(env, tmp_path, "bpa", ["v2\n"])
+    _as(OWNER, lambda: copies.rebase_copy("alice", SyncCopyRequest(bp="bpa")))
+
+    first = _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=target))
+    tip_after_first = _head(clone)
+    second = _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=target))
+
+    assert first.method == "restore"
+    assert (
+        second.method == "unchanged"
+    ), "the second press found the copy already holding exactly that version"
+    assert _tree(clone) == _tree(env["bares"]["bpa"], target)
+    # Still exactly one commit ahead of main — not two.
+    assert _ahead_behind(clone, env["bares"]["bpa"]) == (1, 0)
+    assert _head(clone) == tip_after_first, "the repeat added no commit"
+
+
+def test_adopting_a_descendant_experiment_keeps_its_own_commits(env):
+    """When the source already contains main, taking it IS a fast-forward — so
+    the experiment's individual commits survive rather than being flattened
+    into one restore."""
+    alice = env["user_copy"]("alice")
+    exp = env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+    _commit(os.path.join(exp, "bpa"), "a.txt", "one\n", "exp commit one")
+    _commit(os.path.join(exp, "bpa"), "b.txt", "two\n", "exp commit two")
+    exp_tip = _head(os.path.join(exp, "bpa"))
+
+    res = _as(
+        OWNER,
+        _adopt("alice", bp="bpa", source="experiment", experiment="exp-try-ab12"),
+    )
+
+    assert res.method == "fast-forward"
+    clone = os.path.join(alice, "bpa")
+    assert _head(clone) == exp_tip, "the experiment's own tip became my copy's"
+    subjects = _git("log", "--format=%s", "-3", cwd=clone).stdout.split("\n")
+    assert "exp commit two" in subjects and "exp commit one" in subjects
+    assert _ahead_behind(clone, env["bares"]["bpa"]) == (2, 0)
+
+
+def test_adopting_a_diverged_experiment_restores_it_on_top_of_main(env, tmp_path):
+    """When main has moved on since the experiment branched, there is no
+    fast-forward to be had — so ONE restore commit carries the experiment's tree
+    on top of main, and the copy is still 1 ahead / 0 behind."""
+    alice = env["user_copy"]("alice")
+    exp = env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+    _commit(os.path.join(exp, "bpa"), "file.txt", "experiment\n", "exp work")
+    exp_tip = _head(os.path.join(exp, "bpa"))
+    _advance_main(env, tmp_path, "bpa", ["main-moved\n"])
+    _as(OWNER, lambda: copies.rebase_copy("alice", SyncCopyRequest(bp="bpa")))
+
+    res = _as(
+        OWNER,
+        _adopt("alice", bp="bpa", source="experiment", experiment="exp-try-ab12"),
+    )
+
+    assert res.method == "restore"
+    clone = os.path.join(alice, "bpa")
+    assert _read(os.path.join(clone, "file.txt")) == "experiment\n"
+    assert _tree(clone) == _tree(env["bares"]["bpa"], exp_tip)
+    assert _ahead_behind(clone, env["bares"]["bpa"]) == (1, 0)
+
+
+def test_adopting_touches_no_other_business_processs_refs(env, tmp_path, deployed):
+    """Per business process means per REPOSITORY: nothing in another BP's bare
+    may move."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "v1\n", "v1")
+    asyncio.run(bp_git.publish_main_from_clone(os.path.join(alice, "bpa"), "bpa"))
+    target = _head(os.path.join(alice, "bpa"))
+    deployed[("bpa", "production")] = [target]
+    _advance_main(env, tmp_path, "bpa", ["v2\n"])
+    _as(OWNER, lambda: copies.rebase_copy("alice", SyncCopyRequest(bp="bpa")))
+
+    before = _git(
+        "-C", env["bares"]["bpb"], "for-each-ref", "--format=%(refname) %(objectname)"
+    ).stdout
+
+    _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=target))
+
+    after = _git(
+        "-C", env["bares"]["bpb"], "for-each-ref", "--format=%(refname) %(objectname)"
+    ).stdout
+    assert before == after, "another business process's refs moved"
+
+
+def test_only_a_version_this_workspace_deployed_can_be_adopted(
+    env, tmp_path, monkeypatch, deployed
+):
+    """This endpoint moves a person's branch onto whatever it is handed, so it
+    must not accept an arbitrary sha: not an unknown one, and not one from a
+    DIFFERENT business process."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "v1\n", "v1")
+    asyncio.run(bp_git.publish_main_from_clone(os.path.join(alice, "bpa"), "bpa"))
+    deployed_a = _head(os.path.join(alice, "bpa"))
+    _commit(os.path.join(alice, "bpb"), "file.txt", "b1\n", "b1")
+    asyncio.run(bp_git.publish_main_from_clone(os.path.join(alice, "bpb"), "bpb"))
+    deployed_b = _head(os.path.join(alice, "bpb"))
+    _advance_main(env, tmp_path, "bpa", ["v2\n"])
+    _as(OWNER, lambda: copies.rebase_copy("alice", SyncCopyRequest(bp="bpa")))
+    tip_before = _head(os.path.join(alice, "bpa"))
+
+    # Each business process's records name only its OWN deployments.
+    deployed[("bpa", "production")] = [deployed_a]
+    deployed[("bpb", "production")] = [deployed_b]
+
+    # A sha nobody ever deployed.
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit="0" * 40))
+    assert ei.value.status_code == 404
+
+    # A real deployed sha — of ANOTHER business process.
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=deployed_b))
+    assert ei.value.status_code == 404
+
+    # Not even a sha.
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit="HEAD~1"))
+    assert ei.value.status_code == 400
+
+    # Nothing moved through any of that.
+    assert _head(os.path.join(alice, "bpa")) == tip_before
+    # …and the one that IS on record works.
+    res = _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=deployed_a))
+    assert res.method == "restore"
+
+
+def test_adopting_materializes_a_business_process_the_copy_does_not_carry(
+    env, tmp_path, deployed
+):
+    """A copy need not already hold the business process. Nothing is at risk in
+    a copy that has never had it, so nothing is parked — and the result still
+    obeys the invariant."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "v1\n", "v1")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    target = _head(clone)
+    deployed[("bpa", "production")] = [target]
+    _advance_main(env, tmp_path, "bpa", ["v2\n"])
+    # …and the copy loses its checkout entirely (a fresh colleague's copy, or a
+    # clone dir that was cleaned up).
+    subprocess.run(["rm", "-rf", clone], check=True)
+
+    res = _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=target))
+
+    assert res.parked is None
+    assert _read(os.path.join(clone, "file.txt")) == "v1\n"
+    assert _ahead_behind(clone, env["bares"]["bpa"]) == (1, 0)
+
+
+def test_adopting_never_touches_another_persons_copy(env, tmp_path, deployed):
+    """A copy is one person's environment. Adopting into mine is invisible to
+    everyone else until I Deploy."""
+    alice = env["user_copy"]("alice")
+    bob = env["user_copy"]("bob", owner=OTHER)
+    _commit(os.path.join(bob, "bpa"), "bobs.txt", "bob\n", "bob works")
+    bob_tip = _head(os.path.join(bob, "bpa"))
+    bob_ref = _head(env["bares"]["bpa"], "refs/heads/bob")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "v1\n", "v1")
+    asyncio.run(bp_git.publish_main_from_clone(os.path.join(alice, "bpa"), "bpa"))
+    target = _head(os.path.join(alice, "bpa"))
+    deployed[("bpa", "production")] = [target]
+    _advance_main(env, tmp_path, "bpa", ["v2\n"])
+    _as(OWNER, lambda: copies.rebase_copy("alice", SyncCopyRequest(bp="bpa")))
+
+    _as(OWNER, _adopt("alice", bp="bpa", source="commit", commit=target))
+
+    assert _head(os.path.join(bob, "bpa")) == bob_tip
+    assert _head(env["bares"]["bpa"], "refs/heads/bob") == bob_ref
+    assert _read(os.path.join(bob, "bpa", "bobs.txt")) == "bob\n"
+
+
+def test_adopting_refuses_a_source_it_does_not_know(env):
+    env["user_copy"]("alice")
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _adopt("alice", bp="bpa", source="whatever"))
+    assert ei.value.status_code == 400
+    assert "Invalid source" in ei.value.detail
+
+
+def test_adopting_an_experiment_that_deleted_a_file_deletes_it_here_too(env):
+    """The adopt is the experiment's whole tree, deletions included — otherwise
+    "use this version" quietly means "use this version plus whatever of mine it
+    removed"."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "doomed.txt", "here\n", "add doomed")
+    exp = env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+    os.remove(os.path.join(exp, "bpa", "doomed.txt"))
+    _git("add", "-A", cwd=os.path.join(exp, "bpa"))
+    _git("commit", "-qm", "the experiment removes it", cwd=os.path.join(exp, "bpa"))
+
+    _as(
+        OWNER,
+        _adopt("alice", bp="bpa", source="experiment", experiment="exp-try-ab12"),
+    )
+
+    assert not os.path.exists(os.path.join(alice, "bpa", "doomed.txt"))
+
+
+# ── reverting the dev stage ─────────────────────────────────────────────────
+#
+# Dev deploys from main, so "put dev back" is a change to MAIN — made the only
+# way main ever changes, by one new commit on top. The tests below are about
+# that being true, and about the consequence being real: everybody else's copy
+# goes one behind and carries the revert on their next Sync.
+
+
+def _revert_dev(bp, **kw):
+    from app.routes.copies import RevertDevRequest
+
+    return lambda: copies.revert_dev_to_version(bp, RevertDevRequest(**kw))
+
+
+def _main_tip(env, bp):
+    return _head(env["bares"][bp], "refs/heads/main")
+
+
+def test_reverting_dev_moves_main_forward_and_rewrites_nothing(env, tmp_path, deployed):
+    """FORWARD-ONLY. The version that broke stays in the history, reachable —
+    a revert that rewrote main would take it away from everyone who has it."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "good\n", "the good version")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    good = _main_tip(env, "bpa")
+    deployed[("bpa", "dev")] = [good]
+    _advance_main(env, tmp_path, "bpa", ["broken\n"], label="the deploy that broke it")
+    broken = _main_tip(env, "bpa")
+
+    res = _as(OWNER, _revert_dev("bpa", commit=good, bp_label="Compost"))
+
+    assert res.method == "restore"
+    new_main = _main_tip(env, "bpa")
+    # One new commit, on top of the broken one — nothing rewritten.
+    assert (
+        _git("-C", env["bares"]["bpa"], "rev-list", "--count", f"{broken}..{new_main}")
+        .stdout.strip()
+        .strip()
+        == "1"
+    )
+    assert (
+        _git(
+            "-C",
+            env["bares"]["bpa"],
+            "merge-base",
+            "--is-ancestor",
+            broken,
+            new_main,
+            check=False,
+        ).returncode
+        == 0
+    ), "the version that broke it is still reachable from main"
+    # …and main's content is the good version again, byte for byte.
+    assert _tree(env["bares"]["bpa"], new_main) == _tree(env["bares"]["bpa"], good)
+    assert _read(os.path.join(env["copies_dir"], "main", "bpa", "file.txt")) == "good\n"
+
+
+def test_the_revert_commit_names_the_process_the_date_and_the_version(
+    env, tmp_path, deployed
+):
+    """Everyone else meets this commit in their Sync list, so it has to say what
+    happened in words — the business process by its DISPLAY NAME, when the
+    version was deployed, and which version it was."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "good\n", "the good version")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    good = _main_tip(env, "bpa")
+    deployed[("bpa", "dev")] = [good]
+    _advance_main(env, tmp_path, "bpa", ["broken\n"])
+
+    res = _as(
+        OWNER, _revert_dev("bpa", commit=good, bp_label="Compost", deployer=OWNER)
+    )
+
+    assert res.subject == (
+        f"Revert Compost to the version deployed to dev on 2026-08-01 ({good[:7]})"
+    )
+    subject = _git(
+        "-C", env["bares"]["bpa"], "log", "-1", "--format=%s", "refs/heads/main"
+    ).stdout.strip()
+    assert subject == res.subject
+    author = _git(
+        "-C", env["bares"]["bpa"], "log", "-1", "--format=%ae", "refs/heads/main"
+    ).stdout.strip()
+    assert author == OWNER, "a revert is attributed to the person who pressed it"
+
+
+def test_a_dev_revert_puts_everyone_else_one_behind_and_their_sync_carries_it(
+    env, tmp_path, deployed
+):
+    """THE CONSEQUENCE, and it is intended: dev is shared. After a revert every
+    other copy is exactly one commit behind on that business process, and
+    pulling brings the revert in with their own unpublished work replayed on
+    top."""
+    alice = env["user_copy"]("alice")
+    bob = env["user_copy"]("bob", owner=OTHER)
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "good\n", "the good version")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    good = _main_tip(env, "bpa")
+    deployed[("bpa", "dev")] = [good]
+    _advance_main(env, tmp_path, "bpa", ["broken\n"])
+    _as(OTHER, lambda: copies.rebase_copy("bob", SyncCopyRequest(bp="bpa")))
+    _commit(os.path.join(bob, "bpa"), "bobs.txt", "bob\n", "bob's own work")
+    assert _ahead_behind(os.path.join(bob, "bpa"), env["bares"]["bpa"]) == (1, 0)
+
+    _as(OWNER, _revert_dev("bpa", commit=good, bp_label="Compost"))
+
+    assert _ahead_behind(os.path.join(bob, "bpa"), env["bares"]["bpa"]) == (1, 1)
+
+    _as(
+        OTHER,
+        lambda: copies.rebase_copy("bob", SyncCopyRequest(bp="bpa", deployer=OTHER)),
+    )
+    assert _read(os.path.join(bob, "bpa", "file.txt")) == "good\n", "the revert arrived"
+    assert _read(os.path.join(bob, "bpa", "bobs.txt")) == "bob\n", "his work survived"
+    assert _ahead_behind(os.path.join(bob, "bpa"), env["bares"]["bpa"]) == (1, 0)
+
+
+def test_reverting_dev_twice_adds_no_second_commit(env, tmp_path, deployed):
+    """Idempotent. Dev already runs exactly this, so there is nothing to say."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "good\n", "the good version")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    good = _main_tip(env, "bpa")
+    deployed[("bpa", "dev")] = [good]
+    _advance_main(env, tmp_path, "bpa", ["broken\n"])
+
+    _as(OWNER, _revert_dev("bpa", commit=good))
+    after_first = _main_tip(env, "bpa")
+    second = _as(OWNER, _revert_dev("bpa", commit=good))
+
+    assert second.method == "already-main"
+    assert _main_tip(env, "bpa") == after_first, "the repeat added no commit"
+
+
+def test_only_a_version_dev_itself_ran_can_be_reverted_to(env, tmp_path, deployed):
+    """Dev only. Staging and production go back by promote and rollback, which
+    are gated differently — they must not be reachable through this door. And,
+    as everywhere, an arbitrary sha is not a version."""
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "file.txt", "v1\n", "v1")
+    asyncio.run(bp_git.publish_main_from_clone(os.path.join(alice, "bpa"), "bpa"))
+    v1 = _main_tip(env, "bpa")
+    _commit(os.path.join(alice, "bpb"), "file.txt", "b1\n", "b1")
+    asyncio.run(bp_git.publish_main_from_clone(os.path.join(alice, "bpb"), "bpb"))
+    b1 = _main_tip(env, "bpb")
+    _advance_main(env, tmp_path, "bpa", ["v2\n"])
+    before = _main_tip(env, "bpa")
+
+    # Deployed — but to PRODUCTION, never to dev.
+    deployed[("bpa", "production")] = [v1]
+    deployed[("bpb", "dev")] = [b1]
+
+    for commit, code in ((v1, 404), (b1, 404), ("0" * 40, 404), ("HEAD~1", 400)):
+        with pytest.raises(HTTPException) as ei:
+            _as(OWNER, _revert_dev("bpa", commit=commit))
+        assert ei.value.status_code == code, commit
+    assert "dev" in ei.value.detail or "commit id" in ei.value.detail
+    assert _main_tip(env, "bpa") == before, "nothing moved through any of that"
+
+
+def test_a_dev_revert_that_cannot_reproduce_the_version_changes_nothing(
+    env, tmp_path, deployed, monkeypatch
+):
+    """Fail loudly, and leave main exactly where it was — a half-applied revert
+    is a version nobody chose."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "file.txt", "good\n", "the good version")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    good = _main_tip(env, "bpa")
+    deployed[("bpa", "dev")] = [good]
+    _advance_main(env, tmp_path, "bpa", ["broken\n"])
+    before = _main_tip(env, "bpa")
+
+    real = copies.call_git_command_with_output
+
+    async def _break_the_commit(*args, **kwargs):
+        if "commit" in args and "-m" in args:
+            return "", "disk on fire", 1
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(copies, "call_git_command_with_output", _break_the_commit)
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _revert_dev("bpa", commit=good))
+    assert ei.value.status_code == 500
+    monkeypatch.undo()
+    assert _main_tip(env, "bpa") == before
+    assert (
+        _read(os.path.join(env["copies_dir"], "main", "bpa", "file.txt")) == "broken\n"
+    ), "main's checkout was put back too"
+
+
+# ── publishing over main ────────────────────────────────────────────────────
+#
+# The second way out of a blocked Deploy. A specifically designed REBASE, not a
+# snapshot: my commits are replayed onto main's tip and survive individually,
+# main's own commits stay reachable underneath, and main's untouched additions
+# are kept. The alternative — "make main exactly my version" — is the same
+# restore-commit helper the adopts use, and it is a separate, explicit choice.
+
+
+def _deploy_over(copy, **kw):
+    from app.routes.copies import DeployOverMainRequest
+
+    return lambda: copies.deploy_over_main(copy, DeployOverMainRequest(**kw))
+
+
+def _main_and_mine_diverge(env, tmp_path, alice):
+    """alice edits `shared.txt` her way; main edits the same line the other way
+    AND adds a file alice never touched. The classic blocked Deploy."""
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "shared.txt", "base\n", "the shared file")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    _commit(clone, "shared.txt", "MINE\n", "I change the shared file")
+    _commit(clone, "mine-only.txt", "mine\n", "and add one of my own")
+
+    other = tmp_path / "colleague"
+    _git("clone", "-q", env["bares"]["bpa"], str(other))
+    _commit(str(other), "shared.txt", "THEIRS\n", "a colleague changes the same line")
+    _commit(str(other), "theirs-only.txt", "theirs\n", "and adds a file of their own")
+    asyncio.run(bp_git.publish_main_from_clone(str(other), "bpa"))
+    return clone
+
+
+def test_publishing_over_main_resolves_conflicts_in_my_favour_not_mains(env, tmp_path):
+    """WHOSE SIDE WINS, and the git incantation for it is the opposite of the
+    intuition.
+
+    A rebase checks out the UPSTREAM and replays your commits onto it, so
+    during the replay "ours" is MAIN and "theirs" is the commit being replayed —
+    mine. `-X ours` would therefore have published main's version of every
+    conflicting line under a button that promised the opposite, and nothing
+    but the file content would have shown it. This test is the proof: the
+    conflicting line ends up as MINE, and specifically not as main's.
+    """
+    alice = env["user_copy"]("alice")
+    _main_and_mine_diverge(env, tmp_path, alice)
+
+    res = _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+
+    assert res.status == "success" and res.method == "rebase"
+    published = _git("-C", env["bares"]["bpa"], "show", "main:shared.txt").stdout
+    assert published == "MINE\n"
+    assert published != "THEIRS\n"
+
+
+def test_publishing_over_main_keeps_what_main_added_and_i_never_touched(env, tmp_path):
+    """ "Overwriting main" means my version wins where we both touched
+    something — NOT that a colleague's unrelated file disappears. The dialog
+    says so, so it had better be true."""
+    alice = env["user_copy"]("alice")
+    clone = _main_and_mine_diverge(env, tmp_path, alice)
+
+    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+
+    assert (
+        _git("-C", env["bares"]["bpa"], "show", "main:theirs-only.txt").stdout
+        == "theirs\n"
+    )
+    assert _read(os.path.join(clone, "theirs-only.txt")) == "theirs\n"
+    assert _read(os.path.join(clone, "mine-only.txt")) == "mine\n"
+
+
+def test_publishing_over_main_keeps_my_commits_individually(env, tmp_path):
+    """A rebase, not a squash. Discarding history nobody asked to discard is
+    not something to do on a user's behalf, so each of my commits arrives on
+    main as itself."""
+    alice = env["user_copy"]("alice")
+    _main_and_mine_diverge(env, tmp_path, alice)
+
+    res = _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+
+    subjects = [c["subject"] for c in res.replayed]
+    assert subjects == [
+        "and add one of my own",
+        "I change the shared file",
+    ], "both of my commits, each still itself"
+    on_main = _git(
+        "-C", env["bares"]["bpa"], "log", "-2", "--format=%s", "refs/heads/main"
+    ).stdout.split("\n")
+    assert on_main[:2] == subjects
+
+
+def test_publishing_over_main_leaves_mains_own_commits_reachable(env, tmp_path):
+    """Forward-only, like everything else that touches main: the colleague's
+    commits are underneath mine, not gone."""
+    alice = env["user_copy"]("alice")
+    _main_and_mine_diverge(env, tmp_path, alice)
+    main_before = _main_tip(env, "bpa")
+
+    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+
+    assert (
+        _git(
+            "-C",
+            env["bares"]["bpa"],
+            "merge-base",
+            "--is-ancestor",
+            main_before,
+            "refs/heads/main",
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def test_publishing_over_main_leaves_my_copy_level_with_main(env, tmp_path):
+    """Afterwards there is nothing left to do: 0 ahead, 0 behind."""
+    alice = env["user_copy"]("alice")
+    clone = _main_and_mine_diverge(env, tmp_path, alice)
+
+    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+
+    assert _ahead_behind(clone, env["bares"]["bpa"]) == (0, 0)
+    assert _head(clone) == _main_tip(env, "bpa")
+    assert _head(env["bares"]["bpa"], "refs/heads/alice") == _main_tip(env, "bpa")
+
+
+def test_publishing_over_main_names_who_it_supersedes(env, tmp_path):
+    """The confirm dialog is built from this: short sha, subject, and AUTHOR,
+    because the commits being gone over are colleagues' work and a button that
+    hides that cannot be consented to."""
+    alice = env["user_copy"]("alice")
+    _main_and_mine_diverge(env, tmp_path, alice)
+
+    preview = asyncio.run(copies.get_deploy_over_main_preview("alice", bp="bpa"))
+
+    assert preview["blocked"] is True
+    assert [c["subject"] for c in preview["superseded"]] == [
+        "and adds a file of their own",
+        "a colleague changes the same line",
+    ]
+    assert all(c["author"] for c in preview["superseded"])
+    assert [c["subject"] for c in preview["mine"]] == [
+        "and add one of my own",
+        "I change the shared file",
+    ]
+    assert preview["main"] == _main_tip(env, "bpa")
+
+
+def test_publishing_over_main_refuses_when_main_moved_since_the_dialog(env, tmp_path):
+    """The dialog named specific commits and their authors. If main moved after
+    that, the user consented to superseding a different set of people's work —
+    so this is a 409 and nothing is changed."""
+    alice = env["user_copy"]("alice")
+    clone = _main_and_mine_diverge(env, tmp_path, alice)
+    stale = _head(clone)  # emphatically not main's tip
+    before = _main_tip(env, "bpa")
+
+    with pytest.raises(HTTPException) as ei:
+        _as(
+            OWNER,
+            _deploy_over("alice", bp="bpa", mode="rebase", expected_main=stale),
+        )
+
+    assert ei.value.status_code == 409
+    assert _main_tip(env, "bpa") == before
+    assert _head(clone) == stale
+
+
+def test_a_conflict_no_rule_can_decide_changes_nothing_at_all(env, tmp_path):
+    """ "My side wins" is not an answer when one side DELETED the file and the
+    other edited it — there is no hunk to prefer. So it aborts, changes nothing
+    anywhere, and hands off to the coding agent exactly as a blocked Sync
+    does."""
+    alice = env["user_copy"]("alice")
+    clone = os.path.join(alice, "bpa")
+    _commit(clone, "shared.txt", "base\n", "the shared file")
+    asyncio.run(bp_git.publish_main_from_clone(clone, "bpa"))
+    _git("rm", "-q", "shared.txt", cwd=clone)
+    _git("commit", "-qm", "I delete it", cwd=clone)
+    mine_before = _head(clone)
+    alice_ref_before = _head(env["bares"]["bpa"], "refs/heads/alice")
+
+    other = tmp_path / "colleague"
+    _git("clone", "-q", env["bares"]["bpa"], str(other))
+    _commit(str(other), "shared.txt", "THEIRS\n", "a colleague edits it")
+    asyncio.run(bp_git.publish_main_from_clone(str(other), "bpa"))
+    main_before = _main_tip(env, "bpa")
+
+    res = _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+
+    assert res.status == "needs_rebase"
+    assert "coding agent" in res.message
+    assert _head(clone) == mine_before, "my copy is untouched"
+    assert _main_tip(env, "bpa") == main_before, "main is untouched"
+    assert _head(env["bares"]["bpa"], "refs/heads/alice") == alice_ref_before
+    assert not os.path.isdir(os.path.join(clone, ".git", "rebase-merge"))
+    assert not os.path.exists(os.path.join(clone, "shared.txt"))
+
+
+def test_making_main_exactly_my_version_reproduces_my_tree_byte_for_byte(env, tmp_path):
+    """The other option in the dialog, and it means what it says: main ends up
+    holding exactly what my copy held — the colleague's untouched additions
+    included in the loss."""
+    alice = env["user_copy"]("alice")
+    clone = _main_and_mine_diverge(env, tmp_path, alice)
+    my_tree_before = _tree(clone)
+
+    res = _as(OWNER, _deploy_over("alice", bp="bpa", mode="exact", deployer=OWNER))
+
+    assert res.method == "exact"
+    assert _tree(env["bares"]["bpa"], "refs/heads/main") == my_tree_before
+    assert not os.path.exists(os.path.join(clone, "theirs-only.txt"))
+    assert _ahead_behind(clone, env["bares"]["bpa"]) == (0, 0)
+    # Still forward-only: one commit on top of what main had.
+    assert (
+        _git(
+            "-C",
+            env["bares"]["bpa"],
+            "rev-list",
+            "--count",
+            f"{res.superseded[0]['sha']}..refs/heads/main",
+        ).stdout.strip()
+        == "1"
+    )
+
+
+def test_publishing_over_main_twice_is_an_ordinary_deploy_the_second_time(
+    env, tmp_path
+):
+    """Nothing left to supersede, so it stops being the dangerous button and
+    behaves as Deploy does."""
+    alice = env["user_copy"]("alice")
+    _main_and_mine_diverge(env, tmp_path, alice)
+    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    main_after_first = _main_tip(env, "bpa")
+
+    second = _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+
+    assert second.status == "success"
+    assert second.method == "noop"
+    assert second.superseded == []
+    assert _main_tip(env, "bpa") == main_after_first
+
+
+def test_publishing_over_main_requires_the_owner_and_refuses_an_experiment(env):
+    env["user_copy"]("alice")
+    env["experiment"]("exp-try-ab12", "alice", bps=["bpa"])
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OTHER, _deploy_over("alice", bp="bpa"))
+    assert ei.value.status_code == 403
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _deploy_over("exp-try-ab12", bp="bpa"))
+    assert ei.value.status_code == 400
+    assert "Experiments merge back" in ei.value.detail
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _deploy_over("alice", bp="bpa", mode="squash"))
+    assert ei.value.status_code == 400
+    assert "Invalid mode" in ei.value.detail
+
+
+def test_publishing_over_main_touches_no_other_business_process(env, tmp_path):
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpb"), "file.txt", "my-bpb\n", "alice bpb")
+    before = _git(
+        "-C", env["bares"]["bpb"], "for-each-ref", "--format=%(refname) %(objectname)"
+    ).stdout
+    _main_and_mine_diverge(env, tmp_path, alice)
+
+    _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+
+    after = _git(
+        "-C", env["bares"]["bpb"], "for-each-ref", "--format=%(refname) %(objectname)"
+    ).stdout
+    assert before == after
+
+
 # ── sync guard ──────────────────────────────────────────────────────────────
 
 
