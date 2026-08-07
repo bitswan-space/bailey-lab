@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from app.dependencies import get_automation_service
 from app.deploy_runner import spawn_set_deploy
 from app.event_broadcaster import event_broadcaster
+from app.routes.copies import assert_copy_can_hold_bp
 from app.services.process_service import process_service, slugify_bp_name
 from app.services import template_service
 from app.services.automation_service import AutomationService
@@ -177,6 +178,10 @@ async def create_process(
             raise HTTPException(
                 status_code=400, detail=f"copy '{body.copy}' does not exist"
             )
+        # An experiment is a side branch of ONE business process (see
+        # app.routes.copies): it can no more gain a brand-new one than it can
+        # materialize an existing one. 409 with the copy to do it in.
+        assert_copy_can_hold_bp(body.copy, name, copy_path=copy_root)
     try:
         entry = await process_service.create_business_process(
             name=name, created_by=body.created_by
@@ -315,6 +320,11 @@ async def create_process_from_bundle(
         copy_root = os.path.join(os.environ.get("BITSWAN_COPIES_DIR", "/copies"), copy)
         if not os.path.isdir(copy_root):
             raise HTTPException(status_code=400, detail=f"copy '{copy}' does not exist")
+        # Same rule as a hand-created business process: an experiment holds the
+        # one process it is about and no other.
+        assert_copy_can_hold_bp(
+            copy, name or "this business process", copy_path=copy_root
+        )
 
     # Buffer with a hard cap — a bundle that big is not a source-only bundle.
     data = bytearray()
