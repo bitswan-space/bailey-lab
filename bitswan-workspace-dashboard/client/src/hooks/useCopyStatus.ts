@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useCopies, useCopyRefsMoved } from '@/components/workspace/WorkspaceProvider';
+import { useCopyRefsMoved } from '@/components/workspace/WorkspaceProvider';
 import { api, errorMessage, type ChangedFile } from '@/lib/api';
 import { SessionExpiredError } from '@/lib/session';
 
@@ -60,7 +60,11 @@ export function useCopyStatus(copy: string, nonce = 0): Result {
   const copyRef = useRef(copy);
   copyRef.current = copy;
 
-  const { copies: copiesSnapshot } = useCopies();
+  // Deliberately NOT subscribed to the `copies` SSE snapshot. What is
+  // uncommitted in MY copy changes when I edit it or when one of my own
+  // actions moves its refs — never because somebody else pushed. Watching
+  // every git event in the workspace would re-read this on every event of a
+  // deploy, and each read walks every business process's clone server-side.
   const { copyRefsMoved } = useCopyRefsMoved();
 
   const refresh = useCallback(async () => {
@@ -113,7 +117,7 @@ export function useCopyStatus(copy: string, nonce = 0): Result {
   }, [copyRefsMoved]);
   useEffect(() => {
     void refresh();
-  }, [refresh, copiesSnapshot, copyRefsMoved, nonce]);
+  }, [refresh, copyRefsMoved, nonce]);
 
   useEffect(() => {
     const onFocus = () => void refresh();
