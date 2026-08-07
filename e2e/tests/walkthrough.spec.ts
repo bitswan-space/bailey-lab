@@ -17,10 +17,16 @@
  * Everything else about copies lives behind the far-right "Advanced" menu:
  * "See a colleague's version" (their copy — or, expanded, one of their
  * experiments — under an amber "You are viewing …" banner with one click back)
- * and "Experiments" — throwaway branches OFF YOUR OWN copy that you either
- * merge back into it or discard. In your own experiment a green banner says so
- * and carries exactly those two ways out; merging back AUTO-DISCARDS the
- * experiment and lands you on your own copy.
+ * and "Experiments on <business process>" — throwaway branches OFF YOUR OWN
+ * copy that you either merge back into it or discard. In your own experiment a
+ * green banner says so and carries exactly those two ways out; merging back
+ * AUTO-DISCARDS the experiment and lands you on your own copy.
+ *
+ * A COPY AND AN EXPERIMENT ARE DIFFERENT SHAPES. A copy is a person's
+ * WORKSPACE-WIDE environment; an experiment belongs to exactly ONE business
+ * process (each is its own git repository). So the menu's experiment section is
+ * scoped to the process on screen, its empty state names that process, and the
+ * green banner names it too.
  *
  * THE PIPELINE. Description › Coding Agent ↻ Requirements › Deploy all happen
  * inside the copy; Deployments sits outside it (main's shared area). Two tabs
@@ -797,7 +803,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       'the Advanced menu never listed the colleague-view section',
     ).toBeVisible({ timeout: SLA });
     await expect(
-      d.getByText(/^Experiments$/i).first(),
+      d.getByText(/^Experiments( on .+)?$/i).first(),
       'the Advanced menu never listed the Experiments section',
     ).toBeVisible({ timeout: SLA });
     // ---- The colleague view, as this cast actually stands -------------------
@@ -822,9 +828,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       d.getByRole('button', { name: /Start a new experiment/i }).first(),
       'the Advanced menu never offered "Start a new experiment" (the signed-in user never got their own copy)',
     ).toBeVisible({ timeout: SLA });
+    // Experiments belong to a BUSINESS PROCESS (a copy is workspace-wide, an
+    // experiment is not), so the section is scoped to the one on screen — and
+    // at this point in the story the workspace has none at all: it is created
+    // in the next chapter. The honest state is therefore the product saying
+    // what it needs, and that is what we assert. The per-process heading and
+    // its "No experiments on <process>" empty state are asserted in the
+    // `experiment` chapter, where a business process exists.
     await expect(
-      d.getByText(/You have no experiments running/i).first(),
-      'the Experiments section listed an experiment before the walkthrough started one',
+      d.getByText(/Select a business process to see its experiments/i).first(),
+      'the Experiments section did not explain that it needs a business process (the workspace has none yet, so it cannot list experiments "on" anything)',
     ).toBeVisible({ timeout: SLA });
     await capture(dashPage, 'advanced-menu');
     await dashPage.keyboard.press('Escape');
@@ -1587,6 +1600,19 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // something out looks at the spec; do the same.
     await clickTopTab(/Description/i);
     await d.getByRole('button', { name: /^Advanced$/ }).first().click();
+    // NOW there is a business process, so the section says which one it is
+    // about — and its empty state is "no experiments ON THAT", not a general
+    // "you have none". An experiment belongs to exactly one business process
+    // (each is its own git repository), so "none" is only ever true of
+    // something.
+    await expect(
+      d.getByText(new RegExp(`^Experiments on ${BP.title}$`, 'i')).first(),
+      'the Advanced menu did not scope its Experiments section to the business process on screen',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      d.getByText(new RegExp(`^No experiments on ${BP.title}\\.?$`, 'i')).first(),
+      `the Experiments section listed an experiment on ${BP.title} before the walkthrough started one`,
+    ).toBeVisible({ timeout: SLA });
     // The "Start a new experiment" row under the menu's Experiments section.
     // Accept either widget role: a popover renders its rows as buttons, a
     // dropdown as menuitems — the row a human clicks is the same either way.
@@ -1630,6 +1656,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       expBanner(),
       'the experiment banner does not name the experiment by the title we gave it',
     ).toContainText(EXPERIMENT_TITLE, { timeout: SLA });
+    // …and it names the BUSINESS PROCESS the experiment is on. An experiment
+    // belongs to exactly one (each process is its own repository), so "which
+    // one" is part of where you are, not a detail: without it the banner
+    // described an experiment that could have been about anything.
+    await expect(
+      expBanner(),
+      'the experiment banner does not name the business process the experiment is on',
+    ).toContainText(BP.title, { timeout: SLA });
     // An experiment merges back into its parent copy and NEVER into main, so the
     // Deploy step is absent from the pipeline in here (TopNav omits DEPLOY_STEP
     // when the copy in view is one of your own experiments). This is the
@@ -1709,7 +1743,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // and turns a real wait into a stuck one). Bounded; fatal if it never clears
     // — an experiment that survives its own merge is the bug this flow exists to
     // avoid.
-    const noExperiments = d.getByText(/You have no experiments running/i).first();
+    // The empty state is per business process now — "no experiments on
+    // <process>" — because that is the only place an experiment can be listed.
+    const noExperiments = d
+      .getByText(new RegExp(`^No experiments on ${BP.title}\\.?$`, 'i'))
+      .first();
     const advanced = () => d.getByRole('button', { name: /^Advanced$/ }).first();
     let discarded = false;
     const discardDeadline = Date.now() + 8 * 60_000;
