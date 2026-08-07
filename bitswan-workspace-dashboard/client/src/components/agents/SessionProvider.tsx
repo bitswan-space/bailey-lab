@@ -19,12 +19,17 @@ import { SessionTerminal } from './SessionTerminal';
  * users can switch between Deployments / a different copy / a different BP
  * without losing their live agent sessions — there is no remount.
  *
- * The canned flows (sync, write-tests, build-automation) don't get sessions
- * of their own: `sendPrompt` types their prompt into the scope's running
- * session, and only starts one (seeded with that prompt) when none is
+ * The canned flows (sync, merge-parent, write-tests, build-automation) don't
+ * get sessions of their own: `sendPrompt` types their prompt into the scope's
+ * running session, and only starts one (seeded with that prompt) when none is
  * running.
  */
-export type SessionKind = 'claude' | 'sync' | 'write-tests' | 'automation';
+export type SessionKind =
+  | 'claude'
+  | 'sync'
+  | 'merge-parent'
+  | 'write-tests'
+  | 'automation';
 
 /** Kinds that carry a canned prompt — plain 'claude' sessions have none
  *  (their standing guidance is the CLAUDE.md baked into the agent image). */
@@ -41,6 +46,10 @@ export interface ActiveSession {
    * so this is always 'claude' for them.
    */
   kind: SessionKind;
+  /** The branch a 'merge-parent' session rebases onto — the experiment's
+   *  parent copy. The canned prompt is parameterized by it (the sync prompt's
+   *  base is always main, this one's never is). */
+  parent?: string;
   startedAt: number;
   /** True when started via Resume (claude --resume <uuid>). */
   resume: boolean;
@@ -72,15 +81,32 @@ interface SessionsContextValue {
    * prompt). No-op when one is already live — returns the running session's
    * id in that case.
    */
-  startSession(copy: string, bp: string, kind?: SessionKind): string;
+  startSession(
+    copy: string,
+    bp: string,
+    kind?: SessionKind,
+    parent?: string,
+  ): string;
   /** Re-attach to an existing conversation (dtach socket / claude --resume). */
   resumeSession(copy: string, bp: string, claudeSessionId: string): string;
   /**
    * Hand a canned prompt to the scope's agent: typed (and submitted) into
    * the running session's terminal, or — when nothing is running — used to
-   * seed a fresh session.
+   * seed a fresh session. `parent` parameterizes the prompts that rebase onto
+   * something other than main (merge-parent).
    */
-  sendPrompt(copy: string, bp: string, kind: CannedPromptKind): Promise<void>;
+  sendPrompt(
+    copy: string,
+    bp: string,
+    kind: CannedPromptKind,
+    parent?: string,
+  ): Promise<void>;
+  /**
+   * Hand the merge-back conflict to the coding agent running ON THE
+   * EXPERIMENT: it rebases the experiment onto `parent`, after which the
+   * merge fast-forwards.
+   */
+  startMergeBackSession(copy: string, bp: string, parent: string): Promise<void>;
 
   /** Called by SessionTerminal when its WS closes. */
   markExited(id: string, exitCode?: number): void;
@@ -190,7 +216,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const startSession = useCallback(
-    (copy: string, bp: string, kind: SessionKind = 'claude') => {
+    (copy: string, bp: string, kind: SessionKind = 'claude', parent?: string) => {
       const key = scopeKey({ copy, bp });
       const existing = sessionsRef.current[key];
       if (existing) return existing.id;
@@ -202,6 +228,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           copy,
           bp,
           kind,
+          ...(parent === undefined ? {} : { parent }),
           startedAt: Date.now(),
           resume: false,
         },
@@ -233,16 +260,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const sendPrompt = useCallback(
-    async (copy: string, bp: string, kind: CannedPromptKind) => {
+    async (copy: string, bp: string, kind: CannedPromptKind, parent?: string) => {
       const key = scopeKey({ copy, bp });
       const live = sessionsRef.current[key];
       if (!live) {
         // Nothing running: seed a fresh conversation with the prompt (the
         // server embeds it into the launch command).
-        startSession(copy, bp, kind);
+        startSession(copy, bp, kind, parent);
         return;
       }
-      const params = new URLSearchParams({ copy, bp, kind });
+      const params = new URLSearchParams({
+        copy,
+        bp,
+        kind,
+        ...(parent ? { parent } : {}),
+      });
       const r = await fetch(`/api/coding-agent/prompt?${params.toString()}`, {
         credentials: 'include',
         cache: 'no-store',
@@ -262,6 +294,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       pendingPromptsRef.current.set(key, queue);
     },
     [startSession],
+  );
+
+  const startMergeBackSession = useCallback(
+    (copy: string, bp: string, parent: string) =>
+      sendPrompt(copy, bp, 'merge-parent', parent),
+    [sendPrompt],
   );
 
   const registerWriter = useCallback(
@@ -355,6 +393,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       startSession,
       resumeSession,
       sendPrompt,
+      startMergeBackSession,
       markExited,
       onExit,
       currentScope,
@@ -366,6 +405,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       startSession,
       resumeSession,
       sendPrompt,
+      startMergeBackSession,
       markExited,
       onExit,
       currentScope,
@@ -446,6 +486,7 @@ function SessionsLayer({
               bp={s.bp}
               sessionId={s.id}
               kind={s.kind}
+              {...(s.parent ? { parent: s.parent } : {})}
               resume={s.resume}
               hidden={!visible}
               onExit={(info) => markExited(s.id, info.code)}

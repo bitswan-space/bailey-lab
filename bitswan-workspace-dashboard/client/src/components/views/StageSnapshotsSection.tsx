@@ -170,7 +170,6 @@ export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSe
   }, [refresh, watchTask, reloadKey]);
 
 
-  const bpSlug = data?.bp ?? bp.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
   const eligibility = data?.eligibility;
   const enabledStages = useMemo(
     () => SNAPSHOT_STAGES.filter((s) => eligibility?.stages?.[s]?.registered),

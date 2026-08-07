@@ -86,6 +86,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { useBpLabel } from '@/hooks/useBpLabel';
 import { cn } from '@/lib/utils';
 import { RelativeTime } from '@/components/shared/RelativeTime';
 import { formatAbsolute, formatRelative } from '@/lib/format-date';
@@ -1375,6 +1376,10 @@ function InspectModal({
   onClose: () => void;
   onScaled: () => void;
 }) {
+  // `bp` here is the DIRECTORY slug (this modal is addressed by identifier).
+  // Anything a person reads goes through the label.
+  const bpLabel = useBpLabel();
+  const label = bpLabel(bp);
   const isCurrent = !!current && entry.commit === current.commit;
   const [panel, setPanel] = useUrlEnum(
     'panel',
@@ -1479,8 +1484,8 @@ function InspectModal({
     setScaling(true);
     const work = api.bpScale(bp, stage, replicas);
     toast.promise(work, {
-      loading: `Scaling ${bp} to ${replicas}…`,
-      success: `${bp} scaled to ${replicas} replica${replicas === 1 ? '' : 's'}`,
+      loading: `Scaling ${label} to ${replicas}…`,
+      success: `${label} scaled to ${replicas} replica${replicas === 1 ? '' : 's'}`,
       error: (e: unknown) => `Scale failed: ${String(e)}`,
     });
     try {
@@ -1559,7 +1564,7 @@ function InspectModal({
           <div className="min-h-0 flex-1 overflow-auto">
             {panel === 'diff' ? (
               <DiffView
-                path={`${bp} — ${short(entry.source_commit, 7)} vs current`}
+                path={`${label} — ${short(entry.source_commit, 7)} vs current`}
                 diff={diff || (diffLoading ? '' : 'No changes.')}
                 loading={diffLoading}
               />
@@ -1605,8 +1610,14 @@ function InspectModal({
                 <aside className="flex w-[240px] shrink-0 flex-col border-r border-border">
                   <div className="flex shrink-0 items-center gap-1.5 border-b border-border px-3 py-2">
                     <Folder className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">
-                      {bp}
+                    {/* A real directory in the source tree, so the slug is the
+                        truthful thing to print — but say that it is a
+                        directory, and title it with the process's name. */}
+                    <span
+                      className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground"
+                      title={label === bp ? undefined : `${label} (directory ${bp})`}
+                    >
+                      {bp}/
                     </span>
                     <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
                       {short(commit, 7)}
@@ -2167,7 +2178,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   const refresh = useCallback(() => setReloadKey((k) => k + 1), []);
 
   // A deploy finished somewhere — this tab's own actions call refresh()
-  // themselves, but a deploy started OUTSIDE it (Sync & Deploy on a copy,
+  // themselves, but a deploy started OUTSIDE it (Deploy on a copy,
   // another browser tab, the gitops API) used to leave the stage cards stale
   // until a manual page reload. `deploy_progress` terminal events flow over
   // the shared SSE feed; refetch when the finished deploy concerns this BP.
@@ -2341,7 +2352,8 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
       const ver = short(entry.source_commit ?? entry.commit, 8);
       // Rollback restores the whole bitswan.yaml at this commit (deploy, secret,
       // etc. all restore the same way); only the role-gated firewall path differs.
-      const what = isFw ? 'firewall rules' : bp.name;
+      // Prose, so it reads as the other branch does — a process's NAME.
+      const what = isFw ? 'firewall rules' : bp.displayName;
       setBusy(true);
       const work = api.bpRollback(
         bp.name,
@@ -2385,9 +2397,9 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         await promoteBpWithToast({
           bp: bp.name,
           stage: target,
-          loading: `Promoting ${bp.name} to ${target}…`,
-          success: `${bp.name} promoted to ${target}`,
-          failurePrefix: `Failed to promote ${bp.name} to ${target}`,
+          loading: `Promoting ${bp.displayName} to ${target}…`,
+          success: `${bp.displayName} promoted to ${target}`,
+          failurePrefix: `Failed to promote ${bp.displayName} to ${target}`,
           // Keep the failure on screen for the target stage, not just a toast.
           // (The promote keeps polling after this tab unmounts — the toast/
           // activity log carries it from there, so skip the state write.)
@@ -2400,7 +2412,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         // UNEXPECTED throw — which must still surface (and must not leave the
         // pill spinning forever, see finally).
         const msg = String(err);
-        toast.error(`Failed to promote ${bp.name} to ${target}: ${msg}`);
+        toast.error(`Failed to promote ${bp.displayName} to ${target}: ${msg}`);
         if (mountedRef.current) setDeployError({ stage: target, msg });
       } finally {
         promotingRef.current = false;
@@ -2614,7 +2626,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
               Automation
             </div>
             <div className="text-[18px] font-semibold tracking-tight text-foreground">
-              {bp.name}
+              {bp.displayName}
             </div>
             <div className="mt-0.5 text-[13px] text-muted-foreground">
               {bpContainerCount} container{bpContainerCount === 1 ? '' : 's'} promote together.
@@ -2979,7 +2991,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   <div className="mt-2 font-semibold text-foreground">Not deployed yet</div>
                   <div className="mt-1">
                     {activeStage === 'dev'
-                      ? 'Deploy from Sync & Deploy to start a history.'
+                      ? 'Deploy from the Deploy tab to start a history.'
                       : 'Promote from a previous stage to start a deployment history.'}
                   </div>
                 </div>
@@ -3085,7 +3097,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             <AlertDialogDescription>
               {confirm?.source === 'firewall' ? (
                 <>
-                  The egress allow-list for <span className="font-mono">{bp.name}</span> at{' '}
+                  The egress allow-list for <strong>{bp.displayName}</strong> at{' '}
                   {STAGE_LABEL[activeStage]} will be restored to{' '}
                   <span className="font-mono">{short(confirm?.commit, 8)}</span> (
                   {confirm?.firewall?.allowed ?? 0} allowed · {confirm?.firewall?.denied ?? 0} denied)
@@ -3093,7 +3105,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 </>
               ) : (
                 <>
-                  All containers in <span className="font-mono">{bp.name}</span> at{' '}
+                  All containers in <strong>{bp.displayName}</strong> at{' '}
                   {STAGE_LABEL[activeStage]} will be redeployed together to{' '}
                   <span className="font-mono">{short(confirm?.source_commit ?? confirm?.commit, 8)}</span> (
                   {confirm ? Object.keys(confirm.members ?? {}).length : 0} container(s)).
@@ -3116,7 +3128,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Make Disaster Recovery the live Production?</AlertDialogTitle>
             <AlertDialogDescription>
-              Production traffic for <span className="font-mono">{bp.name}</span> will switch to the
+              Production traffic for <strong>{bp.displayName}</strong> will switch to the
               standby (Disaster Recovery) slot, and the current Production becomes the new standby.
               This is an <strong>ingress cutover plus a state flip</strong> — no data is moved and
               nothing is rebuilt. Verify the DR environment first; you can switch straight back.

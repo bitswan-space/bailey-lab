@@ -4,6 +4,7 @@ import { toast } from '@/lib/notify';
 import { api, type CveSeverity, type SupplyChainReport } from '@/lib/api';
 import { SessionExpiredError } from '@/lib/session';
 import { useSupplyChainTick } from '@/components/workspace/WorkspaceProvider';
+import { useBpLabel } from '@/hooks/useBpLabel';
 import { cn } from '@/lib/utils';
 import { RelativeTime } from '@/components/shared/RelativeTime';
 import { formatRelative } from '@/lib/format-date';
@@ -66,6 +67,8 @@ export function SupplyChainPanel({
    *  it's the to-be-built image, not a deployed one). */
   intro?: React.ReactNode;
 }) {
+  // Business processes are shown by NAME; `bp` here is the directory slug.
+  const bpLabel = useBpLabel();
   const [report, setReport] = useState<SupplyChainReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -216,7 +219,7 @@ export function SupplyChainPanel({
       <div className="flex flex-col items-center gap-3 px-3 py-12 text-center">
         <AlertTriangle className="size-7 text-muted-foreground" aria-hidden />
         <div className="max-w-md text-[13px] text-muted-foreground">
-          Couldn’t build or scan the image for {bp}.
+          Couldn’t build or scan the image for {bpLabel(bp)}.
         </div>
         <pre className="max-w-md overflow-auto whitespace-pre-wrap rounded bg-muted px-3 py-2 text-left text-[11px] text-muted-foreground">
           {error}
@@ -268,7 +271,7 @@ export function SupplyChainPanel({
               Packages in the image{report.image_count > 1 ? 's' : ''} deployed to {stageLabel} and
               known vulnerabilities (CVEs) against them.{' '}
               {readOnly
-                ? 'Out-of-scope decisions are made from Sync & Deploy → Supply Chain Security and ship with the code.'
+                ? 'Out-of-scope decisions are made from Deploy → Supply Chain Security and ship with the code.'
                 : 'Click a CVE to view it or mark it out of scope.'}
             </>
           )}
@@ -459,7 +462,7 @@ export function SupplyChainPanel({
                   <p className="text-[12px] leading-relaxed text-muted-foreground">
                     Excludes this CVE from the risk rollup. The decision is saved in the source tree
                     (<code>cve-waivers.yaml</code>) with your justification and name, and ships to all
-                    stages on Sync &amp; Deploy.
+                    stages on Deploy.
                   </p>
                   <textarea
                     value={comment}

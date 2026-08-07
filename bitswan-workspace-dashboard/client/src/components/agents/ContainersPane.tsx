@@ -14,6 +14,7 @@ import { toast } from '@/lib/notify';
 import { api } from '@/lib/api';
 import { deployBpWithToast } from '@/lib/deployBp';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
+import { useBpLabel } from '@/hooks/useBpLabel';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { BuildLogsPane } from '@/components/automations/inspect/BuildLogsPane';
@@ -64,6 +65,9 @@ const EXPLORER_PARAMS = {
 
 export function ContainersPane({ bp, copy, active }: Props) {
   const { automations } = useAutomations();
+  // `bp` is the DIRECTORY slug (it is a path segment here). The chip below is
+  // literally labelled "Business process", so it must print the name.
+  const label = useBpLabel()(bp);
 
   const containers = useMemo<Container[]>(() => {
     const prefix = `copies/${copy}/${bp}/`;
@@ -183,7 +187,9 @@ export function ContainersPane({ bp, copy, active }: Props) {
       <div className="flex shrink-0 items-center gap-3 border-b border-border bg-background px-4 py-2">
         <span className="truncate text-[11px] text-muted-foreground">
           <span className="font-semibold uppercase tracking-wide">Business process</span>{' '}
-          <span className="font-mono text-foreground">{bp}</span>
+          <span className="text-foreground" title={label === bp ? undefined : `Directory: ${bp}`}>
+              {label}
+            </span>
         </span>
         <button
           type="button"

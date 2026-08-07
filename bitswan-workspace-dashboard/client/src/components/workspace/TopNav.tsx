@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
+  ArrowDownToLine,
   Bot,
   CheckSquare,
   ChevronRight,
@@ -11,12 +12,13 @@ import {
   ShieldCheck,
   type LucideIcon,
 } from 'lucide-react';
+import { AdvancedMenu } from '@/components/workspace/AdvancedMenu';
 import { BpSelector } from '@/components/workspace/BpSelector';
-import { CopySelector } from '@/components/workspace/CopySelector';
 import { DeleteBusinessProcessDialog } from '@/components/workspace/DeleteBusinessProcessDialog';
 import { NewBusinessProcessDialog } from '@/components/workspace/NewBusinessProcessDialog';
 import { RenameBusinessProcessDialog } from '@/components/workspace/RenameBusinessProcessDialog';
-import { api } from '@/lib/api';
+import { api, errorMessage } from '@/lib/api';
+import { toast } from '@/lib/notify';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
 
@@ -45,16 +47,31 @@ interface TopNavProps {
   activeBpId: string | null;
   onSelectBp: (id: string) => void;
   onBpCreated: (name: string) => void;
+  /** A business process is being materialized into the copy in view (the id
+   *  while it runs, null when it settles). The shell shows an "adding…" body
+   *  instead of "this process isn't in this copy" while it's in flight —
+   *  routine inside an experiment, which only clones the one process it was
+   *  started on. */
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing in flight
+  onAddingBpChange?: (bp: string | null) => void;
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
   copy: string | null;
   copies: Copy[];
-  onSelectCopy: (name: string) => void;
-  onPullCopy: (name: string) => Promise<void>;
-  /** The signed-in user's own personal copy (delete-dialog note). */
+  /** Move to another copy WITH the interface locked until the destination is
+   *  fully renderable — the only way the chrome should ever change copy. */
+  onEnterCopy: (name: string, label: string, after?: () => Promise<void>) => void;
+  /** Start an experiment on a business process. Owned by the shell (it is a
+   *  copy transition, not a dialog's private business). */
+  onStartExperiment: (title: string, bp: BusinessProcess) => void;
+  /** The signed-in user's own personal copy. */
   // eslint-disable-next-line no-restricted-syntax -- null = not yet resolved
   myCopy: string | null;
-  /** A copy's delete was accepted — App moves the selection off it. */
-  onCopyDeleted: (name: string) => void;
+  /** Main has changes the user's own copy lacks — the Sync step leads the
+   *  pipeline while that holds, and is absent otherwise. */
+  syncVisible: boolean;
+  /** The copy in view is one of the user's own experiments: experiments merge
+   *  back into their parent copy, never into main, so Deploy is absent. */
+  isMyExperiment: boolean;
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
   role: Role;
@@ -72,8 +89,18 @@ interface FlowStep {
   needsCopy: boolean;
 }
 
-// The steps that happen INSIDE the copy — everything up to and including
-// Sync & Deploy. These live inside the "copy region" card in the top bar.
+// Pulling main's changes INTO the copy. Only ever the first step of the
+// pipeline, only on the user's own copy, and only while there is something to
+// pull — see `syncVisible`.
+const SYNC_STEP: FlowStep = {
+  id: 'sync',
+  label: 'Sync',
+  Icon: ArrowDownToLine,
+  needsCopy: true,
+};
+
+// The steps that always happen INSIDE the copy. These live inside the "copy
+// region" card in the top bar.
 const IN_COPY_STEPS: FlowStep[] = [
   { id: 'description', label: 'Description', Icon: FileText, needsCopy: false },
   { id: 'agent', label: 'Coding Agent', Icon: Bot, needsCopy: true },
@@ -83,11 +110,19 @@ const IN_COPY_STEPS: FlowStep[] = [
     Icon: CheckSquare,
     needsCopy: true,
   },
-  { id: 'sync-deploy', label: 'Sync & Deploy', Icon: Rocket, needsCopy: true },
 ];
 
+// The last step inside the copy: it publishes the copy's work to main. Absent
+// in an experiment, which merges back into its parent copy instead.
+const DEPLOY_STEP: FlowStep = {
+  id: 'deploy',
+  label: 'Deploy',
+  Icon: Rocket,
+  needsCopy: true,
+};
+
 // Deployments live in the shared MAIN area, not the copy — so it sits OUTSIDE
-// the copy card. Sync & Deploy is the boundary: it publishes the copy to main.
+// the copy card. Deploy is the boundary: it publishes the copy to main.
 const DEPLOYMENTS_STEP: FlowStep = {
   id: 'deployments',
   label: 'Deployments',
@@ -109,26 +144,34 @@ const GET_STARTED_STEP: FlowStep = {
  * The single top bar of the shell, in two sections that mirror where work
  * actually happens:
  *
- *   [ Process ] [ Automate ]   ┌ copy region ─────────────────────────────┐   → [ Deployments ]
- *                              │ [ Copy ] Description › Agent ↻ Reqs › Sync&Deploy │
- *                              └───────────────────────────────────────────┘
+ *   [ Get started ] │ [ Process ]  ┌ copy region ───────────────────────────┐  → [ Deployments ]   [ Advanced ] [ Role ]
+ *                                  │ (Sync ›) Description › Agent ↻ Reqs › Deploy │
+ *                                  └─────────────────────────────────────────┘
  *
- * The business process is the subject; the copy and every step up to Sync &
- * Deploy are wrapped in a card so it's visually clear they all happen inside
- * the chosen copy. Deployments sits outside — the deploy crosses into the
- * shared main area.
+ * The business process is the subject; every step up to Deploy is wrapped in a
+ * card so it's visually clear they all happen inside the copy you're in.
+ *
+ * The bar says NOTHING about which copy that is: the everyday answer is always
+ * "mine", so naming it in the chrome is noise. The exceptions announce
+ * themselves in a full-width banner under the bar instead (someone else's copy,
+ * or one of your experiments) and are switched between under Advanced.
+ *
+ * Deployments sits outside the card — the deploy crosses into the shared main
+ * area.
  */
 export function TopNav({
   bps,
   activeBpId,
   onSelectBp,
   onBpCreated,
+  onAddingBpChange,
   copy,
   copies,
-  onSelectCopy,
-  onPullCopy,
+  onEnterCopy,
+  onStartExperiment,
   myCopy,
-  onCopyDeleted,
+  syncVisible,
+  isMyExperiment,
   tab,
   onTab,
   role,
@@ -145,49 +188,108 @@ export function TopNav({
     () => bps.find((b) => b.id === activeBpId) ?? null,
     [bps, activeBpId],
   );
-  // BPs already in the selected copy — so the create dialog can reject dupes.
-  const copyBpNames = useMemo(
-    () =>
-      copy ? bps.filter((b) => b.copies.includes(copy)).map((b) => b.name) : [],
-    [bps, copy],
+  // Every business-process name on screen — the create dialog rejects dupes
+  // against this, not against the copy's contents. A BP name IS its repo
+  // (one repo per process, a branch per copy), so the namespace is
+  // workspace-wide: creating "orders" in a copy that doesn't happen to carry
+  // "orders" would collide with the existing repo. This used to filter by
+  // `b.copies.includes(copy)`, which was only ever right while every copy
+  // carried every process — inside an experiment (cloned with just the one
+  // process it was started on) that list is a single name, and the check would
+  // wave through a duplicate. Names living only in someone else's experiment
+  // are filtered out of `bps` and so aren't covered here — gitops is the
+  // authority on the collision either way; this is the fast, local answer.
+  const existingBpNames = useMemo(() => bps.map((b) => b.name), [bps]);
+
+  // The steps in view. Sync leads the pipeline only while main has something
+  // the user's own copy lacks; Deploy is absent inside an experiment.
+  const inCopySteps = useMemo(() => {
+    const steps: FlowStep[] = [];
+    if (syncVisible) steps.push(SYNC_STEP);
+    steps.push(...IN_COPY_STEPS);
+    if (!isMyExperiment) steps.push(DEPLOY_STEP);
+    return steps;
+  }, [syncVisible, isMyExperiment]);
+
+  const currentCopy = useMemo(
+    () => (copy ? (copies.find((c) => c.name === copy) ?? null) : null),
+    [copies, copy],
   );
 
-  // Picking a business process keeps the (BP, copy) selection consistent
-  // WITHOUT ever moving the user onto a colleague's copy: the user's own
-  // copy is the default home for every BP. If the current copy carries the
-  // BP, stay put. Otherwise land on the user's own copy — materializing the
-  // BP into it from main first when it isn't there yet (the same ensureBp
-  // flow behind the copy switcher's "+ from main" rows; BPs are created in
-  // main, so this covers processes other users created too). Another user's
-  // copy is only the last resort, for copy-only BPs that exist nowhere else.
+  // Picking a business process NEVER moves the user to another COPY — the copy
+  // in view is where they work. When it doesn't carry the process yet, clone it
+  // in (the ensureBp flow the old copy switcher used for its "+ from main"
+  // rows; processes are created in main, so this covers ones other people
+  // created).
+  //
+  // The one exception is an EXPERIMENT, and it is not really an exception: an
+  // experiment is a side branch of ONE business process, so another process is
+  // not something it can hold. gitops refuses to materialize one (409) — the
+  // client must not ask, and must not leave the user staring at a body that
+  // says the process isn't here. Picking another process LEAVES the experiment
+  // for the copy it branched from, out loud (see `handleSelectBp`).
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing in flight
+  const addingRef = useRef<string | null>(null);
+  const materializeInto = (target: string, bp: BusinessProcess) => {
+    if (bp.copies.includes(target)) return;
+    const id = bp.id;
+    addingRef.current = id;
+    onAddingBpChange?.(id);
+    void api.copyFiles
+      .ensureBp(target, bp.name)
+      .catch((err: unknown) => {
+        toast.error(
+          `Failed to add ${bp.displayName} to “${target}”: ${errorMessage(err)}`,
+        );
+      })
+      .finally(() => {
+        // A newer selection is already materializing — it owns the signal now.
+        if (addingRef.current !== id) return;
+        addingRef.current = null;
+        onAddingBpChange?.(null);
+      });
+  };
+
   const handleSelectBp = (id: string) => {
-    onSelectBp(id);
     const bp = bps.find((b) => b.id === id);
-    if (!bp || (copy && bp.copies.includes(copy))) return;
-    const fallbackCopy = () => {
-      const other = copies.find((c) => bp.copies.includes(c.name))?.name;
-      if (other) onSelectCopy(other);
-    };
-    if (!myCopy) {
-      fallbackCopy();
+    if (!bp || !copy) {
+      onSelectBp(id);
       return;
     }
-    if (bp.copies.includes(myCopy)) {
-      onSelectCopy(myCopy);
+
+    // Inside an experiment, on a different business process: the experiment
+    // cannot follow you there, so the copy has to change. Do it explicitly and
+    // say why — a silent copy switch is how the user ends up editing somewhere
+    // they didn't think they were.
+    if (currentCopy?.kind === 'experiment' && bp.name !== currentCopy.bp) {
+      const target = currentCopy.parent ?? myCopy;
+      const label = currentCopy.title ?? currentCopy.name;
+      if (!target) {
+        // Nowhere to land: leave the user where they are rather than dropping
+        // them into an arbitrary copy, and say so.
+        toast.error(
+          `“${label}” is an experiment on one business process only, and we ` +
+            `couldn't work out which copy it branched from — so ${bp.displayName} ` +
+            `can't be opened from in here. Reload once gitops is reachable.`,
+        );
+        return;
+      }
+      onSelectBp(id);
+      onEnterCopy(
+        target,
+        `Leaving the experiment “${label}” — showing ${bp.displayName}…`,
+      );
+      toast.info(
+        `Left the experiment “${label}” — an experiment is on one business ` +
+          `process only. Now showing ${bp.displayName} in ` +
+          `${target === myCopy ? 'your copy' : `“${target}”`}.`,
+      );
+      materializeInto(target, bp);
       return;
     }
-    if (bp.inMain) {
-      // Materialize first, switch after — never land on a copy whose BP
-      // tree isn't there (mirrors CopySelector.handleSelect). While the
-      // clone runs the view shows the transient copy gate.
-      const mine = myCopy;
-      void api.copyFiles
-        .ensureBp(mine, bp.name)
-        .then(() => onSelectCopy(mine))
-        .catch(fallbackCopy);
-      return;
-    }
-    fallbackCopy();
+
+    onSelectBp(id);
+    materializeInto(copy, bp);
   };
 
   const renderStep = (step: FlowStep) => {
@@ -228,22 +330,14 @@ export function TopNav({
         onDeleteBp={setDeleteBp}
       />
 
-      {/* The copy region: the copy selector and every step up to Sync &
-          Deploy live in one card, so it's visually clear they all happen
-          inside the chosen copy. */}
+      {/* The copy region: whose copy this is, and every step up to Deploy, in
+          one card — so it's visually clear they all happen inside that copy. */}
       <div className="flex min-w-0 items-center gap-1 overflow-x-auto rounded-xl border border-border bg-muted/40 px-1.5 py-1">
-        <CopySelector
-          copies={copies}
-          selectedBp={activeBp}
-          copy={copy}
-          onSelect={onSelectCopy}
-          onPull={onPullCopy}
-          onCreatedCopy={(name) => onSelectCopy(name)}
-          myCopy={myCopy}
-          onCopyDeleted={onCopyDeleted}
-        />
-        <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-        {IN_COPY_STEPS.map((step, i) => (
+        {/* No leading chevron: the card's own border already separates the copy
+            region from the business-process selector, and whichever step comes
+            first (Sync when main is ahead, otherwise Description) must read as
+            the start of the pipeline, not as something chained off the left. */}
+        {inCopySteps.map((step, i) => (
           <div key={step.id} className="flex shrink-0 items-center gap-1">
             {i > 0 &&
               // The design marks the Agent ↔ Requirements pair with a cycle
@@ -263,6 +357,16 @@ export function TopNav({
       {renderStep(DEPLOYMENTS_STEP)}
 
       <div className="ml-auto flex shrink-0 items-center gap-2 pl-3">
+        <AdvancedMenu
+          copies={copies}
+          copy={copy}
+          myCopy={myCopy}
+          bps={bps}
+          selectedBp={activeBp}
+          onEnterCopy={onEnterCopy}
+          onSelectBp={onSelectBp}
+          onStartExperiment={onStartExperiment}
+        />
         <span
           title={roleMeta.hint}
           className={cn(
@@ -289,7 +393,7 @@ export function TopNav({
         open={newBpOpen}
         onOpenChange={onNewBpOpenChange}
         copy={copy ?? undefined}
-        existingNames={copyBpNames}
+        existingNames={existingBpNames}
         onCreated={(name) => {
           // Select the new BP and land on its Description (the copy is already
           // the selected one). onBpCreated marks it as just-created so the
@@ -301,3 +405,4 @@ export function TopNav({
     </div>
   );
 }
+

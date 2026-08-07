@@ -117,7 +117,7 @@ function GraphRow({
 /**
  * Two panes: on the left a single-column commit graph around a centre line —
  * this copy's own (un-merged) commits branch LEFT, main's commits run down the
- * RIGHT, deploy markers sit on the main commits each Sync & Deploy left at the
+ * RIGHT, deploy markers sit on the main commits each Deploy left at the
  * tip. Clicking any commit shows the diff it introduced (`git show`) in the
  * right pane.
  */

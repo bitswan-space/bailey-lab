@@ -59,7 +59,9 @@ export function NewBusinessProcessDialog({
     // Skipped while submitting: the created BP arrives over SSE (and thus in
     // existingNames) before the create response resolves — its own name must
     // not flash red as a "duplicate" mid-flight.
-    validationError = `A business process with the id "${slug}" already exists in this scope.`;
+    // A business process name is its repo name, shared by every copy — so the
+    // clash is workspace-wide, not "in this copy".
+    validationError = `A business process with the id "${slug}" already exists in this workspace.`;
   }
   // With a bundle the name is optional (empty = keep the bundle's name); a
   // typed name must still pass validation in both modes.
