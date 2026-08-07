@@ -26,6 +26,11 @@ export interface PublishOverMainDialogProps {
   /** …and its display name, for everything a person reads. */
   bpLabel: string;
   busy: boolean;
+  /** Why the last publish ATTEMPT failed, in the server's own words. Distinct
+   *  from the `error` state below, which is about not being able to READ what
+   *  this would supersede. Shown in the dialog because that is where the user
+   *  is looking when they press the button. */
+  failure?: string;
   /** Publish. `expectedMain` is the tip this dialog described, so a main that
    *  moved in the meantime is refused rather than silently gone over. */
   onConfirm: (expectedMain: string) => void;
@@ -50,6 +55,7 @@ export function PublishOverMainDialog({
   bp,
   bpLabel,
   busy,
+  failure,
   onConfirm,
   onCancel,
 }: PublishOverMainDialogProps) {
@@ -148,6 +154,15 @@ export function PublishOverMainDialog({
                 file the other edited), nothing is published and the coding
                 agent takes over.
               </p>
+
+              {failure && (
+                <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-red-800">
+                  <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+                  <span>
+                    <strong>That didn&apos;t work.</strong> {failure}
+                  </span>
+                </div>
+              )}
 
               <label className="flex flex-col gap-1">
                 <span>

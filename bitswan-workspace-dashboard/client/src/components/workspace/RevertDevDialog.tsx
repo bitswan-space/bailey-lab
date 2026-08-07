@@ -19,6 +19,10 @@ export interface RevertDevDialogProps {
   /** When that version was deployed to dev, already formatted for reading. */
   deployedAt: string;
   busy: boolean;
+  /** Why the last attempt failed, in the server's own words — shown here
+   *  rather than only in the activity history, which is a side panel the user
+   *  is not looking at when they press a button. Empty = no failure. */
+  error?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -43,6 +47,7 @@ export function RevertDevDialog({
   commit,
   deployedAt,
   busy,
+  error,
   onConfirm,
   onCancel,
 }: RevertDevDialogProps) {
@@ -78,6 +83,11 @@ export function RevertDevDialog({
                 Staging and production are untouched. They go back through
                 promote and rollback, not through here.
               </p>
+              {error && (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-red-800">
+                  <strong>That didn&apos;t work.</strong> {error}
+                </div>
+              )}
             </div>
           </AlertDialogDescription>
         </AlertDialogHeader>

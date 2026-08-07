@@ -678,6 +678,19 @@ export class GitopsClient {
     );
   }
 
+  /** `POST /copies/{name}/ensure-owner` — record who a copy belongs to when
+   *  nothing recorded it before (copies created before the metadata sidecar
+   *  existed). Never overwrites an existing record; gitops refuses unless the
+   *  claimed owner is the gate-verified caller. */
+  async ensureCopyOwner(
+    name: string,
+    owner: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(`/copies/${encodeURIComponent(name)}/ensure-owner`, {
+      owner,
+    });
+  }
+
   /** `POST /copies/{name}/bp/{bp}/ensure` — make a BP exist in a copy, cloning
    *  it fresh from main when the copy doesn't carry it yet (idempotent). Lets
    *  the copy switcher offer every copy for a BP. */

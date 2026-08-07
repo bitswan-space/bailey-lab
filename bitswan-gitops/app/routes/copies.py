@@ -68,11 +68,13 @@ itself. Please keep new state out of the listing and behind an endpoint.
 """
 
 import asyncio
+import contextlib
 import datetime
 import json
 import logging
 import os
 import re
+import time
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -317,6 +319,36 @@ def assert_copy_can_hold_bp(
         )
 
 
+def create_copy_meta_if_absent(copy_path: str, meta: dict) -> bool:
+    """Write a copy's `.copy.json` ONLY if it does not already have one.
+    Returns whether this call is the one that wrote it.
+
+    Create-only and atomic, via a uniquely-named temp file and `os.link` — a
+    hard link fails if the destination exists, so two callers racing to record
+    the same owner cannot both win, and neither can clobber a sidecar somebody
+    else wrote in between (an experiment's, say). `write_copy_meta`'s
+    rename-over semantics are wrong here for exactly that reason.
+    """
+    path = _copy_meta_path(copy_path)
+    if os.path.exists(path):
+        return False
+    tmp = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+    return True
+
+
 def write_copy_meta(copy_path: str, meta: dict) -> None:
     """Write a copy's `.copy.json` atomically (temp file + rename), so a reader
     never sees a half-written sidecar."""
@@ -396,6 +428,48 @@ def _validate_new_copy_name(name: str) -> None:
             detail=(
                 f"Invalid copy name: at most {budget} characters (longer names "
                 "collide once truncated into per-copy database names)."
+            ),
+        )
+
+
+def _require_copy_owner(name: str, meta: dict | None, action: str) -> None:
+    """Guard for the operations that REPLACE the contents of somebody's copy.
+
+    Fails closed, and says WHICH of the three reasons it is, because they need
+    different things from the user. "No recorded owner" in particular is not
+    the user's fault: copies created before the metadata sidecar existed have
+    none, and a bare 403 sent people looking for a permissions problem that was
+    not there. Signing in records it (see ``ensure_copy_owner``), so the message
+    says so.
+    """
+    from app.task_queue import current_requester
+
+    requester = (current_requester.get() or "").strip()
+    owner = ((meta or {}).get("owner") or "").strip()
+    if not requester:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Could not tell who is asking, so {action} was refused. "
+                "Reload the page and sign in again."
+            ),
+        )
+    if not owner:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Copy '{name}' has no recorded owner, so {action} was refused "
+                "— this copy was created before copies recorded who they belong "
+                "to. Its owner signing in to this workspace records it, after "
+                "which this works normally."
+            ),
+        )
+    if owner != requester:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Copy '{name}' belongs to {owner}, so only they can {action}. "
+                "Switch to your own copy and do it there."
             ),
         )
 
@@ -545,6 +619,93 @@ async def get_copy_name_budget():
     `null` means nothing constrains it yet (no business processes).
     """
     return {"max_length": copy_name_budget()}
+
+
+class EnsureCopyOwnerRequest(BaseModel):
+    """The email the caller claims to be. It must MATCH the gate-verified
+    identity — it is here so the mismatch can be refused explicitly rather than
+    a caller being able to record somebody else as an owner."""
+
+    owner: str
+
+
+@router.post("/{name}/ensure-owner")
+async def ensure_copy_owner(name: str, body: EnsureCopyOwnerRequest):
+    """Record who a personal copy belongs to, when nothing recorded it before.
+
+    Copies created before the `.copy.json` sidecar existed have no owner, and
+    every operation that REPLACES a copy's contents fails closed without one.
+    That is the right default and the wrong outcome for a real person's own
+    copy: on deployed workspaces essentially every personal copy predates the
+    sidecar, so "Edit main's version without merging my changes" answered 403
+    for all of them.
+
+    So the dashboard calls this for the signed-in user's OWN copy, and it
+    records the gate-verified identity. Nothing is inferred: the owner written
+    is the email the gate proved, and the only copy it may be written to is the
+    one the caller is claiming as theirs.
+
+    Deliberately narrow:
+
+    * it never touches a copy that already has a sidecar — an existing record
+      is the truth, including one that says the copy is somebody else's;
+    * it refuses when the claimed owner is not the gate-verified requester;
+    * it refuses `main`, which belongs to nobody and must keep failing closed;
+    * it is create-only and atomic, so concurrent first logins cannot fight.
+
+    A legacy copy whose owner never signs in again therefore stays unowned, and
+    the guards keep refusing it — with a message that says that is why.
+    """
+    from app.task_queue import current_requester
+
+    _validate_copy_name(name)
+    claimed = (body.owner or "").strip()
+    requester = (current_requester.get() or "").strip()
+    if not requester:
+        raise HTTPException(
+            status_code=403,
+            detail="Could not tell who is asking; nothing was recorded.",
+        )
+    if not claimed or claimed.lower() != requester.lower():
+        raise HTTPException(
+            status_code=403,
+            detail=("A copy's owner can only be recorded by that person themselves."),
+        )
+    if name == "main":
+        raise HTTPException(
+            status_code=400,
+            detail="The main code area belongs to the workspace, not to a person.",
+        )
+    copy_path = _resolve_copy_path(name)
+    if not os.path.isdir(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    existing = read_copy_meta(copy_path)
+    if existing is not None:
+        return {
+            "status": "unchanged",
+            "name": name,
+            "owner": (existing.get("owner") or "") or None,
+        }
+
+    wrote = create_copy_meta_if_absent(
+        copy_path,
+        {
+            "version": COPY_META_VERSION,
+            "kind": COPY_KIND_USER,
+            "owner": requester,
+            "parent": None,
+            "title": name,
+        },
+    )
+    if wrote:
+        logger.info("recorded owner %s for legacy copy %s", requester, name)
+        await refresh_one_copy(name)
+    return {
+        "status": "recorded" if wrote else "unchanged",
+        "name": name,
+        "owner": requester,
+    }
 
 
 @router.post("/create")
@@ -2407,13 +2568,9 @@ async def adopt_version(name: str, body: AdoptRequest):
     # Fails closed on ownership: this REPLACES the contents of somebody's copy,
     # so it is only ever the owner's to do, and an unattributable copy is not
     # something we will overwrite on a stranger's say-so.
+    _require_copy_owner(name, meta, "adopting a version into it")
     requester = (current_requester.get() or "").strip()
     owner = ((meta or {}).get("owner") or "").strip()
-    if not owner or not requester or owner != requester:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Only the owner of copy '{name}' can adopt a version into it.",
-        )
 
     deployer = (body.deployer or "").strip() or requester
     label = (body.bp_label or "").strip() or bp
@@ -2933,13 +3090,8 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
             status_code=400,
             detail="Experiments merge back into their parent copy, never over main",
         )
+    _require_copy_owner(name, meta, "publishing it over main")
     requester = (current_requester.get() or "").strip()
-    owner = ((meta or {}).get("owner") or "").strip()
-    if not owner or not requester or owner != requester:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Only the owner of copy '{name}' can publish it over main.",
-        )
     deployer = (body.deployer or "").strip() or requester
     label = (body.bp_label or "").strip() or bp
     bare = bp_bare_repo_path(bp)

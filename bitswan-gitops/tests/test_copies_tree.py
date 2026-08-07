@@ -875,6 +875,128 @@ def env_bare(env, bp):
     return git_server.bp_bare_repo_path(bp)
 
 
+# ── recording the owner of a copy that predates the sidecar ─────────────────
+#
+# Every operation that REPLACES a copy's contents fails closed without a
+# recorded owner. That is right, and on deployed workspaces it made those
+# operations unusable for essentially everybody: copies created before the
+# `.copy.json` sidecar existed have no owner, so "Edit main's version without
+# merging my changes" answered 403 for every real person's copy. The tests
+# below pin the narrow backfill that fixes it, and the narrowness IS the point.
+
+
+def _legacy_copy(env, name, owner=OWNER):
+    """A copy exactly as one created before the metadata sidecar existed:
+    real directory, real clones, no `.copy.json`."""
+    path = env["user_copy"](name, owner=owner)
+    os.remove(os.path.join(path, ".copy.json"))
+    assert copies.read_copy_meta(path) is None
+    return path
+
+
+def _ensure_owner(name, owner):
+    from app.routes.copies import EnsureCopyOwnerRequest
+
+    return lambda: copies.ensure_copy_owner(name, EnsureCopyOwnerRequest(owner=owner))
+
+
+def test_signing_in_records_the_owner_of_a_copy_that_never_had_one(env):
+    """The fix for the 403 every real user hit. The owner written is the
+    GATE-VERIFIED identity — nothing is inferred from the copy's name."""
+    path = _legacy_copy(env, "alice")
+
+    res = _as(OWNER, _ensure_owner("alice", OWNER))
+
+    assert res["status"] == "recorded"
+    meta = copies.read_copy_meta(path)
+    assert meta is not None
+    assert meta["owner"] == OWNER
+    assert meta["kind"] == "user"
+    assert meta["parent"] is None
+
+
+def test_the_recorded_owner_makes_adopting_work_where_it_was_refused(env):
+    """End to end, because the 403 is the symptom that matters: the same call
+    that failed before the backfill succeeds after it."""
+    _legacy_copy(env, "alice")
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _adopt("alice", bp="bpa", source="main"))
+    assert ei.value.status_code == 403
+    assert "no recorded owner" in ei.value.detail
+
+    _as(OWNER, _ensure_owner("alice", OWNER))
+    res = _as(OWNER, _adopt("alice", bp="bpa", source="main", bp_label="Compost"))
+    assert res.adopted == "main"
+    assert res.bp == "bpa"
+
+
+def test_recording_the_owner_twice_changes_nothing(env):
+    path = _legacy_copy(env, "alice")
+    _as(OWNER, _ensure_owner("alice", OWNER))
+    before = open(os.path.join(path, ".copy.json")).read()
+
+    res = _as(OWNER, _ensure_owner("alice", OWNER))
+
+    assert res["status"] == "unchanged"
+    assert open(os.path.join(path, ".copy.json")).read() == before
+
+
+def test_an_existing_sidecar_is_never_overwritten(env):
+    """Including one that says the copy is somebody else's. A record that
+    exists is the truth; this only fills in an absence."""
+    path = env["user_copy"]("alice", owner=OWNER)
+    before = copies.read_copy_meta(path)
+
+    res = _as(OTHER, _ensure_owner("alice", OTHER))
+
+    assert res["status"] == "unchanged"
+    assert copies.read_copy_meta(path) == before
+    assert copies.read_copy_meta(path)["owner"] == OWNER
+
+
+def test_nobody_can_record_somebody_else_as_the_owner(env):
+    """The claimed owner must be the gate-verified requester, or this would be
+    a way to hand a stranger's copy to yourself."""
+    path = _legacy_copy(env, "alice")
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OTHER, _ensure_owner("alice", OWNER))
+    assert ei.value.status_code == 403
+    assert copies.read_copy_meta(path) is None
+
+
+def test_the_main_code_area_never_gets_an_owner(env):
+    """`main` belongs to the workspace. It must keep failing closed."""
+    env["user_copy"]("alice")
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _ensure_owner("main", OWNER))
+    assert ei.value.status_code == 400
+
+
+def test_a_legacy_copy_nobody_claims_still_refuses_and_says_why(env):
+    """The outcome for a copy whose owner never signs in again. It stays
+    unowned and the guards keep refusing — but the refusal names the reason,
+    because "403" sent people looking for a permissions problem that was not
+    there."""
+    _legacy_copy(env, "someone-who-left")
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OWNER, _adopt("someone-who-left", bp="bpa", source="main"))
+    assert ei.value.status_code == 403
+    assert "no recorded owner" in ei.value.detail
+    assert "created before" in ei.value.detail
+
+
+def test_a_copy_owned_by_someone_else_says_whose_it_is(env):
+    env["user_copy"]("alice", owner=OWNER)
+
+    with pytest.raises(HTTPException) as ei:
+        _as(OTHER, _adopt("alice", bp="bpa", source="main"))
+    assert ei.value.status_code == 403
+    assert OWNER in ei.value.detail
+
+
 # ── merge back into the parent ──────────────────────────────────────────────
 
 

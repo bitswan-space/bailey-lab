@@ -31,6 +31,35 @@ export function registerMeRoutes(
     }
     const copy = copyNameForEmail(email);
 
+    if (gitops && gitops.hasCopy(copy)) {
+      // The copy already exists — but it may PREDATE the `.copy.json` sidecar,
+      // in which case gitops has no record of who it belongs to and every
+      // operation that replaces its contents fails closed with a 403. On any
+      // workspace that has been running a while that is every real person's
+      // copy, so "Edit main's version without merging my changes" was refused
+      // for all of them.
+      //
+      // gitops owns the copies directory, so it does the writing: this asks it
+      // to record the caller as the owner IF nothing is recorded yet. The
+      // identity gitops writes is the one the gate proved, not the one we send
+      // — the body is there so a mismatch can be refused rather than trusted.
+      //
+      // Fire-and-forget: the answer changes nothing about this response, and
+      // blocking every /api/me on it would make the dashboard's first paint
+      // wait on a write that is almost always a no-op.
+      const g = gitops;
+      void g
+        .ensureCopyOwner(copy, email)
+        .then((r) => {
+          if (!r.ok) {
+            app.log.warn({ status: r.status, body: r.body, copy }, 'could not record copy owner');
+          }
+        })
+        .catch((err: unknown) => {
+          app.log.warn({ err, copy }, 'gitops unreachable recording copy owner');
+        });
+    }
+
     if (gitops && !gitops.hasCopy(copy)) {
       // Fire-and-forget: don't block the response on the (potentially slow)
       // create. A 409 means it already exists (a race or stale cache) — fine.

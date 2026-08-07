@@ -101,6 +101,8 @@ export function SyncDeployTab({
   // live whose commits it would supersede.
   const [publishOverOpen, setPublishOverOpen] = useState(false);
   const [publishingOver, setPublishingOver] = useState(false);
+  // Why the last publish attempt failed, shown IN the confirm dialog.
+  const [publishOverError, setPublishOverError] = useState('');
   // Append-only build log for the in-flight (or just-finished) deploy: every
   // line gitops emits — image build steps, build.sh output (vite/go build),
   // per-member "Prepared N/M" — not just the latest line the toast shows.
@@ -224,6 +226,7 @@ export function SyncDeployTab({
   const runPublishOver = useCallback(
     async (expectedMain: string) => {
       setPublishingOver(true);
+      setPublishOverError('');
       const id = `publish-over-main-${bp.name}`;
       toast.loading(`Publishing your version of ${bp.displayName} over main…`, {
         id,
@@ -251,10 +254,12 @@ export function SyncDeployTab({
           if (outcome === 'completed') onDeployed();
         }
       } catch (err) {
-        toast.error(`Publishing over main failed: ${errorMessage(err)}`, {
-          id,
-          duration: 14000,
-        });
+        // Into the dialog, not only into the activity history: the dialog is
+        // where the user is looking, and one that simply stays open reads as
+        // "nothing happened".
+        const why = errorMessage(err);
+        setPublishOverError(why);
+        toast.error(`Publishing over main failed: ${why}`, { id, duration: 14000 });
       } finally {
         setPublishingOver(false);
       }
@@ -425,8 +430,13 @@ export function SyncDeployTab({
         bp={bp.name}
         bpLabel={bp.displayName}
         busy={publishingOver}
+        {...(publishOverError ? { failure: publishOverError } : {})}
         onConfirm={(expectedMain) => void runPublishOver(expectedMain)}
-        onCancel={() => !publishingOver && setPublishOverOpen(false)}
+        onCancel={() => {
+          if (publishingOver) return;
+          setPublishOverOpen(false);
+          setPublishOverError('');
+        }}
       />
 
       {/* Live build log — every line gitops emits during the deploy, appended

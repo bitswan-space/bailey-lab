@@ -22,6 +22,12 @@ export interface TakeVersionDialogProps {
    *  sha with the stage and date it was deployed. Unused for `main`. */
   sourceLabel?: string;
   busy: boolean;
+  /** Why the last attempt failed, in the server's own words. Shown IN the
+   *  dialog: the notification store is a session history in a side panel, and
+   *  a user who presses a button and is left looking at the same unchanged
+   *  dialog reads that as "nothing happened" — which is exactly what a 403
+   *  from this action looked like. Empty = no failure. */
+  error?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -45,6 +51,7 @@ export function TakeVersionDialog({
   bpLabel,
   sourceLabel,
   busy,
+  error,
   onConfirm,
   onCancel,
 }: TakeVersionDialogProps) {
@@ -94,6 +101,11 @@ export function TakeVersionDialog({
                 </p>
               )}
               <p>Only {bpLabel} is touched. Your other work is not involved.</p>
+              {error && (
+                <div className="mt-1 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-red-800">
+                  <strong>That didn&apos;t work.</strong> {error}
+                </div>
+              )}
             </div>
           </AlertDialogDescription>
         </AlertDialogHeader>

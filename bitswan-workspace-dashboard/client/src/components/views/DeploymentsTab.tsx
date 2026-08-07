@@ -1431,8 +1431,13 @@ function InspectModal({
   const { notifyCopyRefsMoved } = useCopyRefsMoved();
   const [takeOpen, setTakeOpen] = useState(false);
   const [taking, setTaking] = useState(false);
+  // Why the last attempt failed, shown IN the dialog. A failure that only
+  // reaches the activity history leaves the user looking at an unchanged
+  // dialog, which reads as "nothing happened".
+  const [takeError, setTakeError] = useState('');
   const [revertOpen, setRevertOpen] = useState(false);
   const [reverting, setReverting] = useState(false);
+  const [revertError, setRevertError] = useState('');
 
   /** "Edit this version": adopt this deployed commit into MY copy, as a
    *  restore commit on top of main — so the copy ends one ahead and none
@@ -1441,6 +1446,7 @@ function InspectModal({
     if (!myCopy || !commit || taking) return;
     const id = `take-deployed-${bp}-${commit}`;
     setTaking(true);
+    setTakeError('');
     toast.loading(`Taking ${short(commit, 7)} into your copy…`, {
       id,
       duration: Infinity,
@@ -1466,14 +1472,14 @@ function InspectModal({
       notifyCopyRefsMoved();
       onClose();
     } catch (err) {
-      toast.error(`Couldn't take that version: ${errorMessage(err)}`, {
-        id,
-        duration: 14000,
-      });
+      const why = errorMessage(err);
+      setTakeError(why);
+      toast.error(`Couldn't take that version: ${why}`, { id, duration: 14000 });
     } finally {
       setTaking(false);
     }
   }, [myCopy, commit, taking, bp, label, onClose, notifyCopyRefsMoved]);
+
 
   /** "Revert dev to this version": ONE commit on top of main, then dev is
    *  redeployed from the new tip. Everyone else's copy goes a commit behind —
@@ -1482,6 +1488,7 @@ function InspectModal({
     if (!commit || reverting) return;
     const id = `revert-dev-${bp}-${commit}`;
     setReverting(true);
+    setRevertError('');
     toast.loading(`Putting dev back to ${short(commit, 7)}…`, {
       id,
       duration: Infinity,
@@ -1502,10 +1509,9 @@ function InspectModal({
       }
       onClose();
     } catch (err) {
-      toast.error(`Couldn't revert dev: ${errorMessage(err)}`, {
-        id,
-        duration: 14000,
-      });
+      const why = errorMessage(err);
+      setRevertError(why);
+      toast.error(`Couldn't revert dev: ${why}`, { id, duration: 14000 });
     } finally {
       setReverting(false);
     }
@@ -1944,8 +1950,13 @@ function InspectModal({
         bpLabel={label}
         sourceLabel={`${short(commit, 7)} — deployed to ${stageLabel}`}
         busy={taking}
+        {...(takeError ? { error: takeError } : {})}
         onConfirm={() => void runTakeVersion()}
-        onCancel={() => !taking && setTakeOpen(false)}
+        onCancel={() => {
+          if (taking) return;
+          setTakeOpen(false);
+          setTakeError('');
+        }}
       />
       <RevertDevDialog
         open={revertOpen}
@@ -1955,8 +1966,13 @@ function InspectModal({
           entry.deployed_at ? new Date(entry.deployed_at).toLocaleDateString() : ''
         }
         busy={reverting}
+        {...(revertError ? { error: revertError } : {})}
         onConfirm={() => void runRevertDev()}
-        onCancel={() => !reverting && setRevertOpen(false)}
+        onCancel={() => {
+          if (reverting) return;
+          setRevertOpen(false);
+          setRevertError('');
+        }}
       />
     </div>
   );

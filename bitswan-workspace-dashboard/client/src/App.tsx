@@ -237,6 +237,11 @@ function Shell() {
   // eslint-disable-next-line no-restricted-syntax -- null = dialog closed
   } | null>(null);
   const [taking, setTaking] = useState(false);
+  // Why the last take failed, in the server's own words. It is rendered INSIDE
+  // the dialog: a failure that only reaches the activity history leaves the
+  // user looking at an unchanged dialog, which reads as "nothing happened" —
+  // and that is precisely how a 403 from this action was reported to us.
+  const [takeError, setTakeError] = useState('');
   // Bumped on every editor save so copy-dirtiness consumers refetch (the
   // SSE snapshot only refreshes on git events, not file writes).
   const [copyEditNonce, setCopyEditNonce] = useState(0);
@@ -852,6 +857,7 @@ function Shell() {
     const id = `take-version-${bpDir}`;
     const moving = source === 'experiment';
     setTaking(true);
+    setTakeError('');
     if (moving) {
       lock(`Taking “${sourceLabel}” into your copy…`, BUSY_TIMEOUT_CREATE_MS, myCopy);
     }
@@ -899,12 +905,12 @@ function Shell() {
       if (moving) unlock();
       if (err instanceof SessionExpiredError) {
         toast.dismiss?.(id);
+        setTakeError('Your session expired. Sign in again and try once more.');
         return;
       }
-      toast.error(`Couldn't take that version: ${errorMessage(err)}`, {
-        id,
-        duration: 12000,
-      });
+      const why = errorMessage(err);
+      setTakeError(why);
+      toast.error(`Couldn't take that version: ${why}`, { id, duration: 12000 });
     } finally {
       setTaking(false);
       notifyCopyRefsMoved();
@@ -1128,8 +1134,13 @@ function Shell() {
         bpLabel={takeVersion?.bpLabel ?? ''}
         {...(takeVersion?.sourceLabel ? { sourceLabel: takeVersion.sourceLabel } : {})}
         busy={taking}
+        {...(takeError ? { error: takeError } : {})}
         onConfirm={() => void runTakeVersion()}
-        onCancel={() => !taking && setTakeVersion(null)}
+        onCancel={() => {
+          if (taking) return;
+          setTakeVersion(null);
+          setTakeError('');
+        }}
       />
       {/* Discarding an experiment: the same warn+confirm delete dialog every
           copy delete goes through — it names the unmerged and uncommitted work
