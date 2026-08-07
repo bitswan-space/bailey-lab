@@ -11,6 +11,7 @@ import subprocess
 
 from app.utils import read_bitswan_yaml, dump_bitswan_yaml
 from app.services import automation_service as asvc
+from app.services import git_server
 from app.services.automation_service import AutomationService
 
 
@@ -98,6 +99,12 @@ def test_bp_diff(tmp_path, monkeypatch):
     repos.mkdir(parents=True)
     (copies / "main").mkdir(parents=True)
     monkeypatch.setenv("BITSWAN_GIT_REPOS_DIR", str(repos))
+    # git_server reads BITSWAN_GIT_REPOS_DIR at IMPORT time, so the env var
+    # alone leaves `bp_bare_repo_path` pointing at the production /git. The
+    # fetch against it used to fail silently; it is now a loud error (a fetch
+    # that quietly fails answers every later comparison against a stale main),
+    # so the test has to point the module at the temp repos as well.
+    monkeypatch.setattr(git_server, "GIT_REPOS_DIR", str(repos))
     monkeypatch.setenv("BITSWAN_COPIES_DIR", str(copies))
     bare = repos / "shop.git"
     _git("init", "-q", "--bare", "--initial-branch=main", str(bare), cwd=str(tmp_path))

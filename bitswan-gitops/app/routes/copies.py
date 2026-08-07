@@ -56,6 +56,7 @@ from app.services.bp_git import (
     clone_bp_into_copy as _clone_bp_into_copy,
 )
 from app.services.bp_git import (
+    MAIN_REF,
     _rm_rf_as_root_in_container,
     fetch_main,
     ff_branch_to_ref,
@@ -544,6 +545,34 @@ async def create_copy(body: CreateCopyRequest):
 _copies_cache: list[dict] | None = None
 
 
+# Where a clone keeps its view of ANOTHER copy's branch (the parent copy, or an
+# experiment) while comparing against or merging it. The same reasoning as
+# `MAIN_REF` in bp_git: FETCH_HEAD is one mutable file every concurrent fetch
+# in the clone rewrites, so a comparison against it can silently answer about
+# somebody else's fetch — or, mid-write, about nothing at all.
+PEER_REF = "refs/bitswan/peer"
+
+
+async def _fetch_peer_branch(clone_path: str, bp: str, branch: str) -> str | None:
+    """Fetch copy branch `branch` of `bp` into :data:`PEER_REF` in `clone_path`
+    and return its sha, or None when that copy has no branch for this business
+    process (the caller decides what that means — usually "the parent doesn't
+    carry it yet")."""
+    if not await call_git_command(
+        "git",
+        "fetch",
+        "--no-tags",
+        bp_bare_repo_path(bp),
+        f"+refs/heads/{branch}:{PEER_REF}",
+        cwd=clone_path,
+    ):
+        return None
+    out, _, rc = await call_git_command_with_output(
+        "git", "rev-parse", PEER_REF, cwd=clone_path
+    )
+    return out.strip() if rc == 0 else None
+
+
 async def _bp_clone_parent_divergence(
     clone_path: str, bp: str, parent: str
 ) -> tuple[int, int]:
@@ -555,9 +584,7 @@ async def _bp_clone_parent_divergence(
     experiment being looked at. It is deliberately NOT part of the copies
     listing (see `_copy_facts`).
     """
-    if not await call_git_command(
-        "git", "fetch", bp_bare_repo_path(bp), parent, cwd=clone_path
-    ):
+    if await _fetch_peer_branch(clone_path, bp, parent) is None:
         return 0, 0
 
     async def _count(rng: str) -> int:
@@ -566,7 +593,7 @@ async def _bp_clone_parent_divergence(
         )
         return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
 
-    return await _count("FETCH_HEAD..HEAD"), await _count("HEAD..FETCH_HEAD")
+    return await _count(f"{PEER_REF}..HEAD"), await _count(f"HEAD..{PEER_REF}")
 
 
 def _copy_facts(copy_path: str, name: str) -> dict:
@@ -884,7 +911,7 @@ async def _sync_one_bp(
     await fetch_main(clone, bp)
 
     ahead_out, _, _ = await call_git_command_with_output(
-        "git", "rev-list", "--count", "FETCH_HEAD..HEAD", cwd=clone
+        "git", "rev-list", "--count", f"{MAIN_REF}..HEAD", cwd=clone
     )
     if ahead_out.strip() == "0":
         # Nothing to merge — but the deployed dev stage can still be behind
@@ -899,7 +926,7 @@ async def _sync_one_bp(
         }
 
     _, _, ff_rc = await call_git_command_with_output(
-        "git", "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD", cwd=clone
+        "git", "merge-base", "--is-ancestor", MAIN_REF, "HEAD", cwd=clone
     )
     if ff_rc != 0:
         return {
@@ -1160,14 +1187,14 @@ async def _rebase_one_bp(
     orig_head = orig_out.strip()
 
     behind_out, _, _ = await call_git_command_with_output(
-        "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=clone
+        "git", "rev-list", "--count", f"HEAD..{MAIN_REF}", cwd=clone
     )
     behind = int(behind_out.strip()) if behind_out.strip().isdigit() else 0
     if behind == 0:
         return {"bp": bp, "status": "noop", "pulled": 0, "changed_paths": []}
 
     _, rb_err, rb_rc = await call_git_command_with_output(
-        "git", *_ident_args(deployer), "rebase", "FETCH_HEAD", cwd=clone
+        "git", *_ident_args(deployer), "rebase", MAIN_REF, cwd=clone
     )
     if rb_rc != 0:
         # A non-zero rebase is NOT automatically a conflict. Git leaves a
@@ -1382,7 +1409,7 @@ class MergeToParentResponse(BaseModel):
 
 
 async def _rebase_experiment_onto_parent(
-    exp_clone: str, bare: str, name: str, parent: str, deployer: str | None
+    exp_clone: str, bare: str, bp: str, name: str, parent: str, deployer: str | None
 ) -> bool:
     """Rebase an experiment's clone onto the parent copy's branch tip.
 
@@ -1393,7 +1420,7 @@ async def _rebase_experiment_onto_parent(
     was, nothing is published and the PARENT is not touched at all — the caller
     turns that into ``needs_rebase`` and hands off to the coding agent.
     """
-    if not await call_git_command("git", "fetch", bare, parent, cwd=exp_clone):
+    if await _fetch_peer_branch(exp_clone, bp, parent) is None:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch '{parent}' into the experiment clone",
@@ -1404,7 +1431,7 @@ async def _rebase_experiment_onto_parent(
     orig_head = orig_out.strip()
 
     _, _, rb_rc = await call_git_command_with_output(
-        "git", *_ident_args(deployer), "rebase", "FETCH_HEAD", cwd=exp_clone
+        "git", *_ident_args(deployer), "rebase", PEER_REF, cwd=exp_clone
     )
     if rb_rc != 0:
         await call_git_command("git", "rebase", "--abort", cwd=exp_clone)
@@ -1551,7 +1578,7 @@ async def _merge_one_bp_to_parent(
     before = before_out.strip()
 
     async def _fetch_experiment() -> None:
-        if not await call_git_command("git", "fetch", bare, name, cwd=parent_clone):
+        if await _fetch_peer_branch(parent_clone, bp, name) is None:
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to fetch '{name}' into the '{parent}' clone",
@@ -1561,7 +1588,7 @@ async def _merge_one_bp_to_parent(
 
     async def _ahead() -> int:
         out, _, rc = await call_git_command_with_output(
-            "git", "rev-list", "--count", "HEAD..FETCH_HEAD", cwd=parent_clone
+            "git", "rev-list", "--count", f"HEAD..{PEER_REF}", cwd=parent_clone
         )
         return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
 
@@ -1576,7 +1603,7 @@ async def _merge_one_bp_to_parent(
 
     async def _parent_is_ancestor() -> bool:
         _, _, rc = await call_git_command_with_output(
-            "git", "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD", cwd=parent_clone
+            "git", "merge-base", "--is-ancestor", "HEAD", PEER_REF, cwd=parent_clone
         )
         return rc == 0
 
@@ -1585,7 +1612,7 @@ async def _merge_one_bp_to_parent(
         # experiment on top of the parent first, so the merge stays a
         # fast-forward and the parent's history is never rewritten.
         if not await _rebase_experiment_onto_parent(
-            exp_clone, bare, name, parent, deployer
+            exp_clone, bare, bp, name, parent, deployer
         ):
             return {
                 "bp": bp,
@@ -1611,7 +1638,7 @@ async def _merge_one_bp_to_parent(
             }
 
     m_out, m_err, m_rc = await call_git_command_with_output(
-        "git", "merge", "--ff-only", "FETCH_HEAD", cwd=parent_clone
+        "git", "merge", "--ff-only", PEER_REF, cwd=parent_clone
     )
     if m_rc != 0:
         raise HTTPException(
@@ -1854,7 +1881,7 @@ async def _clone_status_of(clone_path: str, bp: str) -> dict:
     # --no-renames so paths stay real (a rename becomes delete + add) — the UI
     # uses each path to fetch its per-file diff.
     num_out, _, _ = await call_git_command_with_output(
-        "git", "diff", "--no-renames", "--numstat", "FETCH_HEAD", cwd=clone_path
+        "git", "diff", "--no-renames", "--numstat", MAIN_REF, cwd=clone_path
     )
     for line in num_out.splitlines():
         parts = line.split("\t", 2)
@@ -1869,7 +1896,7 @@ async def _clone_status_of(clone_path: str, bp: str) -> dict:
             "dels": int(dels_str) if dels_str.isdigit() else 0,
         }
     ns_out, _, _ = await call_git_command_with_output(
-        "git", "diff", "--no-renames", "--name-status", "FETCH_HEAD", cwd=clone_path
+        "git", "diff", "--no-renames", "--name-status", MAIN_REF, cwd=clone_path
     )
     for line in ns_out.splitlines():
         cols = line.split("\t")
@@ -1989,7 +2016,7 @@ async def _clone_divergence(clone_path: str, bp: str) -> tuple[int, int]:
         )
         return int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
 
-    return await _count("FETCH_HEAD..HEAD"), await _count("HEAD..FETCH_HEAD")
+    return await _count(f"{MAIN_REF}..HEAD"), await _count(f"HEAD..{MAIN_REF}")
 
 
 async def _missing_clone_behind(bp: str) -> int:
@@ -2191,7 +2218,7 @@ async def get_copy_history(name: str, bp: str | None = None):
         clone = os.path.join(copy_path, b)
         await fetch_main(clone, b)
         copy_commits.extend(await _git_log("HEAD", clone))
-        main_commits.extend(await _git_log("FETCH_HEAD", clone))
+        main_commits.extend(await _git_log(MAIN_REF, clone))
         deploys.update(await _deploy_tags(b))
 
     if len(bps) > 1:
@@ -2210,7 +2237,7 @@ async def _clone_diff(clone_path: str, bp: str, rel_path: str | None) -> str:
     """Unified diff of one BP clone vs its main, with `a/<bp>/…` patch headers
     so paths stay copy-root-relative."""
     prefix_args = [f"--src-prefix=a/{bp}/", f"--dst-prefix=b/{bp}/"]
-    git_args = ["git", "diff", *prefix_args, "FETCH_HEAD", "--"]
+    git_args = ["git", "diff", *prefix_args, MAIN_REF, "--"]
     git_args.append(rel_path if rel_path else ".")
 
     stdout, stderr, rc = await call_git_command_with_output(*git_args, cwd=clone_path)
@@ -2293,7 +2320,7 @@ async def get_commit_diff(name: str, sha: str, bp: str | None = None):
         clone = os.path.join(copy_path, b)
         if not os.path.isdir(os.path.join(clone, ".git")):
             continue
-        # main commits are reachable only via FETCH_HEAD's objects — fetch first.
+        # main commits are reachable only via MAIN_REF's objects — fetch first.
         await fetch_main(clone, b)
         _, _, known_rc = await call_git_command_with_output(
             "git", "cat-file", "-e", f"{sha}^{{commit}}", cwd=clone

@@ -66,13 +66,53 @@ def git_remote_url(bp: str) -> str:
     return f"{base.rstrip('/')}/{bp}.git"
 
 
-async def fetch_main(clone_path: str, bp: str) -> None:
+# Where a clone keeps its view of the BP repo's main.
+#
+# NOT ``FETCH_HEAD``. FETCH_HEAD is a single file that EVERY ``git fetch`` in
+# the same clone rewrites, and it is not written under a lock. gitops fetches
+# concurrently into the same clone all the time — the divergence, behind,
+# status, history and diff reads all do it on demand, from whichever browsers
+# happen to be open, while a pull or a sync is running in the task queue. A
+# reader that catches FETCH_HEAD mid-write sees an empty file, and
+# ``git rebase FETCH_HEAD`` then dies with ``invalid upstream 'FETCH_HEAD'``
+# (live-seen: a pull failed that way while two sessions were open).
+#
+# A real ref is updated through git's ref lock, so a concurrent fetch either
+# has finished or has not — never half. Namespaced under refs/bitswan/ so it
+# can never collide with a branch, a tag or a remote-tracking ref.
+MAIN_REF = "refs/bitswan/main"
+
+
+async def fetch_main(clone_path: str, bp: str) -> str:
     """Refresh the clone's view of the BP repo's main from the LOCAL bare
-    (filesystem — gitops can't authenticate to its own smart-HTTP origin).
-    FETCH_HEAD then points at the current main."""
-    await call_git_command(
-        "git", "fetch", bp_bare_repo_path(bp), "main", cwd=clone_path
+    (filesystem — gitops can't authenticate to its own smart-HTTP origin), and
+    return the sha it now points at. :data:`MAIN_REF` names it.
+
+    Raises on failure. A fetch that quietly fails leaves the ref at whatever it
+    held before, so every ahead/behind count, diff and rebase computed
+    afterwards is silently answered against a stale main."""
+    ok = await call_git_command(
+        "git",
+        "fetch",
+        "--no-tags",
+        bp_bare_repo_path(bp),
+        f"+refs/heads/main:{MAIN_REF}",
+        cwd=clone_path,
     )
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not read '{bp}'s main into {clone_path}",
+        )
+    out, err, rc = await call_git_command_with_output(
+        "git", "rev-parse", MAIN_REF, cwd=clone_path
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"'{bp}'s main was fetched but could not be resolved: {(err or out).strip()}",
+        )
+    return out.strip()
 
 
 async def commit_in_bp_clone(
@@ -303,9 +343,9 @@ async def refresh_main_bp_checkout(bp: str) -> None:
     main_dir = bp_clone_path(None, bp)
     bare = bp_bare_repo_path(bp)
     if os.path.isdir(os.path.join(main_dir, ".git")):
-        await call_git_command("git", "fetch", bare, "main", cwd=main_dir)
+        tip = await fetch_main(main_dir, bp)
         out, err, rc = await call_git_command_with_output(
-            "git", "reset", "--hard", "FETCH_HEAD", cwd=main_dir
+            "git", "reset", "--hard", tip, cwd=main_dir
         )
         if rc != 0:
             raise HTTPException(
