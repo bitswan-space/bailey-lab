@@ -2056,7 +2056,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
-      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
       const none = d.getByText(/Not deployed yet/i).first();
       await Promise.race([
         ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
@@ -2197,7 +2197,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // to main on a successful deploy) and report Healthy. (An empty BP merges
     // instantly — nothing to build — which is why this only bites a real
     // scaffolded BP.)
-    const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+    const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
     const devStage = d.getByRole('button', { name: /Development/i }).first();
     // Ride the deploy the way an operator does: keep waiting AS LONG AS the screen
     // shows progress, with NO flat cap. Deploy builds the dev image
@@ -2406,7 +2406,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
-      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
       const none = d.getByText(/Not deployed yet/i).first();
       await Promise.race([
         ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
