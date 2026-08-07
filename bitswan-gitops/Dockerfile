@@ -10,6 +10,11 @@ COPY bitswan-automation-server/ ./
 RUN CGO_ENABLED=0 go build -ldflags "-w -s" -o /out/bitswan .
 
 FROM python:3.11-bookworm
+# NOTE: the application source is BAKED into /src here (pyproject.toml + app/).
+# So /src, and /src/pyproject.toml, exist in EVERY image — production included.
+# Nothing may treat their presence as a sign that a developer bind-mounted a
+# live checkout: dev mode is declared explicitly via BITSWAN_GITOPS_DEV_SOURCE
+# (see start.sh and app/uvicorn.py). A dev mount shadows this whole directory.
 WORKDIR /src
 
 ENV VERSION=27.3.1
@@ -27,6 +32,14 @@ COPY bitswan-gitops/git-hooks/ /opt/bitswan/git-hooks/
 COPY bitswan-gitops/start.sh .
 
 RUN pip install -e .
+
+# Fail the BUILD on anything the runtime interpreter can't parse. The test suite
+# runs under whatever interpreter uv resolves (3.12 on the dev boxes), while
+# this image is python:3.11 — so a 3.12-only construct sails through a fully
+# green `pytest`/`ruff` and then crash-loops the container at import time, with
+# the workspace down. This runs on the exact interpreter that will serve
+# traffic, costs a second, and makes an unparseable image impossible to ship.
+RUN python -m compileall -q app
 
 
 # Create user 1000 and set up permissions

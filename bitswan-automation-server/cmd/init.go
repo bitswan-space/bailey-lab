@@ -101,7 +101,7 @@ func newInitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&o.codingAgentImage, "coding-agent-image", "", "Custom image for the coding-agent")
 	cmd.Flags().StringVar(&o.infraDriverImage, "infra-driver-image", "", "Custom image for the infra-driver sidecar")
 	cmd.Flags().StringVar(&o.egressGatewayImage, "egress-gateway-image", "", "Custom image for the per-BP egress-gateway")
-	cmd.Flags().StringVar(&o.gitopsDevSourceDir, "gitops-dev-source-dir", "", "Directory to mount as /src/app in gitops container for development")
+	cmd.Flags().StringVar(&o.gitopsDevSourceDir, "gitops-dev-source-dir", "", "Directory holding a live bitswan-gitops checkout; bind-mounted at /src in the gitops container and declared via BITSWAN_GITOPS_DEV_SOURCE to enable hot reload")
 	cmd.Flags().StringVar(&o.dashboardDevSourceDir, "dashboard-dev-source-dir", "", "Directory to mount as /workspace/dashboard-src in the workspace-dashboard container for hot-reload development")
 	cmd.Flags().StringVar(&o.sshPort, "ssh-port", "", "Use SSH over a custom port with custom SSH config for repositories behind firewalls (e.g., 443, 22)")
 	cmd.Flags().BoolVar(&o.staging, "staging", false, "Use staging images for gitops")

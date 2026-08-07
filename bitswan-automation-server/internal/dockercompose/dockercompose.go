@@ -26,6 +26,14 @@ const (
 // so the DB download never lands on a workspace's first interactive CVE scan.
 const GrypeDBVolume = "bitswan-grype-db"
 
+// GitopsDevSourceMount is where a developer's live bitswan-gitops checkout is
+// bind-mounted inside the gitops container, shadowing the copy the image bakes
+// there. The gitops image ALSO ships a /src (pyproject.toml + app/, see
+// bitswan-gitops/Dockerfile), so the presence of /src proves nothing — dev mode
+// must be declared explicitly via BITSWAN_GITOPS_DEV_SOURCE, which is set right
+// next to this mount so the two cannot drift apart.
+const GitopsDevSourceMount = "/src"
+
 // DockerComposeConfig holds the configuration required for creating a docker-compose file
 type DockerComposeConfig struct {
 	GitopsPath         string
@@ -187,10 +195,20 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 		gitopsService["environment"] = append(gitopsService["environment"].([]string), config.AocEnvVars...)
 	}
 
-	// Add dev source directory volume mount and DEBUG env var if provided
+	// gitops live-dev: bind-mount the developer's checkout over the image's
+	// baked /src AND declare it explicitly via BITSWAN_GITOPS_DEV_SOURCE.
+	// Both happen here, in one place, so the mount and the declaration can
+	// never drift apart: start.sh keys hot-reload + `pip install -e` off the
+	// env var alone and must never infer dev mode from /src existing (the
+	// image bakes a /src into every build, production included — inferring
+	// from it silently ran every production container under the uvicorn
+	// reload supervisor).
 	if config.GitopsDevSourceDir != "" {
-		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), config.GitopsDevSourceDir+":/src:z")
-		gitopsService["environment"] = append(gitopsService["environment"].([]string), "DEBUG=true")
+		gitopsService["volumes"] = append(gitopsService["volumes"].([]interface{}), config.GitopsDevSourceDir+":"+GitopsDevSourceMount+":z")
+		gitopsService["environment"] = append(gitopsService["environment"].([]string),
+			"BITSWAN_GITOPS_DEV_SOURCE="+GitopsDevSourceMount,
+			"DEBUG=true",
+		)
 	}
 
 	// Mount certificate authorities if specified
