@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils';
 import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
 import { api, errorMessage, type BpDivergence } from '@/lib/api';
+import { deployReadiness } from '@/lib/deployReadiness';
 import { watchDeployTask } from '@/lib/deployBp';
 import { useUrlEnum } from '@/lib/urlState';
 import { PublishOverMainDialog } from '@/components/workspace/PublishOverMainDialog';
@@ -33,6 +34,10 @@ interface SyncDeployTabProps {
   /** Why that reading failed. null = it is trustworthy. */
   // eslint-disable-next-line no-restricted-syntax -- null = no error
   divergenceError: string | null;
+  /** Bumped by the shell on every editor save. An editor save moves no git
+   *  ref, so nothing else on this screen would notice that the copy now holds
+   *  unpublished work. */
+  editNonce: number;
   /** Called once the dev deploy finishes successfully — used to jump to the
    *  Deployments tab (Development stage) so the user sees the result. */
   onDeployed: () => void;
@@ -75,12 +80,21 @@ export function SyncDeployTab({
   wt,
   divergence,
   divergenceError,
+  editNonce,
   onDeployed,
   onManageDeployments,
   onGoToSync,
   isMyCopy,
 }: SyncDeployTabProps) {
-  const { changed } = useCopyStatus(wt.name);
+  // `editNonce` is bumped by the shell on every editor save, because a save
+  // is not a git event: without it this list would still be the one read when
+  // the screen mounted, and a copy with unsaved-then-saved work would keep
+  // reading as clean. See `useCopyStatus`.
+  const {
+    changed,
+    loading: changedLoading,
+    error: changedError,
+  } = useCopyStatus(wt.name, editNonce);
   const [busy, setBusy] = useState(false);
   // The Advanced way out of a blocked Deploy: publish this copy's version even
   // though main moved on. Confirmation lives in its own dialog, which reads
@@ -109,13 +123,21 @@ export function SyncDeployTab({
   );
 
   // Scope the change summary to this BP — only its changes get synced/deployed,
-  // so the counts here match the BP-scoped diff below.
-  const bpChanged = changed.filter(
-    (c) => c.path === bp.name || c.path.startsWith(`${bp.name}/`),
-  );
+  // so the counts here match the BP-scoped diff below. The decision itself
+  // lives in `deployReadiness` so the rule it encodes ("never say up to date
+  // from a reading you have not taken") is unit-tested rather than buried in
+  // a render.
+  const readiness = deployReadiness({
+    divergence,
+    changed,
+    changedUnknown: changedLoading || !!changedError,
+    bpDir: bp.name,
+  });
+  const bpChanged = readiness.bpChanged as typeof changed;
   const adds = bpChanged.reduce((a, c) => a + c.adds, 0);
   const dels = bpChanged.reduce((a, c) => a + c.dels, 0);
-  const dirty = bpChanged.length > 0;
+  const dirty = readiness.dirty;
+  const dirtyKnown = !changedLoading && !changedError;
 
   // The copy as a whole can be far ahead/behind main purely from work on OTHER
   // business processes, while THIS one is identical to main — so the reading
@@ -138,11 +160,11 @@ export function SyncDeployTab({
   // divergence. Other BPs' divergence does NOT count — they deploy from their
   // own Deploy screen. Uncommitted work is still actionable (Deploy
   // auto-commits it).
-  const bpUpToDate = divergenceKnown && aheadBp === 0 && behindBp === 0 && !dirty;
-  const actionable = !bpUpToDate;
+  const bpUpToDate = readiness.upToDate;
+  const actionable = readiness.actionable;
   // Deploying is fast-forward only. Anything main has that this copy lacks is
   // pulled in on the Sync tab first — never repaired from here.
-  const blockedByBehind = behindBp > 0;
+  const blockedByBehind = readiness.blockedByBehind;
 
   const runSyncDeploy = useCallback(async () => {
     setBusy(true);
@@ -267,15 +289,19 @@ export function SyncDeployTab({
               <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 This business process
               </span>
-              {!divergenceKnown ? (
+              {!divergenceKnown || !dirtyKnown ? (
                 // Say WHICH it is. Rendering this state as "up to date" is the
-                // silent default that made a stale screen look authoritative.
-                divergenceError !== null ? (
+                // silent default that made a stale screen look authoritative —
+                // and it applied just as much to the uncommitted-work list as
+                // to the divergence, so both are named here.
+                divergenceError !== null || changedError ? (
                   <span
                     className="font-medium text-destructive"
-                    title={divergenceError}
+                    title={divergenceError ?? changedError}
                   >
-                    {`Couldn't check this against main — ${divergenceError}`}
+                    {divergenceError !== null
+                      ? `Couldn't check this against main — ${divergenceError}`
+                      : `Couldn't read this copy's unsaved work — ${changedError}`}
                   </span>
                 ) : (
                   <span className="text-muted-foreground">

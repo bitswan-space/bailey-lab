@@ -33,6 +33,9 @@ interface WorkspaceViewProps {
   onTab: (t: FlowTab) => void;
   /** An editor save landed in the current copy (dirtiness changed). */
   onCopyEdited?: () => void;
+  /** How many editor saves have landed. The Deploy screen re-reads the copy's
+   *  uncommitted work off this, since a save moves no git ref. */
+  editNonce: number;
   /** Open the "new business process" flow (the dialog lives in TopNav). */
   onNewBp: () => void;
   /** The copy in view is the signed-in user's own — the only copy that syncs
@@ -73,6 +76,7 @@ export function WorkspaceView({
   tab,
   onTab,
   onCopyEdited,
+  editNonce,
   onNewBp,
   isMyCopy,
   isMyExperiment,
@@ -182,6 +186,7 @@ export function WorkspaceView({
             wt={wt}
             divergence={divergence}
             divergenceError={divergenceError}
+            editNonce={editNonce}
             onDeployed={() => onTab('deployments')}
             onManageDeployments={() => onTab('deployments')}
             {...(isMyCopy ? { onGoToSync: () => onTab('sync'), isMyCopy: true } : {})}

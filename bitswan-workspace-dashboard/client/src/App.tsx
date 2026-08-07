@@ -1091,6 +1091,7 @@ function Shell() {
           tab={tab}
           onTab={handleTab}
           onCopyEdited={() => setCopyEditNonce((n) => n + 1)}
+          editNonce={copyEditNonce}
           onNewBp={() => setNewBpOpen(true)}
           isMyCopy={isMyCopy}
           isMyExperiment={isMyExperiment}
