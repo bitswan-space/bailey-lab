@@ -94,6 +94,23 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   await app.register(fastifyStatic, {
     root: clientDist,
     wildcard: false,
+    // Cache policy, explicitly — without one the browser applies HEURISTIC
+    // caching (a fraction of Last-Modified age) to whatever it likes,
+    // including index.html. That pins a browser to the bundle it first saw:
+    // the entry point names a content-hashed asset, so a stale index.html
+    // keeps loading stale JS and the user runs an old app against a new
+    // server (live-seen: a client that predated a required request field,
+    // failing with the server's "bp is required").
+    //   /assets/* are content-hashed → safe to cache forever.
+    //   everything else (index.html above all) → always revalidate.
+    setHeaders(res, filePath) {
+      res.setHeader(
+        'Cache-Control',
+        filePath.includes(`${path.sep}assets${path.sep}`)
+          ? 'public, max-age=31536000, immutable'
+          : 'no-cache',
+      );
+    },
   });
 
   app.setNotFoundHandler((req, reply) => {
@@ -101,6 +118,9 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
       reply.code(404).send({ error: 'not found' });
       return;
     }
+    // The SPA fallback serves index.html for every app route; it must never
+    // be cached (see the policy above).
+    reply.header('Cache-Control', 'no-cache');
     reply.sendFile('index.html');
   });
 
