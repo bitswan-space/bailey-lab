@@ -156,23 +156,23 @@ test('reverting dev is attributed to the gate identity and needs a commit', asyn
   await app.close();
 });
 
-test('only your own copy can be published over main, and only in a known mode', async () => {
+test('only your own copy can be published over main, and no mode travels with it', async () => {
   const { app, calls } = buildApp();
   const other = await app.inject({
     method: 'POST',
     url: '/api/copies/bob-acme-com/deploy-over-main',
     headers: { 'x-forwarded-email': ALICE },
-    payload: { bp: 'compost', mode: 'rebase' },
+    payload: { bp: 'compost' },
   });
   assert.equal(other.statusCode, 403);
 
-  const squash = await app.inject({
+  const noBp = await app.inject({
     method: 'POST',
     url: `/api/copies/${ALICE_COPY}/deploy-over-main`,
     headers: { 'x-forwarded-email': ALICE },
-    payload: { bp: 'compost', mode: 'squash' },
+    payload: {},
   });
-  assert.equal(squash.statusCode, 400);
+  assert.equal(noBp.statusCode, 400);
   assert.equal(calls.length, 0);
 
   const ok = await app.inject({
@@ -181,15 +181,17 @@ test('only your own copy can be published over main, and only in a known mode', 
     headers: { 'x-forwarded-email': ALICE },
     payload: {
       bp: 'compost',
-      mode: 'exact',
       expectedMain: 'abc1234',
       bpLabel: 'Compost',
+      // A caller that still sends one gets it dropped: publishing over main
+      // has exactly one outcome, and a `mode` reaching gitops would be a
+      // second, invisible way to ask for a different one.
+      mode: 'rebase',
     },
   });
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(calls[0]?.args[1], {
     bp: 'compost',
-    mode: 'exact',
     expected_main: 'abc1234',
     bp_label: 'Compost',
     deployer: ALICE,

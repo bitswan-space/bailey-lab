@@ -485,7 +485,7 @@ export interface DeployOverMainPreview {
 
 export interface DeployOverMainResult {
   status: 'success' | 'needs_rebase';
-  method: 'rebase' | 'exact' | 'fast-forward' | 'noop' | null;
+  method: 'replay' | 'replay+reconcile' | 'fast-forward' | 'noop' | null;
   bp: string;
   message: string;
   superseded: CommitRow[];
@@ -1563,7 +1563,6 @@ export const api = {
       name: string,
       body: {
         bp: string;
-        mode: 'rebase' | 'exact';
         expectedMain?: string;
         /** The business process's display name, for the messages and the
          *  commit subject — gitops only knows the directory slug. */

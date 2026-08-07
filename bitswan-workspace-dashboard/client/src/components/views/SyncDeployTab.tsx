@@ -19,7 +19,6 @@ import { api, errorMessage, type BpDivergence } from '@/lib/api';
 import { watchDeployTask } from '@/lib/deployBp';
 import { useUrlEnum } from '@/lib/urlState';
 import { PublishOverMainDialog } from '@/components/workspace/PublishOverMainDialog';
-import type { PublishMode } from '@/lib/publishOverMain';
 
 interface SyncDeployTabProps {
   bp: BusinessProcess;
@@ -201,7 +200,7 @@ export function SyncDeployTab({
   // user was never shown. A conflict no rule can decide changes NOTHING and
   // comes back as `needs_rebase` — the coding-agent handoff, same as Sync.
   const runPublishOver = useCallback(
-    async (mode: PublishMode, expectedMain: string) => {
+    async (expectedMain: string) => {
       setPublishingOver(true);
       const id = `publish-over-main-${bp.name}`;
       toast.loading(`Publishing your version of ${bp.displayName} over main…`, {
@@ -211,7 +210,6 @@ export function SyncDeployTab({
       try {
         const res = await api.copyFiles.deployOverMain(wt.name, {
           bp: bp.name,
-          mode,
           expectedMain,
           bpLabel: bp.displayName,
         });
@@ -401,7 +399,7 @@ export function SyncDeployTab({
         bp={bp.name}
         bpLabel={bp.displayName}
         busy={publishingOver}
-        onConfirm={(mode, expectedMain) => void runPublishOver(mode, expectedMain)}
+        onConfirm={(expectedMain) => void runPublishOver(expectedMain)}
         onCancel={() => !publishingOver && setPublishOverOpen(false)}
       />
 

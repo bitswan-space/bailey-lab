@@ -92,10 +92,6 @@ const UNCONSTRAINED_EXPERIMENT_NAME_LEN = 40;
  *  bitswan-gitops/app/routes/copies.py). */
 const ADOPT_SOURCES = ['main', 'experiment', 'commit'];
 
-/** How a copy may be published over a main that moved on (mirrors
- *  `DEPLOY_OVER_MODES` in gitops). */
-const DEPLOY_OVER_MODES = ['rebase', 'exact'];
-
 /**
  * The title of the experiment an adopt PARKS the caller's current work as:
  * `My previous Compost work — 2026-08-07 14:32`.
@@ -643,14 +639,16 @@ export function registerCopyRoutes(
   );
 
   // Publish this copy's version of one business process even though main has
-  // moved on. `rebase` replays my commits onto main with my side winning the
-  // hunks we both touched (main's untouched additions kept); `exact` makes
-  // main byte-for-byte my version. `expectedMain` is the tip the confirm
-  // dialog described — if main moved since, gitops 409s rather than
-  // superseding work the user was never shown.
+  // moved on. ONE outcome: main ends up holding exactly this copy's version,
+  // including dropping what main added and this copy does not have. gitops
+  // gets there by replaying this copy's commits onto main and reconciling the
+  // tree, so the history survives — but that is its business, not a choice the
+  // caller makes. `expectedMain` is the tip the confirm dialog described — if
+  // main moved since, gitops 409s rather than superseding work the user was
+  // never shown.
   app.post<{
     Params: { name: string };
-    Body: { bp?: string; mode?: string; expectedMain?: string; bpLabel?: string };
+    Body: { bp?: string; expectedMain?: string; bpLabel?: string };
   }>('/api/copies/:name/deploy-over-main', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) {
@@ -658,14 +656,8 @@ export function registerCopyRoutes(
     }
     const { name } = req.params;
     const bp = typeof req.body?.bp === 'string' ? req.body.bp.trim() : '';
-    const mode = typeof req.body?.mode === 'string' ? req.body.mode.trim() : 'rebase';
     if (!name || !bp) {
       return reply.code(400).send({ error: 'name and bp are required' });
-    }
-    if (!DEPLOY_OVER_MODES.includes(mode)) {
-      return reply
-        .code(400)
-        .send({ error: `mode must be one of ${DEPLOY_OVER_MODES.join(', ')}` });
     }
     const email = await emailFromRequest(req, app.log);
     if (!email) {
@@ -679,7 +671,6 @@ export function registerCopyRoutes(
     try {
       const r = await gitops.deployOverMain(name, {
         bp,
-        mode,
         expected_main: req.body?.expectedMain ?? null,
         bp_label:
           typeof req.body?.bpLabel === 'string' && req.body.bpLabel.trim()
@@ -694,7 +685,7 @@ export function registerCopyRoutes(
       }
       return r.body;
     } catch (err) {
-      app.log.warn({ err, name, bp, mode }, 'deploy over main failed');
+      app.log.warn({ err, name, bp }, 'deploy over main failed');
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });

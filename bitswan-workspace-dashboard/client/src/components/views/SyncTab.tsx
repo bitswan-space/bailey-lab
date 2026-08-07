@@ -152,7 +152,7 @@ export function SyncTab({
                 onClick={onTakeMain}
               >
                 <Replace className="size-3.5" aria-hidden />
-                Edit main's version without merging my changes
+                Edit main&apos;s version without merging my changes
               </Button>
             )}
           </div>

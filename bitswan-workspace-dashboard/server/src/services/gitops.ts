@@ -667,7 +667,6 @@ export class GitopsClient {
     name: string,
     body: {
       bp: string;
-      mode: string;
       expected_main: string | null;
       bp_label: string;
       deployer: string;

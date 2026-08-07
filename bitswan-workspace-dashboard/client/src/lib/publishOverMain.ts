@@ -16,9 +16,6 @@ export interface SupersededCommit {
   date: string;
 }
 
-/** How a copy may be published over a main that moved on. */
-export type PublishMode = 'rebase' | 'exact';
-
 /**
  * "3 commits by 2 people (Ada Lovelace, Bo Chen)".
  *
@@ -44,15 +41,19 @@ export function describeSuperseded(commits: SupersededCommit[]): string {
 }
 
 /**
- * What the two modes actually do, in one line each — the difference the user
- * is being asked to choose between, not a restatement of their names.
+ * What this button does, in the words that describe the ONLY thing it does.
+ *
+ * There is deliberately no choice here. "Overwriting main" used to offer two
+ * merge behaviours and ask the user to pick; picking between merge strategies
+ * is not a decision a person has the information to make, and the two answers
+ * differed in a way ("is main's extra file still there afterwards?") nobody
+ * could predict from the labels. The action now has one outcome, stated
+ * plainly, including the part that loses something.
  */
-export const PUBLISH_MODE_SUMMARY: Record<PublishMode, string> = {
-  rebase:
-    'Your version wins wherever you both changed the same thing. Anything main added that you never touched is kept.',
-  exact:
-    'Main ends up holding exactly what your copy holds — including dropping anything main added that you do not have.',
-};
+export const PUBLISH_OVER_MAIN_OUTCOME = [
+  'Main will hold exactly your version of this business process — including dropping anything main added that you do not have.',
+  'Your commits are kept as they are: each one arrives on main as itself, and main’s own commits stay in the history underneath. Nothing is rewritten and nothing is force-pushed.',
+] as const;
 
 /**
  * Whether the confirm button may be pressed.

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import {
   describeSuperseded,
   publishConfirmed,
+  PUBLISH_OVER_MAIN_OUTCOME,
   type SupersededCommit,
 } from './publishOverMain.ts';
 
@@ -46,4 +47,18 @@ test('the confirm needs the exact slug, forgiving only whitespace', () => {
   assert.equal(publishConfirmed('compos', 'compost'), false);
   assert.equal(publishConfirmed('', 'compost'), false);
   assert.equal(publishConfirmed('compost extra', 'compost'), false);
+});
+
+test('the dialog states one outcome, and states the part that loses something', () => {
+  const text = PUBLISH_OVER_MAIN_OUTCOME.join(' ');
+  // The whole point of removing the two modes: there is one answer, and the
+  // user is told the cost of it rather than asked to pick a merge rule.
+  assert.match(text, /exactly your version/i);
+  assert.match(text, /dropping anything main added that you do not have/i);
+  // …and the history promise that makes it a replay rather than a snapshot.
+  assert.match(text, /each one arrives on main as itself/i);
+  assert.match(text, /nothing is force-pushed/i);
+  // No merge-strategy vocabulary survives: it named a choice that no longer
+  // exists, and "recommended" implied there was another one worth having.
+  assert.doesNotMatch(text, /recommended|wins the overlaps|merge rule/i);
 });

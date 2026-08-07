@@ -68,7 +68,7 @@ export function RevertDevDialog({
                 <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
                 <span>
                   <strong>Everyone else will see this.</strong> Dev runs the
-                  shared main version, so after this every colleague's copy is
+                  shared main version, so after this every colleague&apos;s copy is
                   one commit behind on <strong>{bpLabel}</strong> and their next
                   Sync brings the revert in. Their own unpublished work is not
                   lost — it replays on top of it.

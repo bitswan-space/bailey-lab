@@ -14,8 +14,7 @@ import { api, errorMessage, type DeployOverMainPreview } from '@/lib/api';
 import {
   describeSuperseded,
   publishConfirmed,
-  PUBLISH_MODE_SUMMARY,
-  type PublishMode,
+  PUBLISH_OVER_MAIN_OUTCOME,
 } from '@/lib/publishOverMain';
 
 export interface PublishOverMainDialogProps {
@@ -29,7 +28,7 @@ export interface PublishOverMainDialogProps {
   busy: boolean;
   /** Publish. `expectedMain` is the tip this dialog described, so a main that
    *  moved in the meantime is refused rather than silently gone over. */
-  onConfirm: (mode: PublishMode, expectedMain: string) => void;
+  onConfirm: (expectedMain: string) => void;
   onCancel: () => void;
 }
 
@@ -58,14 +57,12 @@ export function PublishOverMainDialog({
   const [preview, setPreview] = useState<DeployOverMainPreview | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState<PublishMode>('rebase');
   const [typed, setTyped] = useState('');
 
   useEffect(() => {
     if (!open) return;
     setPreview(null);
     setError('');
-    setMode('rebase');
     setTyped('');
     setLoading(true);
     let alive = true;
@@ -106,7 +103,7 @@ export function PublishOverMainDialog({
             <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-red-800">
               <TriangleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
               <span>
-                Couldn't read what this would go over: {error}. Nothing will be
+                Couldn&apos;t read what this would go over: {error}. Nothing will be
                 published until that can be answered.
               </span>
             </div>
@@ -134,39 +131,20 @@ export function PublishOverMainDialog({
                 </table>
               </div>
 
-              <fieldset className="flex flex-col gap-2">
-                <legend className="mb-1 font-medium">What happens to them</legend>
-                {(['rebase', 'exact'] as PublishMode[]).map((m) => (
-                  <label
-                    key={m}
-                    className="flex cursor-pointer items-start gap-2 rounded-md border px-3 py-2 has-[:checked]:border-foreground"
-                  >
-                    <input
-                      type="radio"
-                      name="publish-mode"
-                      className="mt-1"
-                      checked={mode === m}
-                      onChange={() => setMode(m)}
-                    />
-                    <span>
-                      <span className="font-medium">
-                        {m === 'rebase'
-                          ? 'Your version wins the overlaps (recommended)'
-                          : 'Make main exactly my version'}
-                      </span>
-                      <br />
-                      <span className="text-muted-foreground">
-                        {PUBLISH_MODE_SUMMARY[m]}
-                      </span>
-                    </span>
-                  </label>
+              {/* ONE outcome, stated plainly — no modes, no merge rules. The
+                  losing part is first, because it is the part that would
+                  otherwise be a surprise. */}
+              <div className="flex flex-col gap-2 rounded-md border px-3 py-2">
+                <div className="font-medium">What happens</div>
+                {PUBLISH_OVER_MAIN_OUTCOME.map((line) => (
+                  <p key={line} className="text-muted-foreground">
+                    {line}
+                  </p>
                 ))}
-              </fieldset>
+              </div>
 
               <p className="text-muted-foreground">
-                Your commits are kept as they are — each one arrives on main as
-                itself, and main's own commits stay in the history underneath.
-                If a change cannot be resolved automatically (one side deleted a
+                If a change cannot be replayed automatically (one side deleted a
                 file the other edited), nothing is published and the coding
                 agent takes over.
               </p>
@@ -194,7 +172,7 @@ export function PublishOverMainDialog({
           <Button
             variant="destructive"
             disabled={!confirmEnabled}
-            onClick={() => preview && onConfirm(mode, preview.main)}
+            onClick={() => preview && onConfirm(preview.main)}
           >
             {busy ? 'Publishing…' : 'Publish over main'}
           </Button>
