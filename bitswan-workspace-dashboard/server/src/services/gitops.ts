@@ -606,6 +606,77 @@ export class GitopsClient {
     });
   }
 
+  /** `POST /copies/{name}/adopt` — take a version WHOLESALE into a copy for
+   *  ONE business process, without merging: from an experiment (which is then
+   *  consumed), from main, or from a version this workspace deployed. The
+   *  caller's current work on that process is parked as a new experiment
+   *  first, unless there is nothing to park. */
+  async adoptVersion(
+    name: string,
+    body: {
+      bp: string;
+      source: string;
+      experiment: string | null;
+      commit: string | null;
+      park_name: string;
+      park_title: string;
+      deployer: string;
+    },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(`/copies/${encodeURIComponent(name)}/adopt`, body);
+  }
+
+  /** `POST /copies/main/bp/{bp}/revert-dev` — put the dev stage back to a
+   *  version it ran before, by adding ONE commit on top of main and
+   *  redeploying dev from the new tip. Dev only: staging and production go
+   *  back through promote/rollback. */
+  async revertDevToVersion(
+    bp: string,
+    body: { commit: string; bp_label: string | null; deployer: string },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(
+      `/copies/main/bp/${encodeURIComponent(bp)}/revert-dev`,
+      body,
+    );
+  }
+
+  /** `GET /copies/{name}/deploy-over-main-preview` — the main commits this
+   *  copy does not have, with their authors, for the confirm dialog. */
+  async deployOverMainPreview(
+    name: string,
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/deploy-over-main-preview?bp=${encodeURIComponent(bp)}`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `POST /copies/{name}/deploy-over-main` — publish this copy over a main
+   *  that moved on. `needs_rebase` in the response means git could not decide
+   *  the conflict and NOTHING was changed. */
+  async deployOverMain(
+    name: string,
+    body: {
+      bp: string;
+      mode: string;
+      expected_main: string | null;
+      deployer: string;
+    },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.postJson(
+      `/copies/${encodeURIComponent(name)}/deploy-over-main`,
+      body,
+    );
+  }
+
   /** `POST /copies/{name}/bp/{bp}/ensure` — make a BP exist in a copy, cloning
    *  it fresh from main when the copy doesn't carry it yet (idempotent). Lets
    *  the copy switcher offer every copy for a BP. */

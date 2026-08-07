@@ -88,6 +88,29 @@ export function experimentNameFromTitle(title: string, maxLen: number): string {
  */
 const UNCONSTRAINED_EXPERIMENT_NAME_LEN = 40;
 
+/** Where a version taken wholesale can come from (mirrors `ADOPT_SOURCES` in
+ *  bitswan-gitops/app/routes/copies.py). */
+const ADOPT_SOURCES = ['main', 'experiment', 'commit'];
+
+/** How a copy may be published over a main that moved on (mirrors
+ *  `DEPLOY_OVER_MODES` in gitops). */
+const DEPLOY_OVER_MODES = ['rebase', 'exact'];
+
+/**
+ * The title of the experiment an adopt PARKS the caller's current work as:
+ * `My previous Compost work — 2026-08-07 14:32`.
+ *
+ * It has to read as a sentence in the Advanced menu weeks later, so it names
+ * the business process by its DISPLAY NAME (which is why the client sends the
+ * label) and stamps the moment — several parks on the same process are
+ * otherwise indistinguishable. The stamp is UTC, the same clock every other
+ * timestamp the workspace records uses.
+ */
+export function parkedWorkTitle(bpLabel: string, now: Date = new Date()): string {
+  const iso = now.toISOString();
+  return `My previous ${bpLabel} work \u2014 ${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+}
+
 export function registerCopyRoutes(
   app: FastifyInstance,
   { gitops }: CopyRoutesOptions,
@@ -450,6 +473,223 @@ export function registerCopyRoutes(
       return r.body;
     } catch (err) {
       app.log.warn({ err, branch_name }, 'copy create failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // ── taking a version wholesale ────────────────────────────────────────────
+  //
+  // Adopt a version into the caller's own copy for ONE business process:
+  // an experiment ("use this version without merging"), main ("edit the main
+  // version without merging my changes"), or a version this workspace
+  // DEPLOYED ("edit this version" — the hotpatch).
+  //
+  // The name and title of the experiment the caller's current work is PARKED
+  // as are minted here, because this is where copy names are minted (one slug
+  // generator, `experimentNameFromTitle`) and because the title needs the
+  // business process's DISPLAY NAME, which only the client knows. gitops asks
+  // for them only when there is genuinely something to park.
+  app.post<{
+    Params: { name: string };
+    Body: {
+      bp?: string;
+      source?: string;
+      experiment?: string;
+      commit?: string;
+      bpLabel?: string;
+    };
+  }>('/api/copies/:name/adopt', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    const { name } = req.params;
+    const bp = typeof req.body?.bp === 'string' ? req.body.bp.trim() : '';
+    const source = typeof req.body?.source === 'string' ? req.body.source.trim() : '';
+    if (!name || !bp) {
+      return reply.code(400).send({ error: 'name and bp are required' });
+    }
+    if (!ADOPT_SOURCES.includes(source)) {
+      return reply
+        .code(400)
+        .send({ error: `source must be one of ${ADOPT_SOURCES.join(', ')}` });
+    }
+    if (source === 'experiment' && !req.body?.experiment) {
+      return reply
+        .code(400)
+        .send({ error: "source 'experiment' needs an experiment name" });
+    }
+    if (source === 'commit' && !req.body?.commit) {
+      return reply.code(400).send({ error: "source 'commit' needs a commit" });
+    }
+    const email = await emailFromRequest(req, app.log);
+    if (!email) {
+      return reply.code(401).send({ error: 'not authenticated' });
+    }
+    // The copy being adopted INTO is the caller's own, derived from the
+    // verified identity — the client does not get to name someone else's.
+    // gitops re-checks ownership from `.copy.json`; this makes the common case
+    // unspoofable rather than merely rejected.
+    if (name !== copyNameForEmail(email)) {
+      return reply
+        .code(403)
+        .send({ error: 'a version is adopted into your own copy' });
+    }
+    const budget = await gitops.copyNameBudget();
+    if (!budget.ok) {
+      return reply
+        .code(budget.status >= 400 && budget.status < 500 ? budget.status : 502)
+        .send({ error: 'could not read the copy-name limit from gitops' });
+    }
+    const reported = (budget.body as { max_length?: number | null } | null)
+      ?.max_length;
+    const maxLen =
+      typeof reported === 'number' ? reported : UNCONSTRAINED_EXPERIMENT_NAME_LEN;
+    const bpLabel =
+      typeof req.body?.bpLabel === 'string' && req.body.bpLabel.trim()
+        ? req.body.bpLabel.trim()
+        : bp;
+    const parkTitle = parkedWorkTitle(bpLabel);
+    try {
+      const r = await gitops.adoptVersion(name, {
+        bp,
+        source,
+        experiment: req.body?.experiment ?? null,
+        commit: req.body?.commit ?? null,
+        park_name: experimentNameFromTitle(parkTitle, maxLen),
+        park_title: parkTitle,
+        deployer: email,
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, name, bp, source }, 'adopt version failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Put the DEV stage back to a version it ran before. This is a change to
+  // MAIN (dev deploys from main), made forward-only as one commit on top —
+  // so everybody else's copy goes one behind and carries it on their next
+  // Sync. The client's confirm dialog says exactly that before calling.
+  app.post<{
+    Params: { bp: string };
+    Body: { commit?: string; bpLabel?: string };
+  }>('/api/copies/main/bp/:bp/revert-dev', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    const { bp } = req.params;
+    const commit = typeof req.body?.commit === 'string' ? req.body.commit.trim() : '';
+    if (!bp || !commit) {
+      return reply.code(400).send({ error: 'bp and commit are required' });
+    }
+    const email = await emailFromRequest(req, app.log);
+    if (!email) {
+      return reply.code(401).send({ error: 'not authenticated' });
+    }
+    try {
+      const r = await gitops.revertDevToVersion(bp, {
+        commit,
+        bp_label: req.body?.bpLabel ?? null,
+        deployer: email,
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, bp, commit }, 'dev revert failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
+  // Whose work "Deploy this version, overwriting main" would go over — short
+  // sha, subject and AUTHOR for every main commit this copy does not have.
+  // The confirm dialog is built from this, because "overwrite main" with no
+  // names attached is a button nobody can consent to.
+  app.get<{ Params: { name: string }; Querystring: { bp?: string } }>(
+    '/api/copies/:name/deploy-over-main-preview',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      const bp = typeof req.query?.bp === 'string' ? req.query.bp.trim() : '';
+      if (!bp) {
+        return reply.code(400).send({ error: 'bp is required' });
+      }
+      try {
+        const r = await gitops.deployOverMainPreview(req.params.name, bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name: req.params.name, bp }, 'deploy-over preview failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  // Publish this copy's version of one business process even though main has
+  // moved on. `rebase` replays my commits onto main with my side winning the
+  // hunks we both touched (main's untouched additions kept); `exact` makes
+  // main byte-for-byte my version. `expectedMain` is the tip the confirm
+  // dialog described — if main moved since, gitops 409s rather than
+  // superseding work the user was never shown.
+  app.post<{
+    Params: { name: string };
+    Body: { bp?: string; mode?: string; expectedMain?: string };
+  }>('/api/copies/:name/deploy-over-main', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    const { name } = req.params;
+    const bp = typeof req.body?.bp === 'string' ? req.body.bp.trim() : '';
+    const mode = typeof req.body?.mode === 'string' ? req.body.mode.trim() : 'rebase';
+    if (!name || !bp) {
+      return reply.code(400).send({ error: 'name and bp are required' });
+    }
+    if (!DEPLOY_OVER_MODES.includes(mode)) {
+      return reply
+        .code(400)
+        .send({ error: `mode must be one of ${DEPLOY_OVER_MODES.join(', ')}` });
+    }
+    const email = await emailFromRequest(req, app.log);
+    if (!email) {
+      return reply.code(401).send({ error: 'not authenticated' });
+    }
+    if (name !== copyNameForEmail(email)) {
+      return reply
+        .code(403)
+        .send({ error: 'only your own copy can be published over main' });
+    }
+    try {
+      const r = await gitops.deployOverMain(name, {
+        bp,
+        mode,
+        expected_main: req.body?.expectedMain ?? null,
+        deployer: email,
+      });
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, name, bp, mode }, 'deploy over main failed');
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   });
