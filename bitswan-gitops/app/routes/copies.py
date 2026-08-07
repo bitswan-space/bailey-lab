@@ -2832,6 +2832,9 @@ class DeployOverMainRequest(BaseModel):
     # then, that list was about a different main and the user has not consented
     # to this one.
     expected_main: str | None = None
+    # The business process's DISPLAY NAME, for the messages and the commit
+    # subject. gitops only knows the directory slug.
+    bp_label: str | None = None
 
 
 DEPLOY_OVER_MODES = ("rebase", "exact")
@@ -2942,6 +2945,7 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
             detail=f"Only the owner of copy '{name}' can publish it over main.",
         )
     deployer = (body.deployer or "").strip() or requester
+    label = (body.bp_label or "").strip() or bp
     bare = bp_bare_repo_path(bp)
 
     clone = os.path.join(copy_path, bp)
@@ -3009,7 +3013,7 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
                     method=None,
                     bp=bp,
                     message=(
-                        f"'{bp}' cannot be replayed onto main automatically — a "
+                        f"{label} cannot be replayed onto main automatically — a "
                         "file was changed on one side and deleted on the other, "
                         "which no rule can decide. NOTHING was changed. Hand off "
                         "to the coding agent to resolve it."
@@ -3032,14 +3036,14 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
             main_tip,
             mine,
             deployer,
-            f"Replace {bp} on main with the version from '{name}'",
+            f"Replace {label} on main with the version from '{name}'",
             f"your version of '{bp}'",
         )
         if not committed:
             raise HTTPException(
                 status_code=500,
                 detail=(
-                    f"Main's '{bp}' is already byte-identical to yours, yet it "
+                    f"Main's {label} is already byte-identical to yours, yet it "
                     "reported changes to publish. Nothing was changed."
                 ),
             )
@@ -3069,7 +3073,7 @@ async def deploy_over_main(name: str, body: DeployOverMainRequest):
         method=method,
         bp=bp,
         message=(
-            f"Published your version of '{bp}' over main, superseding "
+            f"Published your version of {label} over main, superseding "
             f"{len(superseded)} commit(s) from other people. {kept}"
         ),
         superseded=superseded,

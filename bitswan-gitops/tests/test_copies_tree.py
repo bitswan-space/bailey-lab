@@ -2190,10 +2190,16 @@ def test_a_conflict_no_rule_can_decide_changes_nothing_at_all(env, tmp_path):
     asyncio.run(bp_git.publish_main_from_clone(str(other), "bpa"))
     main_before = _main_tip(env, "bpa")
 
-    res = _as(OWNER, _deploy_over("alice", bp="bpa", mode="rebase", deployer=OWNER))
+    res = _as(
+        OWNER,
+        _deploy_over(
+            "alice", bp="bpa", mode="rebase", deployer=OWNER, bp_label="Compost"
+        ),
+    )
 
     assert res.status == "needs_rebase"
     assert "coding agent" in res.message
+    assert "Compost" in res.message, "the message names the process, not its directory"
     assert _head(clone) == mine_before, "my copy is untouched"
     assert _main_tip(env, "bpa") == main_before, "main is untouched"
     assert _head(env["bares"]["bpa"], "refs/heads/alice") == alice_ref_before

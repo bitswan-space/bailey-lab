@@ -650,7 +650,7 @@ export function registerCopyRoutes(
   // superseding work the user was never shown.
   app.post<{
     Params: { name: string };
-    Body: { bp?: string; mode?: string; expectedMain?: string };
+    Body: { bp?: string; mode?: string; expectedMain?: string; bpLabel?: string };
   }>('/api/copies/:name/deploy-over-main', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) {
@@ -681,6 +681,10 @@ export function registerCopyRoutes(
         bp,
         mode,
         expected_main: req.body?.expectedMain ?? null,
+        bp_label:
+          typeof req.body?.bpLabel === 'string' && req.body.bpLabel.trim()
+            ? req.body.bpLabel.trim()
+            : bp,
         deployer: email,
       });
       if (!r.ok) {

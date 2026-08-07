@@ -213,6 +213,7 @@ export function SyncDeployTab({
           bp: bp.name,
           mode,
           expectedMain,
+          bpLabel: bp.displayName,
         });
         if (res.status === 'needs_rebase') {
           toast.error(res.message, { id, duration: 14000 });

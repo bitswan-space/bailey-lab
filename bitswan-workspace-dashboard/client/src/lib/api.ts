@@ -1561,7 +1561,14 @@ export const api = {
     /** Publish this copy's version over a main that moved on. */
     deployOverMain: (
       name: string,
-      body: { bp: string; mode: 'rebase' | 'exact'; expectedMain?: string },
+      body: {
+        bp: string;
+        mode: 'rebase' | 'exact';
+        expectedMain?: string;
+        /** The business process's display name, for the messages and the
+         *  commit subject — gitops only knows the directory slug. */
+        bpLabel: string;
+      },
     ) =>
       postJson<DeployOverMainResult>(
         `/api/copies/${encodeURIComponent(name)}/deploy-over-main`,

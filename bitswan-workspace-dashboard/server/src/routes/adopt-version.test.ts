@@ -179,13 +179,19 @@ test('only your own copy can be published over main, and only in a known mode', 
     method: 'POST',
     url: `/api/copies/${ALICE_COPY}/deploy-over-main`,
     headers: { 'x-forwarded-email': ALICE },
-    payload: { bp: 'compost', mode: 'exact', expectedMain: 'abc1234' },
+    payload: {
+      bp: 'compost',
+      mode: 'exact',
+      expectedMain: 'abc1234',
+      bpLabel: 'Compost',
+    },
   });
   assert.equal(ok.statusCode, 200);
   assert.deepEqual(calls[0]?.args[1], {
     bp: 'compost',
     mode: 'exact',
     expected_main: 'abc1234',
+    bp_label: 'Compost',
     deployer: ALICE,
   });
   await app.close();
