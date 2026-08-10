@@ -82,3 +82,28 @@ func TestTheImagePulledIsTheImageRun(t *testing.T) {
 			"no deployment used")
 	}
 }
+
+// The e2e builds this image from the checkout's own Dockerfile so the run
+// exercises the branch. Pulling there would replace it with Hub's copy and
+// silently revert the Dockerfile under test, so the pull has an opt-out — and the
+// opt-out has to actually be honoured.
+func TestTheRuntimePullCanBeOptedOut(t *testing.T) {
+	logPath := fakeDocker(t)
+	t.Setenv(SkipRuntimeImagePullEnv, "1")
+
+	_ = Recreate()
+
+	raw, _ := os.ReadFile(logPath)
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "pull ") {
+			t.Fatalf("%s was set but Recreate pulled anyway: %q", SkipRuntimeImagePullEnv, line)
+		}
+	}
+	// Opting out of the pull must not opt out of the recreate itself. The fake
+	// docker reports no existing container (it logs its argv rather than echoing
+	// it), so there is nothing to stop — reaching the network setup that
+	// startDaemonContainer does first is the evidence that it carried on.
+	if !strings.Contains(string(raw), "network ") {
+		t.Errorf("Recreate skipped the recreate as well as the pull; docker calls were:\n%s", raw)
+	}
+}

@@ -69,6 +69,16 @@ func Recreate() error {
 	return startDaemonContainer("Starting updated automation server daemon container...", "Automation server daemon updated and started successfully")
 }
 
+// SkipRuntimeImagePullEnv opts out of the pull, for the case where the image
+// already on the host IS the point rather than a stale copy of the published one.
+//
+// e2e/bringup.sh builds bitswan/automation-server-runtime:latest from the
+// checkout's own Dockerfile — so the daemon can start on a hub-less VM, and so the
+// run exercises this branch's image. Pulling there would replace it with whatever
+// is on Hub and silently revert the Dockerfile under test, turning a green e2e
+// into proof of nothing. Same for anyone iterating on the Dockerfile locally.
+const SkipRuntimeImagePullEnv = "BITSWAN_SKIP_RUNTIME_IMAGE_PULL"
+
 // pullRuntimeImage fetches the newest runtime image before the container is
 // recreated.
 //
@@ -78,6 +88,12 @@ func Recreate() error {
 // with whatever is cached — a slightly stale daemon that is running beats a
 // current one that is not.
 func pullRuntimeImage() {
+	if os.Getenv(SkipRuntimeImagePullEnv) != "" {
+		fmt.Printf("Not pulling %s: %s is set, so the image already on this host is "+
+			"taken to be the one under test.\n", DaemonRuntimeImage, SkipRuntimeImagePullEnv)
+		return
+	}
+
 	fmt.Printf("Pulling %s...\n", DaemonRuntimeImage)
 	pull := exec.Command("docker", "pull", DaemonRuntimeImage)
 	pull.Stdout = os.Stdout
