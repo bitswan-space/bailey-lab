@@ -215,7 +215,7 @@ func startDaemonContainer(startMessage, successMessage string) error {
 	// Use bitswan_network to allow resolving Docker service names
 	// Use pre-built image with all tools (git, ssh-keygen, docker-cli, mkcert) pre-installed
 	// Mount the bitswan automation server socket directory for IPC
-	daemonImage := "bitswan/automation-server-runtime:latest"
+	daemonImage := DaemonRuntimeImage
 
 	// Create the socket directory on the host if it doesn't exist
 	socketDir := "/var/run/bitswan"

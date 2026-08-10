@@ -80,6 +80,11 @@ mark "[1/7] build-dev-images.sh: gitops/dashboard/coding-agent/egress/infra-driv
 # here or `automation-server-daemon init` can't start it on a hub-less VM.
 docker build -t bitswan/automation-server-runtime:latest -f "$REPO_ROOT/bitswan-automation-server/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
 mark "[1/7] docker build: automation-server-runtime image"
+# ...and keep it. Every path that recreates the daemon pulls this tag first, so
+# that a server updating its binary also picks up image-supplied tooling. Here
+# that would replace the image just built from THIS checkout with whatever is on
+# Hub — reverting the Dockerfile under test and making a green run prove nothing.
+export BITSWAN_SKIP_RUNTIME_IMAGE_PULL=1
 
 echo "=== [2/7] Daemon + traefik ingress ==="
 # Shared read-through PACKAGE PROXIES for per-BP image builds (a Go module proxy

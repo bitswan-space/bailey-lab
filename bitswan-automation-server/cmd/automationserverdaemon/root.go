@@ -23,4 +23,3 @@ func NewAutomationServerDaemonCmd() *cobra.Command {
 
 	return cmd
 }
-

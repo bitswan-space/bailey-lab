@@ -39,4 +39,3 @@ func newApiDocsCmd() *cobra.Command {
 		},
 	}
 }
-
