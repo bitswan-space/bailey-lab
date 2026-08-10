@@ -99,11 +99,12 @@ func TestTheRuntimePullCanBeOptedOut(t *testing.T) {
 			t.Fatalf("%s was set but Recreate pulled anyway: %q", SkipRuntimeImagePullEnv, line)
 		}
 	}
-	// Opting out of the pull must not opt out of the recreate itself. The fake
-	// docker reports no existing container (it logs its argv rather than echoing
-	// it), so there is nothing to stop — reaching the network setup that
-	// startDaemonContainer does first is the evidence that it carried on.
-	if !strings.Contains(string(raw), "network ") {
+	// Opting out of the pull must not opt out of the recreate itself. Assert on the
+	// container check, which is the first thing Recreate does after the pull
+	// decision — how far it gets AFTER that depends on the environment
+	// (startDaemonContainer needs to create /var/run/bitswan, so it stops earlier
+	// as a non-root CI user than it does as root), and this test is not about that.
+	if !strings.Contains(string(raw), "ps -a") {
 		t.Errorf("Recreate skipped the recreate as well as the pull; docker calls were:\n%s", raw)
 	}
 }
