@@ -92,6 +92,14 @@ async function throwHttpError(url: string, r: Response): Promise<never> {
   throw new Error(detail || `${url} returned ${r.status}`);
 }
 
+/** The message a caught error carries, without the `Error: ` prefix that
+ *  `String(err)` prepends — what the user is shown in a toast. Errors from
+ *  this module already hold the server's own detail (see `throwHttpError`). */
+// eslint-disable-next-line no-restricted-syntax -- catch parameter is genuinely unknown
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 // Retry once on transient network errors. Container-state actions trigger a
 // Traefik route reconfigure that briefly tears down the shared HTTP/2
 // connection — the in-flight request surfaces as `TypeError: Failed to fetch`
@@ -118,7 +126,11 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
         notifySessionExpired();
         throw new SessionExpiredError();
       }
-      if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+      // Same as the GET helpers: carry the server's own message, never a bare
+      // "returned 502". Every mutating call (deploy, sync, merge, delete)
+      // reports failures through here, and a status code alone tells the user
+      // nothing about what actually went wrong.
+      if (!r.ok) await throwHttpError(url, r);
       return r;
     } catch (err) {
       if (attempt === 1 || !isTransientNetworkError(err)) throw err;
@@ -338,7 +350,7 @@ export interface HistoryCommit {
   date: string;
   subject: string;
   /** Deploy markers ("<email> deployed <date>") for main commits left at the
-   *  tip by a Sync & Deploy. Absent/empty on non-deploy commits. */
+   *  tip by a Deploy. Absent/empty on non-deploy commits. */
   deploys?: string[];
 }
 
@@ -741,6 +753,20 @@ export interface RebaseCopyResult {
   deploy_task_ids?: string[];
 }
 
+/** Gitops `GET /copies/{name}/merge-preview` — what merging an experiment back
+ *  would carry into its PARENT copy (not into main). Experiments only. */
+export interface MergePreview {
+  parent: string;
+  /** Commits on the experiment the parent's branch lacks. */
+  ahead: number;
+  /** Commits on the parent's branch the experiment lacks. */
+  behind: number;
+  /** Working-tree edits the merge commits before merging (`<bp>/<path>`). */
+  uncommitted: string[];
+  /** Business processes born in the experiment; the merge publishes these. */
+  new_bps: string[];
+}
+
 /** Gitops `GET /copies/{name}/divergence?bp=` — commit counts vs main, split
  *  into the viewed business process vs all other business processes. */
 export interface BpDivergence {
@@ -764,6 +790,19 @@ export interface CreateCopyResponse {
 export interface CreateCopyRequest {
   branch_name: string;
   base_branch?: string;
+}
+
+/** Body of `POST /api/experiments`. The experiment's parent (the caller's own
+ *  copy) and its slug are derived server-side from the verified identity — the
+ *  user only names the thing they're trying out, and the business process they
+ *  are trying it out on. */
+export interface CreateExperimentRequest {
+  title: string;
+  /** The business process the experiment is FOR (its directory name, not the
+   *  display name). Required: it is the only one cloned into the experiment —
+   *  everything else materializes from the parent copy on first open — so an
+   *  omitted `bp` would produce an empty experiment. The server rejects it. */
+  bp: string;
 }
 
 /** Wire-mirror of the gitops DELETE /processes/{slug} responses: 202 carries
@@ -861,8 +900,18 @@ export const api = {
 
   createCopy: (body: CreateCopyRequest) =>
     postJson<CreateCopyResponse>('/api/copies', body),
-  // Whole-copy delete (used to be operator-only; now a user-facing action
-  // behind a warn+confirm dialog that lists unmerged/uncommitted work).
+  /** Start an experiment off your own copy: a child copy carrying explicit
+   *  `kind: 'experiment'` metadata, its parent, and the title shown for it
+   *  everywhere. Only `body.bp` is cloned into it (the rest of the copy's
+   *  business processes materialize lazily via `ensureBp` on first open), which
+   *  is what keeps the create fast. Same response as createCopy (including the
+   *  auto live-dev deploy task) plus the generated slug in `name`. */
+  createExperiment: (body: CreateExperimentRequest) =>
+    postJson<CreateCopyResponse>('/api/experiments', body),
+  // Whole-copy delete. Experiments only ("Discard experiment"): gitops
+  // refuses to delete main, user copies and metadata-less legacy copies, and
+  // rejects anyone but the owner. Behind a warn+confirm dialog that lists the
+  // unmerged/uncommitted work the discard would destroy.
   // 202 {task_id}; the `copies` SSE snapshot dropping the copy signals done.
   deleteCopy: (name: string) =>
     deleteAllow4xx<DeleteCopyResponse>(`/api/copies/${encodeURIComponent(name)}`),
@@ -1073,7 +1122,7 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
     ),
   /** Supply chain: CVEs for the image a deploy of this BP would build from the
-   *  current copy's source (Sync & Deploy → Supply Chain Security). Builds + scans on demand. */
+   *  current copy's source (Deploy → Supply Chain Security). Builds + scans on demand. */
   supplyChainPreview: (bp: string, copy: string | null) =>
     getJson<SupplyChainReport>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${copy ? `?copy=${encodeURIComponent(copy)}` : ''}`,
@@ -1200,10 +1249,21 @@ export const api = {
         `/api/copies/${encodeURIComponent(name)}/status`,
       ),
     /** Commit divergence from main split into this BP vs every other BP, so the
-     *  per-BP Sync & Deploy screen reflects the BP being viewed. */
+     *  per-BP Deploy screen reflects the BP being viewed. */
     divergence: (name: string, bp: string) =>
       getJson<BpDivergence>(
         `/api/copies/${encodeURIComponent(name)}/divergence?bp=${encodeURIComponent(bp)}`,
+      ),
+    /**
+     * How many commits on main this copy lacks — `behind` in total, `bps`
+     * broken down per business process (only the ones actually behind).
+     * Cheap on the gitops side (ref comparison in the bare repos, no fetch),
+     * and the ONLY source for "is there anything to pull": the `copies` SSE
+     * snapshot carries no counts at all any more.
+     */
+    behind: (name: string) =>
+      getJson<{ behind: number; bps: Record<string, number> }>(
+        `/api/copies/${encodeURIComponent(name)}/behind`,
       ),
     /** Per-BP ahead/behind for the whole copy in one call (only diverging BPs
      *  are present). Lets the switcher show ↑/↓ on each BP at a glance. */
@@ -1247,10 +1307,41 @@ export const api = {
      * redeploys live-dev only for BPs whose image dir changed; `needs_rebase`
      * means a conflict that the coding agent must resolve.
      */
-    rebase: (name: string) =>
+    /**
+     * Pull main into ONE business process of a copy (rebase that clone onto
+     * its own main). Scoped for the same reason Deploy is: each business
+     * process is its own repository, so "behind main" is a fact about a
+     * process, not about a copy — and a pull must move only what the user was
+     * shown and agreed to.
+     */
+    rebase: (name: string, bp: string) =>
       postJson<RebaseCopyResult>(
         `/api/copies/${encodeURIComponent(name)}/rebase`,
+        { bp },
+      ),
+    /**
+     * Merge an experiment back into the copy it branched off. Never touches
+     * main and never deploys: it fast-forwards the parent's branch and
+     * redeploys the parent's live-dev for the business processes whose image
+     * changed. `needs_rebase` means the parent moved on and the experiment has
+     * to be rebased onto it first (coding-agent handoff); `noop` means the
+     * experiment has nothing the parent lacks.
+     */
+    mergeToParent: (name: string) =>
+      postJson<RebaseCopyResult>(
+        `/api/copies/${encodeURIComponent(name)}/merge-to-parent`,
         {},
+      ),
+    /**
+     * What `mergeToParent` would actually carry into the parent copy, read
+     * live. Measured against the PARENT's branch — `status()` measures against
+     * MAIN, and an experiment inherits its parent's whole divergence from
+     * main, so it reports changes even for an experiment whose work is already
+     * merged. Everything empty means the merge would be a no-op.
+     */
+    mergePreview: (name: string) =>
+      getJson<MergePreview>(
+        `/api/copies/${encodeURIComponent(name)}/merge-preview`,
       ),
     /** Copy-branch + main commit logs with deploy tags, scoped to one
      *  business process's repo. */

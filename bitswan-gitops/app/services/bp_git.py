@@ -66,13 +66,53 @@ def git_remote_url(bp: str) -> str:
     return f"{base.rstrip('/')}/{bp}.git"
 
 
-async def fetch_main(clone_path: str, bp: str) -> None:
+# Where a clone keeps its view of the BP repo's main.
+#
+# NOT ``FETCH_HEAD``. FETCH_HEAD is a single file that EVERY ``git fetch`` in
+# the same clone rewrites, and it is not written under a lock. gitops fetches
+# concurrently into the same clone all the time — the divergence, behind,
+# status, history and diff reads all do it on demand, from whichever browsers
+# happen to be open, while a pull or a sync is running in the task queue. A
+# reader that catches FETCH_HEAD mid-write sees an empty file, and
+# ``git rebase FETCH_HEAD`` then dies with ``invalid upstream 'FETCH_HEAD'``
+# (live-seen: a pull failed that way while two sessions were open).
+#
+# A real ref is updated through git's ref lock, so a concurrent fetch either
+# has finished or has not — never half. Namespaced under refs/bitswan/ so it
+# can never collide with a branch, a tag or a remote-tracking ref.
+MAIN_REF = "refs/bitswan/main"
+
+
+async def fetch_main(clone_path: str, bp: str) -> str:
     """Refresh the clone's view of the BP repo's main from the LOCAL bare
-    (filesystem — gitops can't authenticate to its own smart-HTTP origin).
-    FETCH_HEAD then points at the current main."""
-    await call_git_command(
-        "git", "fetch", bp_bare_repo_path(bp), "main", cwd=clone_path
+    (filesystem — gitops can't authenticate to its own smart-HTTP origin), and
+    return the sha it now points at. :data:`MAIN_REF` names it.
+
+    Raises on failure. A fetch that quietly fails leaves the ref at whatever it
+    held before, so every ahead/behind count, diff and rebase computed
+    afterwards is silently answered against a stale main."""
+    ok = await call_git_command(
+        "git",
+        "fetch",
+        "--no-tags",
+        bp_bare_repo_path(bp),
+        f"+refs/heads/main:{MAIN_REF}",
+        cwd=clone_path,
     )
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not read '{bp}'s main into {clone_path}",
+        )
+    out, err, rc = await call_git_command_with_output(
+        "git", "rev-parse", MAIN_REF, cwd=clone_path
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"'{bp}'s main was fetched but could not be resolved: {(err or out).strip()}",
+        )
+    return out.strip()
 
 
 async def commit_in_bp_clone(
@@ -109,13 +149,17 @@ async def commit_in_bp_clone(
     return True
 
 
-async def ff_main_to_ref(bp: str, ref_or_sha: str) -> None:
-    """Fast-forward the BP repo's ``main`` to `ref_or_sha`, append-only.
+async def ff_branch_to_ref(bp: str, branch: str, ref_or_sha: str) -> None:
+    """Fast-forward one branch of a BP's bare repo to `ref_or_sha`, append-only.
 
-    Verifies the target exists in the bare, checks main is an ancestor (a true
-    fast-forward), then advances the ref with a compare-and-swap ``update-ref``
-    (the expected old value guards against a concurrent advance). 409 when the
-    target isn't a fast-forward or main moved concurrently.
+    Verifies the target exists in the bare, checks `branch` is an ancestor (a
+    true fast-forward), then advances the ref with a compare-and-swap
+    ``update-ref`` (the expected old value guards against a concurrent
+    advance). 409 when the target isn't a fast-forward or the branch moved
+    concurrently.
+
+    Used for ``main`` (copy → main sync, where clients can never push main) and
+    for a parent copy's branch (experiment → parent merge-back).
     """
     bare = bp_bare_repo_path(bp)
 
@@ -129,36 +173,49 @@ async def ff_main_to_ref(bp: str, ref_or_sha: str) -> None:
     target = target_out.strip()
 
     old_out, _, old_rc = await call_git_command_with_output(
-        "git", "-C", bare, "rev-parse", "--verify", "refs/heads/main"
+        "git", "-C", bare, "rev-parse", "--verify", f"refs/heads/{branch}"
     )
     if old_rc != 0:
-        raise HTTPException(status_code=500, detail=f"{bp}.git has no main branch")
+        raise HTTPException(status_code=500, detail=f"{bp}.git has no {branch} branch")
     old = old_out.strip()
 
     _, _, ff_rc = await call_git_command_with_output(
-        "git", "-C", bare, "merge-base", "--is-ancestor", "refs/heads/main", target
+        "git",
+        "-C",
+        bare,
+        "merge-base",
+        "--is-ancestor",
+        f"refs/heads/{branch}",
+        target,
     )
     if ff_rc != 0:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"'{ref_or_sha}' is not a fast-forward of {bp}'s main. Rebase "
-                "onto the latest main and push, then retry."
+                f"'{ref_or_sha}' is not a fast-forward of {bp}'s {branch}. "
+                f"Rebase onto the latest {branch} and push, then retry."
             ),
         )
 
-    # Compare-and-swap: the trailing <oldvalue> makes update-ref fail if main
-    # moved between the ancestry check and here.
+    # Compare-and-swap: the trailing <oldvalue> makes update-ref fail if the
+    # branch moved between the ancestry check and here.
     out, err, rc = await call_git_command_with_output(
-        "git", "-C", bare, "update-ref", "refs/heads/main", target, old
+        "git", "-C", bare, "update-ref", f"refs/heads/{branch}", target, old
     )
     if rc != 0:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"{bp}'s main moved during the sync — retry: " f"{(err or out).strip()}"
+                f"{bp}'s {branch} moved during the sync — retry: "
+                f"{(err or out).strip()}"
             ),
         )
+
+
+async def ff_main_to_ref(bp: str, ref_or_sha: str) -> None:
+    """Fast-forward the BP repo's deploy-only ``main`` to `ref_or_sha`
+    (thin wrapper over :func:`ff_branch_to_ref`)."""
+    await ff_branch_to_ref(bp, "main", ref_or_sha)
 
 
 async def publish_main_from_clone(clone_path: str, bp: str) -> None:
@@ -286,9 +343,9 @@ async def refresh_main_bp_checkout(bp: str) -> None:
     main_dir = bp_clone_path(None, bp)
     bare = bp_bare_repo_path(bp)
     if os.path.isdir(os.path.join(main_dir, ".git")):
-        await call_git_command("git", "fetch", bare, "main", cwd=main_dir)
+        tip = await fetch_main(main_dir, bp)
         out, err, rc = await call_git_command_with_output(
-            "git", "reset", "--hard", "FETCH_HEAD", cwd=main_dir
+            "git", "reset", "--hard", tip, cwd=main_dir
         )
         if rc != 0:
             raise HTTPException(

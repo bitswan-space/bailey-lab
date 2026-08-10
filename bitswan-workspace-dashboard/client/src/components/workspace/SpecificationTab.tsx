@@ -80,6 +80,9 @@ interface SpecificationTabProps {
   copy: string;
   /** Flips the workspace to the Coding Agent tab (Build automation). */
   onShowAgents: () => void;
+  /** Fired after a save lands on disk — lets the shell refresh anything
+   *  keyed on the copy's dirtiness (e.g. the experiment banner's merge gate). */
+  onSaved?: () => void;
 }
 
 type LoadState =
@@ -270,7 +273,7 @@ function serializeDoc(state: EditorState): string {
  * and embedded mermaid flowcharts live in the same copy files, so
  * the coding agent sees everything the user authored.
  */
-export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabProps) {
+export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: SpecificationTabProps) {
   const { sendPrompt } = useSessions();
   const [editorState, setEditorState] = useState<EditorState>();
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' });
@@ -407,6 +410,7 @@ export function SpecificationTab({ bp, copy, onShowAgents }: SpecificationTabPro
           // state is already 'dirty' again — let autosave re-fire.
           setSave((s) => (s.kind === 'dirty' ? s : { kind: 'saved' }));
           invalidateReadme(bp.id, copy);
+          onSaved?.();
         } else if (r.error === 'conflict') {
           setSave({ kind: 'conflict' });
           toast.error('README.md changed on disk', {

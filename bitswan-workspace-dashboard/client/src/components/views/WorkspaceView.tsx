@@ -3,12 +3,14 @@ import { AgentFilesTab } from '@/components/views/AgentFilesTab';
 import { GetStartedTab } from '@/components/views/GetStartedTab';
 import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
+import { SyncTab } from '@/components/views/SyncTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
 import { RequirementsTab } from '@/components/requirements/RequirementsTab';
 import { ReadmeCard } from '@/components/workspace/ReadmeCard';
 import { SpecificationTab } from '@/components/workspace/SpecificationTab';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import type { BpDivergence } from '@/lib/api';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
 
 interface WorkspaceViewProps {
@@ -21,24 +23,59 @@ interface WorkspaceViewProps {
    *  the dialog). Copy-scoped empty states show "Creating copy…" instead of
    *  "No copy yet" while this is true (#160). */
   copyCreating?: boolean;
+  /** The business process currently being materialized into the copy in view,
+   *  if any. An experiment carries only the process it was started on, so
+   *  opening another one clones it in on demand — while that runs the copy
+   *  gate says "adding…" rather than "it isn't in this copy". */
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing in flight
+  addingBp?: string | null;
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
+  /** An editor save landed in the current copy (dirtiness changed). */
+  onCopyEdited?: () => void;
   /** Open the "new business process" flow (the dialog lives in TopNav). */
   onNewBp: () => void;
+  /** The copy in view is the signed-in user's own — the only copy that syncs
+   *  with main in either direction. */
+  isMyCopy: boolean;
+  /** The copy in view is one of the user's own experiments: its work reaches
+   *  main by being merged back into the parent copy first. */
+  isMyExperiment: boolean;
+  /** The shell's ONE divergence reading for (copy, business process) — the
+   *  same object the Sync step's existence is derived from, so the Sync and
+   *  Deploy screens can never disagree about how this process stands. */
+  // eslint-disable-next-line no-restricted-syntax -- null = not known
+  divergence: BpDivergence | null;
+  /** Why that reading failed. null = it is trustworthy. */
+  // eslint-disable-next-line no-restricted-syntax -- null = no error
+  divergenceError: string | null;
+  /** Pull main into ONE business process (the Sync tab's one action). */
+  onPullBp: (copy: string, bp: string, bpLabel: string) => Promise<void>;
+  /** Merge the experiment in view back into its parent copy — the same action
+   *  the experiment banner carries. */
+  onMergeBack: () => void;
 }
 
 /**
  * The body router below the TopNav. Description and Deployments work
- * without a copy (Deployments is always main-scoped); Coding Agent,
- * Requirements and Sync & Deploy follow the selected copy.
+ * without a copy (Deployments is always main-scoped); Sync, Coding Agent,
+ * Requirements and Deploy follow the selected copy.
  */
 export function WorkspaceView({
   bp,
   wt,
   copyCreating = false,
+  addingBp = null,
   tab,
   onTab,
+  onCopyEdited,
   onNewBp,
+  isMyCopy,
+  isMyExperiment,
+  divergence,
+  divergenceError,
+  onPullBp,
+  onMergeBack,
 }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
 
@@ -88,14 +125,14 @@ export function WorkspaceView({
       )}
 
       {tab === 'agent' && !agentMounted && (
-        <CopyGate bp={bp} wt={wt} creating={copyCreating} what="run coding agents" />
+        <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="run coding agents" />
       )}
 
       {tab === 'description' &&
         (bpInWt && wt ? (
           // Copy scope: the spec is editable — writes the copy's
           // README.md. Main scope below stays read-only (no write path).
-          <SpecificationTab bp={bp} copy={wt.name} onShowAgents={() => onTab('agent')} />
+          <SpecificationTab bp={bp} copy={wt.name} onShowAgents={() => onTab('agent')} onSaved={onCopyEdited} />
         ) : (
           <div className="flex-1 overflow-auto bg-background">
             <div className="mx-auto max-w-4xl px-7 py-6">
@@ -112,20 +149,39 @@ export function WorkspaceView({
             onShowAgents={() => onTab('agent')}
           />
         ) : (
-          <CopyGate bp={bp} wt={wt} creating={copyCreating} what="manage requirements" />
+          <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="manage requirements" />
         ))}
 
-      {tab === 'sync-deploy' &&
+      {/* Pulling main INTO one business process of the copy. Only ever your
+          own copy: main flows main → your copy → your experiments, never
+          sideways — and one process at a time, because each is its own repo. */}
+      {tab === 'sync' &&
+        (wt && isMyCopy && bpInWt ? (
+          <SyncTab
+            wt={wt}
+            bp={bp}
+            divergence={divergence}
+            divergenceError={divergenceError}
+            onPull={onPullBp}
+            onNothingToPull={() => onTab('description')}
+          />
+        ) : (
+          <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="sync with main" />
+        ))}
+
+      {tab === 'deploy' &&
         (wt && bpInWt ? (
           <SyncDeployTab
             bp={bp}
             wt={wt}
-            onShowAgents={() => onTab('agent')}
+            divergence={divergence}
+            divergenceError={divergenceError}
             onDeployed={() => onTab('deployments')}
             onManageDeployments={() => onTab('deployments')}
+            {...(isMyCopy ? { onGoToSync: () => onTab('sync') } : {})}
           />
         ) : (
-          <CopyGate bp={bp} wt={wt} creating={copyCreating} what="sync and deploy" />
+          <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="deploy" />
         ))}
 
       {tab === 'deployments' &&
@@ -135,12 +191,23 @@ export function WorkspaceView({
           <CenteredNote
             icon={<GitMerge className="size-5 text-primary" aria-hidden />}
             title="Not in main yet"
-            body={`“${bp.displayName}” only exists in copies. Sync a copy to main first — then its deployments show up here.`}
+            body={
+              isMyExperiment
+                ? `“${bp.displayName}” only exists in copies. Merge this experiment back into your copy, then deploy from there — deployments show up here afterwards.`
+                : `“${bp.displayName}” only exists in copies. Deploy a copy to main first — then its deployments show up here.`
+            }
             action={
-              wt && bpInWt ? (
-                <Button size="sm" onClick={() => onTab('sync-deploy')}>
+              // In an experiment the way forward is the merge back into the
+              // parent copy — the Deploy tab isn't even there.
+              isMyExperiment ? (
+                <Button size="sm" onClick={onMergeBack}>
+                  <GitMerge className="size-3.5" aria-hidden />
+                  Merge back into my copy
+                </Button>
+              ) : wt && bpInWt ? (
+                <Button size="sm" onClick={() => onTab('deploy')}>
                   <Rocket className="size-3.5" aria-hidden />
-                  Go to Sync &amp; Deploy
+                  Go to Deploy
                 </Button>
               ) : undefined
             }
@@ -155,6 +222,7 @@ function CopyGate({
   bp,
   wt,
   creating,
+  adding,
   what,
 }: {
   bp: BusinessProcess;
@@ -162,6 +230,8 @@ function CopyGate({
   wt: Copy | null;
   /** The selected copy is still being created (not in the snapshot yet). */
   creating?: boolean;
+  /** This business process is being cloned into the copy right now. */
+  adding?: boolean;
   what: string;
 }) {
   if (!wt) {
@@ -181,7 +251,20 @@ function CopyGate({
       <CenteredNote
         icon={<GitBranch className="size-5 text-primary" aria-hidden />}
         title="No copy yet"
-        body={`Create a copy (top-right switcher) to ${what}.`}
+        body={`Your copy is created for you when you sign in — reload the page to ${what}.`}
+      />
+    );
+  }
+  // Being cloned in right now. This is the normal path inside an experiment
+  // (which is created carrying ONLY the business process it was started on) and
+  // whenever the copy predates a process someone else added, so it must not
+  // read as "this doesn't exist here, go make it".
+  if (adding) {
+    return (
+      <CenteredNote
+        icon={<Loader2 className="size-5 animate-spin text-primary" aria-hidden />}
+        title={`Adding “${bp.displayName}” to this copy…`}
+        body={`It's being brought in as it currently stands, so you can ${what} on it here in a moment.`}
       />
     );
   }
@@ -189,7 +272,7 @@ function CopyGate({
     <CenteredNote
       icon={<GitBranch className="size-5 text-primary" aria-hidden />}
       title={`“${bp.displayName}” isn't in copy “${wt.name}”`}
-      body="Create it here with “+ New business process”, or pick another copy."
+      body="Pick it in the business-process selector to bring it in, create a new one with “+ New business process”, or switch copies."
     />
   );
 }

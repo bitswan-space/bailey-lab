@@ -25,16 +25,15 @@ async def stream_events():
     async def event_generator():
         queue = event_broadcaster.subscribe()
         try:
-            # Send current state immediately on connect
-            automations = await get_automation_service().get_automations()
-            data = [
-                a.model_dump(mode="json") if hasattr(a, "model_dump") else a
-                for a in automations
-            ]
-            yield f"event: automations\ndata: {json.dumps(data)}\n\n"
-
-            images = await get_image_service().get_images()
-            yield f"event: images\ndata: {json.dumps(images)}\n\n"
+            # Send current state immediately on connect.
+            #
+            # ORDER IS LOAD-BEARING: the dashboard cannot render anything until
+            # it knows the copies and business processes, and both are served
+            # from memory. The two SLOW producers — automations (overlays live
+            # container state) and images (a round-trip to the infra-driver) —
+            # go LAST, so one slow producer can never hold up the whole
+            # snapshot. Emitting images first used to keep the UI blank for
+            # ~13s on a busy workspace while copies (0.05s) sat behind it.
 
             # Current business-process snapshot — the dashboard reads this
             # straight off the SSE feed instead of walking the filesystem.
@@ -43,10 +42,7 @@ async def stream_events():
 
             # Current copy list. Carried as data (not just a ping) so
             # the dashboard doesn't need a follow-up REST round-trip.
-            try:
-                copies = await get_cached_copies()
-            except Exception:
-                copies = []
+            copies = await get_cached_copies()
             yield f"event: copies\ndata: {json.dumps(copies)}\n\n"
 
             # Send active deploy tasks so reconnecting clients pick up current state
@@ -56,6 +52,16 @@ async def stream_events():
             # Current git task-queue snapshot so a (re)connecting dashboard renders
             # the queue panel immediately without a REST round-trip.
             yield f"event: task_queue_snapshot\ndata: {json.dumps(task_queue.snapshot())}\n\n"
+
+            automations = await get_automation_service().get_automations()
+            data = [
+                a.model_dump(mode="json") if hasattr(a, "model_dump") else a
+                for a in automations
+            ]
+            yield f"event: automations\ndata: {json.dumps(data)}\n\n"
+
+            images = await get_image_service().get_images()
+            yield f"event: images\ndata: {json.dumps(images)}\n\n"
 
             while True:
                 try:

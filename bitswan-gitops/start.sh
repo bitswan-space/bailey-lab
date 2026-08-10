@@ -1,18 +1,39 @@
 #!/bin/bash
 
-# Auto-detect dev mode: if the bitswan-gitops source is mounted at /src,
-# enable DEBUG and reinstall deps so the running container matches the
-# mounted source (handles packages added after the image was built).
-if [ -f "/src/pyproject.toml" ] && grep -q "bitswan-gitops" /src/pyproject.toml 2>/dev/null; then
-    if [ "$DEBUG" != "true" ]; then
-        echo "========================================"
-        echo "AUTO-DETECTED DEV MODE: Found gitops source mounted at /src"
-        echo "Enabling DEBUG=true for hot-reload support"
-        echo "========================================"
-        export DEBUG=true
+# Dev mode is EXPLICIT, never inferred.
+#
+# BITSWAN_GITOPS_DEV_SOURCE names the directory where a live bitswan-gitops
+# checkout has been bind-mounted. Whoever creates that mount sets this variable
+# in the same breath, so the mount and the declaration cannot drift apart:
+#   - the daemon: `bitswan workspace update <ws> --gitops-dev-source-dir <path>`
+#     (internal/dockercompose/dockercompose.go sets the volume + this var + DEBUG)
+#   - a manual container: docker run -v <checkout>:/src:z \
+#                                    -e BITSWAN_GITOPS_DEV_SOURCE=/src ...
+#
+# This USED to be auto-detected as "/src/pyproject.toml exists and mentions
+# bitswan-gitops". That condition is ALWAYS true: the Dockerfile bakes
+# pyproject.toml and app/ into /src in every image, and the package is named
+# bitswan-gitops-server. So every container ever built — production included —
+# silently flipped itself into DEBUG=true (uvicorn StatReload supervisor, debug
+# log level, FastAPI(debug=True)) and re-ran `pip install -e /src` on every
+# start. Beyond the overhead, a spurious reload opens an ECONNREFUSED window
+# that races first-visit copy creation (see app/uvicorn.py). Do not reintroduce
+# any inference from paths that exist in the image.
+if [ -n "$BITSWAN_GITOPS_DEV_SOURCE" ]; then
+    if [ ! -f "$BITSWAN_GITOPS_DEV_SOURCE/pyproject.toml" ]; then
+        echo "FATAL: BITSWAN_GITOPS_DEV_SOURCE=$BITSWAN_GITOPS_DEV_SOURCE but no pyproject.toml there." >&2
+        echo "       Dev mode was requested and the source mount is missing or wrong; refusing to start." >&2
+        exit 1
     fi
+    echo "========================================"
+    echo "DEV MODE: gitops source declared at $BITSWAN_GITOPS_DEV_SOURCE"
+    echo "Enabling DEBUG=true for hot-reload support"
+    echo "========================================"
+    export DEBUG=true
+    # Reinstall from the mounted source so the running container matches it
+    # (picks up packages added after the image was built).
     echo "Dev mode: reinstalling dependencies from mounted source..."
-    pip install -e /src --quiet
+    pip install -e "$BITSWAN_GITOPS_DEV_SOURCE" --quiet
 fi
 
 # Function to get the group ID of the docker socket

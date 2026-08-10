@@ -1,17 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Rocket, CheckCircle2, SlidersHorizontal, Terminal, GitMerge } from 'lucide-react';
-import { toast } from '@/lib/notify';
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
-import { useSessions } from '@/components/agents/SessionProvider';
+  Rocket,
+  ArrowDownToLine,
+  CheckCircle2,
+  SlidersHorizontal,
+  Terminal,
+} from 'lucide-react';
+import { toast } from '@/lib/notify';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
 import { DiffTab } from '@/components/diff/DiffTab';
 import { CopyHistoryView } from '@/components/views/CopyHistoryView';
@@ -19,35 +14,47 @@ import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
-import { api } from '@/lib/api';
+import { api, errorMessage, type BpDivergence } from '@/lib/api';
 import { watchDeployTask } from '@/lib/deployBp';
 import { useUrlEnum } from '@/lib/urlState';
 
 interface SyncDeployTabProps {
   bp: BusinessProcess;
   wt: Copy;
-  /** Flips the shell to the Coding Agent tab (the rebase session runs there). */
-  onShowAgents: () => void;
+  /** The shell's ONE divergence reading for (copy, business process). The Sync
+   *  step's existence is derived from the SAME object, so the two screens
+   *  cannot contradict each other — they used to, because Sync came off a
+   *  copy-wide "behind" count and this screen off the per-process one. null =
+   *  not read yet, or the read failed; never 0-as-unknown. */
+  // eslint-disable-next-line no-restricted-syntax -- null = not known
+  divergence: BpDivergence | null;
+  /** Why that reading failed. null = it is trustworthy. */
+  // eslint-disable-next-line no-restricted-syntax -- null = no error
+  divergenceError: string | null;
   /** Called once the dev deploy finishes successfully — used to jump to the
    *  Deployments tab (Development stage) so the user sees the result. */
   onDeployed: () => void;
   /** Switches the shell to the Deployments tab. Surfaced as "Manage
    *  Deployments" when this BP is already up to date (nothing to sync). */
   onManageDeployments: () => void;
+  /** Switches the shell to the Sync tab. Only passed when that tab exists for
+   *  the copy in view (the user's own copy) — on a colleague's copy the
+   *  "behind main" note stands on its own. */
+  onGoToSync?: () => void;
 }
 
 /**
- * Sync & Deploy tab (design: worktree.jsx). An explainer header with the
+ * Deploy tab (design: worktree.jsx). An explainer header with the
  * ahead/behind + diff summary and a single primary action, over the copy's
  * line-by-line diff.
  *
- * The button does the cheap thing when it can: `POST /copies/{name}/sync`
- * commits work in progress and, when the copy is a pure fast-forward of main
- * (no rebase needed), fast-forwards main to it server-side and deploys to dev —
- * no coding agent. When main has diverged it returns `needs_rebase`, and we
- * open a coding-agent session to rebase the copy; the user returns and presses
- * Sync & Deploy again, which now fast-forwards. main is never advanced by a
- * direct push — only by this user-gated deploy.
+ * Deploying is FAST-FORWARD ONLY: `POST /copies/{name}/sync` commits work in
+ * progress and, when the copy is a pure fast-forward of main, fast-forwards
+ * main to it server-side and deploys to dev. It is deliberately NOT the place
+ * where divergence gets resolved — while main carries changes this copy
+ * lacks, the button is replaced by a pointer at the Sync tab, which pulls
+ * them in (and hands genuine conflicts to the coding agent). main is never
+ * advanced by a direct push — only by this user-gated deploy.
  */
 // Sub-tab display labels. The URL keeps the stable `checks` key (bookmarks don't
 // break), but the tab reads "Supply Chain Security" — it's the pre-deploy CVE
@@ -61,16 +68,14 @@ const SUBTAB_LABELS = {
 export function SyncDeployTab({
   bp,
   wt,
-  onShowAgents,
+  divergence,
+  divergenceError,
   onDeployed,
   onManageDeployments,
+  onGoToSync,
 }: SyncDeployTabProps) {
   const { changed } = useCopyStatus(wt.name);
-  const { sendPrompt } = useSessions();
   const [busy, setBusy] = useState(false);
-  // True after a sync returns needs_rebase: opens the "automerge failed" dialog
-  // so the user chooses whether to repair with a coding-agent session.
-  const [rebaseNeeded, setRebaseNeeded] = useState(false);
   // Append-only build log for the in-flight (or just-finished) deploy: every
   // line gitops emits — image build steps, build.sh output (vite/go build),
   // per-member "Prepared N/M" — not just the latest line the toast shows.
@@ -102,44 +107,31 @@ export function SyncDeployTab({
   const dirty = bpChanged.length > 0;
 
   // The copy as a whole can be far ahead/behind main purely from work on OTHER
-  // business processes, while THIS one is identical to main. Split the
-  // divergence so the screen reflects the BP you're actually on. Re-fetched
-  // whenever the change list updates (i.e. after a sync).
-  // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
-  const [divergence, setDivergence] = useState<import('@/lib/api').BpDivergence | null>(
-    null,
-  );
-  useEffect(() => {
-    let alive = true;
-    api.copyFiles
-      .divergence(wt.name, bp.name)
-      .then((d) => alive && setDivergence(d))
-      .catch(() => alive && setDivergence(null));
-    return () => {
-      alive = false;
-    };
-  }, [wt.name, bp.name, changed]);
+  // business processes, while THIS one is identical to main — so the reading
+  // is per business process. It arrives as a PROP, from the one place the
+  // shell reads it, because the Sync step's existence is derived from exactly
+  // the same numbers: two readings meant two answers, and the user got a Sync
+  // step on a process this screen called up to date.
 
+  // `null` means NOT KNOWN — never 0. Everything derived from it is gated on
+  // `divergenceKnown`, so a pending or failed read cannot masquerade as a clean
+  // copy (the silent default this screen used to have: `?? 0` turned both into
+  // "All deployed and up to date").
+  const divergenceKnown = divergence !== null;
   const aheadBp = divergence?.ahead_bp ?? 0;
   const behindBp = divergence?.behind_bp ?? 0;
   const aheadOther = divergence?.ahead_other ?? 0;
   const behindOther = divergence?.behind_other ?? 0;
   // This BP is up to date with main when it has no un-merged commits, isn't
-  // behind main, and has no uncommitted edits. Other BPs' divergence does NOT
-  // count — they sync from their own Sync & Deploy. Uncommitted work is still
-  // actionable (Sync & Deploy auto-commits it).
-  const bpUpToDate = aheadBp === 0 && behindBp === 0 && !dirty;
+  // behind main, and has no uncommitted edits — and we have actually READ the
+  // divergence. Other BPs' divergence does NOT count — they deploy from their
+  // own Deploy screen. Uncommitted work is still actionable (Deploy
+  // auto-commits it).
+  const bpUpToDate = divergenceKnown && aheadBp === 0 && behindBp === 0 && !dirty;
   const actionable = !bpUpToDate;
-
-  const handoffToAgent = useCallback(() => {
-    // BP-scoped: the sync prompt lands in this BP's agent session (typed
-    // into the running one, or seeding a fresh one), which rebases just
-    // this business process.
-    sendPrompt(wt.name, bp.name, 'sync').catch((err) => {
-      toast.error(`Failed to hand the rebase to the agent: ${String(err)}`);
-    });
-    onShowAgents();
-  }, [sendPrompt, wt.name, bp.name, onShowAgents]);
+  // Deploying is fast-forward only. Anything main has that this copy lacks is
+  // pulled in on the Sync tab first — never repaired from here.
+  const blockedByBehind = behindBp > 0;
 
   const runSyncDeploy = useCallback(async () => {
     setBusy(true);
@@ -151,15 +143,17 @@ export function SyncDeployTab({
         // other commits are auto-rebased (or handed to the agent on conflict).
         result = await api.copyFiles.sync(wt.name, bp.name);
       } catch (err) {
-        toast.error(`Sync failed: ${String(err)}`);
+        // This IS the Deploy action — name it that, and show what the server
+        // actually said (the api layer carries the server's own detail).
+        toast.error(`Deploy failed: ${errorMessage(err)}`, { duration: 12000 });
         return;
       }
       if (result.status === 'needs_rebase') {
-        // main moved on since this copy branched, so the automatic
-        // fast-forward/merge can't apply cleanly. Don't silently yank the user
-        // to the coding-agent screen — explain what happened and let them choose
-        // to repair it (a rebase session) or come back later.
-        setRebaseNeeded(true);
+        // The button is only enabled when this BP is a pure fast-forward of
+        // main, so getting here means main moved between that check and the
+        // request. Fail loudly with what the server said — nothing was
+        // deployed, and the fix is the Sync tab.
+        toast.error(`Deploy failed: ${result.message}`);
         return;
       }
       // Fast-forwarded into main. The sync endpoint ALREADY spawned the
@@ -170,23 +164,25 @@ export function SyncDeployTab({
       const toastId = `bp-deploy-main-${bp.name}`;
       if (result.deploy_task_id) {
         const outcome = await watchDeployTask(result.deploy_task_id, toastId, {
-          loading: `Synced — deploying ${bp.name} to dev…`,
-          success: `${bp.name} synced and deployed to dev`,
-          failurePrefix: `Synced into main, but deploy to dev failed for ${bp.name}`,
+          // Copy the user reads: the process's NAME. `bp.name` is the
+          // directory, and it is only right in the toast id above.
+          loading: `Published to main — deploying ${bp.displayName} to dev…`,
+          success: `${bp.displayName} published and deployed to dev`,
+          failurePrefix: `Published into main, but deploy to dev failed for ${bp.displayName}`,
           onLog: setDeployLog,
         });
         // Once it's fully deployed, jump to the Deployments tab's Development
         // stage so the user lands on the result of what they just shipped.
         if (outcome === 'completed') onDeployed();
       } else {
-        // Synced, but the sync deployed nothing (no deployable containers in
+        // Published, but nothing was deployed (no deployable containers in
         // this BP, or no net change to deploy).
-        toast.success(`${bp.name} synced to main`);
+        toast.success(`${bp.displayName} published to main`);
       }
     } finally {
       setBusy(false);
     }
-  }, [wt.name, bp.name, handoffToAgent, onDeployed]);
+  }, [wt.name, bp.name, onDeployed]);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-background">
@@ -197,14 +193,14 @@ export function SyncDeployTab({
         </div>
         <div className="min-w-0 flex-1">
           <div className="text-[17px] font-bold tracking-tight text-foreground">
-            Sync &amp; Deploy
+            Deploy
           </div>
           <p className="mt-1 max-w-xl text-[13px] leading-relaxed text-muted-foreground">
-            Rebases{' '}
+            Publishes{' '}
             <strong className="font-mono font-semibold text-foreground">
               {wt.name}
             </strong>{' '}
-            onto the <strong className="text-foreground">main code area</strong>,
+            into the <strong className="text-foreground">main code area</strong>,
             then builds and deploys every container in this business process to{' '}
             <strong className="text-foreground">dev</strong>. Your changes below
             become the new main once the deploy succeeds.
@@ -215,7 +211,22 @@ export function SyncDeployTab({
               <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 This business process
               </span>
-              {bpUpToDate ? (
+              {!divergenceKnown ? (
+                // Say WHICH it is. Rendering this state as "up to date" is the
+                // silent default that made a stale screen look authoritative.
+                divergenceError !== null ? (
+                  <span
+                    className="font-medium text-destructive"
+                    title={divergenceError}
+                  >
+                    {`Couldn't check this against main — ${divergenceError}`}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground">
+                    Checking this against main…
+                  </span>
+                )
+              ) : bpUpToDate ? (
                 <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
                   Up to date with main
                 </span>
@@ -237,8 +248,8 @@ export function SyncDeployTab({
                 </span>
               )}
             </div>
-            {/* OTHER business processes — informational; each syncs from its own
-                Sync & Deploy screen and is NOT touched by this button. */}
+            {/* OTHER business processes — informational; each publishes from
+                its own Deploy screen and is NOT touched by this button. */}
             {(aheadOther > 0 || behindOther > 0) && (
               <div className="flex flex-wrap items-center gap-2.5 text-xs">
                 <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -248,14 +259,33 @@ export function SyncDeployTab({
                   {behindOther > 0 && <span>↓ {behindOther} behind</span>}
                   {aheadOther > 0 && <span>↑ {aheadOther} ahead</span>}
                   <span className="text-[11px] italic">
-                    not synced by this button — each deploys from its own screen
+                    not published by this button — each deploys from its own screen
                   </span>
                 </span>
               </div>
             )}
           </div>
         </div>
-        {actionable ? (
+        {actionable && blockedByBehind ? (
+          // Fast-forward only: there is nothing to decide here, so no dead
+          // greyed-out button — point at the one action that unblocks it.
+          <div className="flex max-w-64 shrink-0 flex-col items-end gap-2 text-right">
+            <span className="text-[13px] font-medium text-amber-700">
+              Main has changes you don&apos;t have yet — sync first.
+            </span>
+            {onGoToSync && (
+              <Button
+                size="lg"
+                variant="outline"
+                className="shrink-0"
+                onClick={onGoToSync}
+              >
+                <ArrowDownToLine className="size-4" aria-hidden />
+                Go to Sync
+              </Button>
+            )}
+          </div>
+        ) : actionable ? (
           <Button
             size="lg"
             className="shrink-0"
@@ -264,7 +294,7 @@ export function SyncDeployTab({
             onClick={() => void runSyncDeploy()}
           >
             <Rocket className="size-4" aria-hidden />
-            {busy ? 'Working…' : 'Sync & Deploy'}
+            {busy ? 'Working…' : 'Deploy'}
           </Button>
         ) : (
           // Nothing to sync — this BP already matches main and is deployed.
@@ -346,51 +376,21 @@ export function SyncDeployTab({
               stageLabel="this build"
               copy={wt.name}
               fetcher={checksFetcher}
-              emptyHint={`No buildable automation source found for ${bp.name} in ${wt.name}.`}
+              emptyHint={`No buildable automation source found for ${bp.displayName} in ${wt.name}.`}
               intro={
                 <>
                   Vulnerabilities in the image this business process would build from{' '}
                   <strong className="font-mono font-semibold text-foreground">{wt.name}</strong>’s
                   current source — the same artifact{' '}
-                  <strong className="text-foreground">Sync &amp; Deploy</strong> ships. Built and
+                  <strong className="text-foreground">Deploy</strong> ships. Built and
                   scanned on demand. Click a CVE to view it or mark it out of scope — that decision
-                  is saved with the code and ships on Sync &amp; Deploy.
+                  is saved with the code and ships on Deploy.
                 </>
               }
             />
           </div>
         )}
       </div>
-
-      {/* Automerge failed → offer a coding-agent repair, instead of yanking the
-          user straight to the agent screen. */}
-      <AlertDialog open={rebaseNeeded} onOpenChange={(o) => !o && setRebaseNeeded(false)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2">
-              <GitMerge className="size-5 text-amber-600" aria-hidden /> Automerge failed
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              <span className="font-mono font-semibold text-foreground">main</span> has moved on
-              since this copy branched, so your changes to{' '}
-              <span className="font-mono font-semibold text-foreground">{bp.name}</span> can’t be
-              merged in automatically. A coding-agent session can rebase this copy onto main; when it
-              finishes, come back and press <strong>Sync &amp; Deploy</strong> again.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Not now</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setRebaseNeeded(false);
-                void handoffToAgent();
-              }}
-            >
-              Repair with coding agent
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }

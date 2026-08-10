@@ -434,7 +434,7 @@ export function useSupplyChainTick(): number {
  * The last deploy task that finished (completed OR failed), regardless of who
  * started it. Views showing deploy-derived data watch `seq` and refetch when
  * the BP concerns them — this is what keeps the Deployments tab live for
- * deploys initiated outside it (Sync & Deploy, another tab, the API). Returns
+ * deploys initiated outside it (Deploy, another tab, the API). Returns
  * `null` until a deploy finishes during this session.
  */
 // eslint-disable-next-line no-restricted-syntax -- null until a deploy finishes

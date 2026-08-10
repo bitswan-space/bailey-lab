@@ -33,9 +33,9 @@ interface BpSelectorProps {
 
 /**
  * The business-process picker — the top-level subject you're building. A flat,
- * searchable list of every BP in the workspace. Picking which copy to work on
- * it in is a separate, subordinate choice (see CopySelector), so this selector
- * carries no copy notion at all.
+ * searchable list of every BP in the workspace. You always work on it in the
+ * copy you're already in — picking a BP the copy doesn't carry clones it in
+ * (see TopNav.handleSelectBp) — so this selector carries no copy notion at all.
  */
 export function BpSelector({
   bps,

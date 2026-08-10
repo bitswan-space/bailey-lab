@@ -256,10 +256,16 @@ export function FilesTab({ copy, bp }: Props) {
                 type="button"
                 onClick={() => setShowFullTree(true)}
                 className="group inline-flex min-w-0 items-center gap-1 rounded px-1 py-0.5 font-mono text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
-                title="Show whole copy"
+                title={`Show whole copy (currently scoped to /${rootDir})`}
               >
                 <ArrowUp className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
-                <span className="truncate">/{rootDir}</span>
+                {/* A PATH in a file explorer, so the directory is the truthful
+                    thing to print — it is what the folder is called on disk.
+                    Marked as a path so the "no directory slugs in our own
+                    copy" checks can tell it from prose. */}
+                <span data-path-text="root" className="truncate">
+                  /{rootDir}
+                </span>
               </button>
             ) : null}
           </div>
