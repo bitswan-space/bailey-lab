@@ -498,14 +498,26 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 	return buf.String(), nil
 }
 
+// ProtectedProxyTemplatesTarget is where the proxy's custom sign-in/error page
+// templates are mounted inside the container. The daemon points
+// OAUTH2_PROXY_CUSTOM_TEMPLATES_DIR at it (protectedProxyOAuthEnv) and writes
+// the files into the source subpath below (protectedProxyTemplatesSubpath).
+const ProtectedProxyTemplatesTarget = "/etc/bitswan-templates"
+
+// protectedProxyTemplatesSubpath is the templates directory's location inside
+// the daemon's `bitswan` config volume — i.e. ~/.config/bitswan/<subpath> as the
+// daemon sees it.
+const protectedProxyTemplatesSubpath = "protected-proxy/templates"
+
 // CreateProtectedProxyDockerComposeFile creates a docker-compose file for the
 // shared bitswan-protected-proxy (an oauth2-proxy instance). It sits between
 // platform-traefik and the daemon's protected gate: Traefik routes every
 // protected hostname to bitswan-protected-proxy:80, the proxy authenticates the
 // request against Keycloak and forwards the identity headers to the gate
-// (upstream). All oauth2-proxy settings come from env (the upstream image's
-// entrypoint is /bin/oauth2-proxy with no args), so the service needs no
-// volumes or published ports — Traefik reaches it over bitswan_network.
+// (upstream). Every oauth2-proxy setting comes from env (the upstream image's
+// entrypoint is /bin/oauth2-proxy with no args), so the proxy publishes no
+// ports — Traefik reaches it over bitswan_network — and mounts nothing but its
+// page templates.
 //
 // env is the full OAUTH2_PROXY_* map; it's rendered sorted for deterministic
 // output so the daemon can compare against the on-disk file to detect drift.
@@ -520,6 +532,19 @@ func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error
 		envList = append(envList, fmt.Sprintf("%s=%s", key, env[key]))
 	}
 
+	// The Bailey-branded sign-in error page (internal/daemon
+	// protected_proxy_error_page.go) replaces oauth2-proxy's stock "500 — Oops!
+	// Something went wrong". The daemon writes it into its own config volume, so
+	// like Traefik's config this is mounted as a named-volume SUBPATH, not a host
+	// bind: there is no host path for a file that lives in a volume, and Docker
+	// would silently auto-create the missing bind source as an empty directory.
+	// Only the templates subpath is exposed — never the whole volume, which holds
+	// bailey.db, the workspace secrets and this proxy's cookie secret.
+	//
+	// The mount is deliberately strict: Docker refuses to start the container when
+	// the subpath is missing, so a proxy that lost its templates fails loudly
+	// instead of falling back to the stock page (which, with
+	// show_debug_on_error on, would print raw internal errors to the browser).
 	proxyService := map[string]interface{}{
 		"image":          "quay.io/oauth2-proxy/oauth2-proxy:v7.15.3",
 		"restart":        "always",
@@ -527,6 +552,17 @@ func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error
 		"networks":       []string{"bitswan_network", "protected-proxy-session"},
 		"environment":    envList,
 		"depends_on":     []string{"bitswan-protected-proxy-redis"},
+		"volumes": []interface{}{
+			map[string]interface{}{
+				"type":      "volume",
+				"source":    "bitswan",
+				"target":    ProtectedProxyTemplatesTarget,
+				"read_only": true,
+				"volume": map[string]interface{}{
+					"subpath": protectedProxyTemplatesSubpath,
+				},
+			},
+		},
 	}
 
 	// Redis session store. oauth2-proxy holds a per-session refresh LOCK in
@@ -569,6 +605,12 @@ func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error
 		},
 		"volumes": map[string]interface{}{
 			"bitswan-protected-proxy-redis": map[string]interface{}{},
+			// The daemon's own config volume, created by `bitswan
+			// automation-server-daemon init` — the proxy mounts one subpath of it
+			// read-only for its page templates.
+			"bitswan": map[string]interface{}{
+				"external": true,
+			},
 		},
 	}
 

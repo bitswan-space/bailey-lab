@@ -33,7 +33,7 @@ func reconcileProtectedProxyConfig() {
 	if !proxyConfigNeedsUpdate(env) {
 		return // already current
 	}
-	fmt.Println("protected-proxy: running config is stale (missing the CSRF per-request cap); re-provisioning")
+	fmt.Println("protected-proxy: running config is stale (missing a setting this daemon applies); re-provisioning")
 	if err := provisionProtectedProxy(); err != nil {
 		fmt.Printf("protected-proxy: reconcile re-provision failed: %v\n", err)
 	}
@@ -52,9 +52,25 @@ func runningProxyEnv() (string, error) {
 }
 
 // proxyConfigNeedsUpdate reports whether a running proxy's env (KEY=VALUE lines)
-// is missing a setting the current daemon applies. Today that is the CSRF
-// per-request cap, the setting whose absence causes the _oauth2_proxy_*_csrf
-// pile-up → 431. Pure, so the reconcile rule is unit-testable without Docker.
+// is missing a setting the current daemon applies. Pure, so the reconcile rule is
+// unit-testable without Docker.
+//
+// Each entry is a setting whose absence is a user-visible defect:
+//
+//   - COOKIE_CSRF_PER_REQUEST_LIMIT — without the cap, _oauth2_proxy_*_csrf
+//     cookies pile up until requests 431 (Request Header Fields Too Large).
+//   - CUSTOM_TEMPLATES_DIR — without it the proxy still serves the stock
+//     "500 Oops! Something went wrong" instead of Bailey's sign-in failure page
+//     (protected_proxy_error_page.go). Re-provisioning also writes the template
+//     files themselves, so this one entry covers both halves.
 func proxyConfigNeedsUpdate(env string) bool {
-	return !strings.Contains(env, "OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT=")
+	for _, required := range []string{
+		"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT=",
+		"OAUTH2_PROXY_CUSTOM_TEMPLATES_DIR=",
+	} {
+		if !strings.Contains(env, required) {
+			return true
+		}
+	}
+	return false
 }

@@ -66,6 +66,13 @@ func provisionProtectedProxy() error {
 		return err
 	}
 
+	// The custom page templates have to exist before `up`: the compose file mounts
+	// them as a strict named-volume subpath, so Docker refuses to start the proxy
+	// if the directory is missing.
+	if err := writeProtectedProxyTemplates(proxyDir); err != nil {
+		return err
+	}
+
 	env := protectedProxyOAuthEnv(domain, client.ClientID, client.ClientSecret, client.IssuerURL, cookieSecret)
 
 	composeYAML, err := dockercompose.CreateProtectedProxyDockerComposeFile(env)
@@ -193,6 +200,22 @@ func protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSec
 		// follow-up). The PER_REQUEST_LIMIT above bounds the orphan pile-up
 		// regardless of lifetime, so the longer expiry costs nothing.
 		"OAUTH2_PROXY_COOKIE_CSRF_EXPIRE": "1h",
+		// Bailey's own sign-in failure page instead of oauth2-proxy's stock
+		// "500 — Oops! Something went wrong", which left a person whose Keycloak
+		// email was unverified with nothing but a request ID. The templates are
+		// written by writeProtectedProxyTemplates and mounted read-only.
+		"OAUTH2_PROXY_CUSTOM_TEMPLATES_DIR": dockercompose.ProtectedProxyTemplatesTarget,
+		// The real reason a callback failed travels in ErrorPageOpts.AppError,
+		// which is NOT a field of the error-page template data — the only way a
+		// template can see it is this switch, which makes .Message be the raw
+		// error. Upstream warns against it because the stock page prints .Message
+		// verbatim; ours never does. It matches .Message against a short allowlist
+		// of prefixes (unverified email, oauth2-proxy's own "Login Failed:"
+		// messages) and renders Bailey's copy for those, or a generic page naming
+		// the checkable causes for everything else. See
+		// protected_proxy_error_page.go, and the test that asserts a
+		// leak-shaped error never reaches the rendered page.
+		"OAUTH2_PROXY_SHOW_DEBUG_ON_ERROR": "true",
 	}
 }
 
@@ -231,6 +254,28 @@ func loadOrCreateProxyCookieSecret(proxyDir string) (string, error) {
 		return "", fmt.Errorf("persist protected-proxy cookie secret: %w", err)
 	}
 	return secret, nil
+}
+
+// writeProtectedProxyTemplates writes the proxy's custom page templates into
+// <proxyDir>/templates, which the compose file mounts read-only into the
+// container at dockercompose.ProtectedProxyTemplatesTarget. Called on every
+// provision, so an updated daemon ships an updated page.
+//
+// Only error.html is written. oauth2-proxy falls back to its own default for any
+// template the directory doesn't contain, and sign_in.html is never shown here:
+// skip_provider_button sends people straight to Keycloak.
+func writeProtectedProxyTemplates(proxyDir string) error {
+	dir := filepath.Join(proxyDir, "templates")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create protected-proxy templates directory: %w", err)
+	}
+	// 0644: the proxy container reads these as a different user, and they hold
+	// nothing secret.
+	path := filepath.Join(dir, "error.html")
+	if err := os.WriteFile(path, []byte(protectedProxyErrorTemplate()), 0644); err != nil {
+		return fmt.Errorf("write protected-proxy error page: %w", err)
+	}
+	return nil
 }
 
 // generateProxyCookieSecret returns a base64url-encoded 32-byte secret, the
