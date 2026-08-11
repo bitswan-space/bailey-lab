@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/workspace"
@@ -27,8 +28,10 @@ func TestTagOf(t *testing.T) {
 }
 
 func TestIsReleaseVersion(t *testing.T) {
-	release := []string{"v2026.07.07.21", "  v2026.01.01.1  "}
-	notRelease := []string{"", "dev", "v2026.07.07.21-git-abc123", "v2026.07.07.21-dirty", "2026.07.07.21", "vlatest"}
+	// The "v" prefix is optional: released binaries report the CalVer without it
+	// (-X main.version=$VERSION), the AOC reports the tag with it.
+	release := []string{"v2026.07.07.21", "  v2026.01.01.1  ", "2026.07.07.21", " 2026.01.01.1 "}
+	notRelease := []string{"", "dev", "v2026.07.07.21-git-abc123", "v2026.07.07.21-dirty", "vlatest", "2026", "latest"}
 	for _, v := range release {
 		if !isReleaseVersion(v) {
 			t.Errorf("isReleaseVersion(%q) = false, want true", v)
@@ -94,6 +97,60 @@ func TestDetectServerVersion_DevBuildNeverFlags(t *testing.T) {
 		if info.UpdateAvailable {
 			t.Errorf("detectServerVersion(%q).UpdateAvailable = true, want false", v)
 		}
+	}
+}
+
+// resetServerLatestCache drops the memoized AOC "latest release" answer, before
+// and after the test, so a test's fake AOC is actually consulted and never
+// leaks into another test.
+func resetServerLatestCache(t *testing.T) {
+	t.Helper()
+	clear := func() {
+		serverLatestMu.Lock()
+		serverLatestVal = ""
+		serverLatestAt = time.Time{}
+		serverLatestMu.Unlock()
+	}
+	clear()
+	t.Cleanup(clear)
+}
+
+// The exact shape of issue #347: the running binary reports the CalVer WITHOUT
+// the "v" (the release workflow builds -X main.version=$VERSION and tags
+// v$VERSION), while the AOC reports the tag. That pair must resolve to an
+// offered update — the bug was "Up to date" shown next to a "current → latest"
+// line, with no way to update.
+func TestDetectServerVersion_UnprefixedCurrentIsBehindTaggedLatest(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SUDO_USER", "")
+	aoc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"v2026.08.05.70"}`))
+	}))
+	defer aoc.Close()
+	if err := config.NewAutomationServerConfig().UpdateAutomationServer(
+		config.AutomationOperationsCenterSettings{AOCUrl: aoc.URL, AutomationServerId: "x", AccessToken: "t"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	resetServerLatestCache(t)
+
+	info := detectServerVersion("2026.08.03.68")
+	if info.Latest != "v2026.08.05.70" {
+		t.Fatalf("Latest = %q, want v2026.08.05.70", info.Latest)
+	}
+	if !info.UpdateAvailable {
+		t.Errorf("UpdateAvailable = false for 2026.08.03.68 → v2026.08.05.70, want true")
+	}
+
+	// Still conservative in the other direction: a server NEWER than what the
+	// AOC serves is up to date, never offered a downgrade-as-update.
+	if detectServerVersion("2026.09.01.1").UpdateAvailable {
+		t.Errorf("UpdateAvailable = true for a version newer than the AOC's, want false")
+	}
+	// ...and an equal version (prefix difference only) is up to date too.
+	if detectServerVersion("2026.08.05.70").UpdateAvailable {
+		t.Errorf("UpdateAvailable = true for the same version as the AOC's, want false")
 	}
 }
 

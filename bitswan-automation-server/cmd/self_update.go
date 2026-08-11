@@ -12,6 +12,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/cmd/automationserverdaemon"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
@@ -76,19 +77,40 @@ func binaryArch() (string, error) {
 	}
 }
 
+// aocBaseURL resolves the AOC this server is registered with.
+//
+// The DAEMON owns the registration: `bitswan register` hands the token to it
+// over the socket and deliberately writes nothing to ~/.config/bitswan (see
+// internal/daemon/aoc_config.go), and a server brought up by the AOC's "Create
+// cloud server" registers the same way. So reading only the host config reported
+// a perfectly-registered server as unregistered and refused to self-update
+// (issue #347). Ask the daemon first, and keep the host config as a fallback for
+// installs registered before the daemon became the owner.
+// daemonSocketPath is where this command looks for the daemon; a variable only
+// so tests can point it at a stub socket.
+var daemonSocketPath = daemon.SocketPath
+
+func aocBaseURL() (string, error) {
+	if client, err := daemon.NewClientWithSocket(daemonSocketPath); err == nil {
+		if status, serr := client.AOCStatus(); serr == nil && status.AOCUrl != "" {
+			return status.AOCUrl, nil
+		}
+	}
+	if settings, err := config.NewAutomationServerConfig().GetAutomationOperationsCenterSettings(); err == nil && settings.AOCUrl != "" {
+		return settings.AOCUrl, nil
+	}
+	return "", fmt.Errorf("this server is not registered with an AOC, so there is nowhere to download the official binary from — run `bitswan register` first, or replace the binary manually")
+}
+
 func runSelfUpdate() error {
 	binPath, err := selfBinaryPath()
 	if err != nil {
 		return err
 	}
 
-	cfg := config.NewAutomationServerConfig()
-	settings, err := cfg.GetAutomationOperationsCenterSettings()
+	aocURL, err := aocBaseURL()
 	if err != nil {
-		return fmt.Errorf("failed to read AOC settings: %w", err)
-	}
-	if settings.AOCUrl == "" {
-		return fmt.Errorf("this server is not registered with an AOC, so there is nowhere to download the official binary from — run `bitswan register` first, or replace the binary manually")
+		return err
 	}
 
 	arch, err := binaryArch()
@@ -96,7 +118,7 @@ func runSelfUpdate() error {
 		return err
 	}
 
-	url := strings.TrimRight(settings.AOCUrl, "/") + "/api/automation_server/bitswan?arch=" + arch
+	url := strings.TrimRight(aocURL, "/") + "/api/automation_server/bitswan?arch=" + arch
 	fmt.Printf("Downloading the latest bitswan binary from %s ...\n", url)
 
 	resp, err := http.Get(url)
