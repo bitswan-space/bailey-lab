@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -25,7 +26,14 @@ func pointAtNoDaemon(t *testing.T) {
 // serveDaemonStub answers the two calls aocBaseURL makes over the daemon socket.
 func serveDaemonStub(t *testing.T, status daemon.AOCStatusResponse) {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "daemon.sock")
+	// NOT t.TempDir(): it embeds the test name, and a sockaddr_un path is capped
+	// (~104 bytes on darwin) — long names there bind with "invalid argument".
+	dir, err := os.MkdirTemp("", "bsd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "d.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
