@@ -9,16 +9,28 @@ func TestProxyConfigNeedsUpdate(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "capped proxy is current",
+			name: "capped proxy with the Bailey error page is current",
 			env: "OAUTH2_PROXY_PROVIDER=oidc\n" +
 				"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST=true\n" +
-				"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT=5\n",
+				"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT=5\n" +
+				"OAUTH2_PROXY_CUSTOM_TEMPLATES_DIR=/etc/bitswan-templates\n",
 			want: false,
 		},
 		{
 			name: "proxy without the cap is stale",
 			env: "OAUTH2_PROXY_PROVIDER=oidc\n" +
-				"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST=true\n",
+				"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST=true\n" +
+				"OAUTH2_PROXY_CUSTOM_TEMPLATES_DIR=/etc/bitswan-templates\n",
+			want: true,
+		},
+		{
+			// A server provisioned before the Bailey error page still serves
+			// oauth2-proxy's stock "500 Oops! Something went wrong" — re-provision
+			// so the person gets a page that names the cause.
+			name: "proxy still on the stock error page is stale",
+			env: "OAUTH2_PROXY_PROVIDER=oidc\n" +
+				"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST=true\n" +
+				"OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST_LIMIT=5\n",
 			want: true,
 		},
 		{
