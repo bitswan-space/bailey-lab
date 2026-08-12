@@ -2499,6 +2499,180 @@ async def get_copy_diff(name: str, path: str | None = None):
     return {"diff": "".join(parts)}
 
 
+# Git's own name for "nothing": the sha1 of the empty tree, present in every
+# repository. Diffing against it turns "this whole business process arrives"
+# into an ordinary diff, which is exactly what pulling a process the copy has
+# never checked out is.
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+# A single incoming diff is read into memory and shipped to the browser, which
+# renders every line. A merge that has been left unpulled for weeks can carry
+# megabytes; past this many characters we send what fits and say so, and the
+# per-file diffs (``?path=``) stay available for the rest.
+_INCOMING_DIFF_MAX_CHARS = 400_000
+
+# How far back the incoming COMMIT list walks. Higher than the history view's
+# 50 because this list is the answer to "what am I about to pull" and a copy
+# left alone over a holiday really is hundreds behind; still bounded, and the
+# response says when it hit the bound.
+_INCOMING_LOG_LIMIT = 200
+
+
+def _incoming_revs(clone_path: str, bp: str) -> tuple[str, list[str], list[str]]:
+    """Where to run git for "what a pull brings in", and the ranges to run.
+
+    Returns ``(cwd, log_args, diff_args)``. Two cases, and they are genuinely
+    different repositories:
+
+    * the copy HAS this business process — ask its clone. ``HEAD..MAIN_REF``
+      are the commits arriving; ``HEAD...MAIN_REF`` (three dots) is their file
+      effect, measured from the merge base so the copy's own commits are not
+      reported back to it as incoming.
+    * the copy does NOT have it — there is no clone to ask, so ask the bare
+      repo. Every commit on its main arrives, against the empty tree.
+    """
+    if os.path.isdir(os.path.join(clone_path, ".git")):
+        return clone_path, [f"HEAD..{MAIN_REF}"], [f"HEAD...{MAIN_REF}"]
+    return bp_bare_repo_path(bp), ["main"], [_EMPTY_TREE, "main"]
+
+
+async def _incoming_files(cwd: str, bp: str, diff_args: list[str]) -> list[dict]:
+    """Per-file summary of an incoming range, in ``/status``'s wire shape:
+    ``<bp>/…`` paths, a ``kind``, and line counts. ``--no-renames`` so every
+    path is one a per-file diff can be fetched for."""
+    by_path: dict[str, dict] = {}
+    num_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--no-renames", "--numstat", *diff_args, cwd=cwd
+    )
+    for line in num_out.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        adds_str, dels_str, p = parts
+        full = f"{bp}/{p}"
+        by_path[full] = {
+            "path": full,
+            "kind": "modified",
+            # Binary files report "-" for both counts; 0 is the honest number
+            # of TEXT lines they change.
+            "adds": int(adds_str) if adds_str.isdigit() else 0,
+            "dels": int(dels_str) if dels_str.isdigit() else 0,
+        }
+    ns_out, _, _ = await call_git_command_with_output(
+        "git", "diff", "--no-renames", "--name-status", *diff_args, cwd=cwd
+    )
+    for line in ns_out.splitlines():
+        cols = line.split("\t")
+        if len(cols) < 2:
+            continue
+        kind = _NAME_STATUS_KIND.get(cols[0][:1], "modified")
+        full = f"{bp}/{cols[-1]}"
+        if full in by_path:
+            by_path[full]["kind"] = kind
+        else:
+            by_path[full] = {"path": full, "kind": kind, "adds": 0, "dels": 0}
+    return sorted(by_path.values(), key=lambda f: f["path"])
+
+
+@router.get("/{name}/incoming")
+async def get_incoming(name: str, bp: str = Query(...)):
+    """What pulling main into ONE business process would bring in — the commits
+    AND their file-level effect.
+
+    The Sync screen used to list nothing but commit subjects, which on a
+    workspace where everyone edits the same file is thirty identical lines and
+    no answer to the only question the screen exists to answer: what changes.
+    So this returns both, from one reading, and the screen leads with the
+    files.
+
+    Deliberately measured from the MERGE BASE (``HEAD...MAIN_REF``): a pull
+    replays the copy's own commits on top of main, so the copy's work is not
+    something the pull "brings in" and must not appear here. A business process
+    the copy has not checked out at all reports its whole main — pulling
+    materialises it, which is how a copy gains a process somebody else created,
+    and it is the case the old commit-only view answered with a 404.
+    """
+    _validate_bp_dir(bp)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    clone_path = os.path.join(copy_path, bp)
+    if os.path.isdir(os.path.join(clone_path, ".git")):
+        await fetch_main(clone_path, bp)
+    elif not await bp_main_has_content(bp):
+        # Neither checked out nor carrying anything on main: nothing arrives.
+        return {"bp": bp, "commits": [], "files": [], "commits_truncated": False}
+
+    cwd, log_args, diff_args = _incoming_revs(clone_path, bp)
+    commits = await _git_log(*log_args, cwd=cwd, limit=_INCOMING_LOG_LIMIT)
+    files = await _incoming_files(cwd, bp, diff_args)
+    # The FILE list is complete whatever the log limit is — it is one diff, not
+    # a walk — so say which half was capped rather than letting the screen
+    # imply that a 200-commit pull carries 200 commits exactly.
+    return {
+        "bp": bp,
+        "commits": commits,
+        "files": files,
+        "commits_truncated": len(commits) >= _INCOMING_LOG_LIMIT,
+    }
+
+
+@router.get("/{name}/incoming/diff")
+async def get_incoming_diff(name: str, bp: str = Query(...), path: str | None = None):
+    """The unified diff of what a pull brings into ONE business process —
+    everything, or the single ``?path=<bp>/rest`` the file list was clicked on.
+
+    Same range as :func:`get_incoming`, so the diff shown is the diff the file
+    list counted. Patch headers stay copy-root-relative (``a/<bp>/…``) to match
+    the paths in that list and everywhere else in the app.
+    """
+    _validate_bp_dir(bp)
+    copy_path = _resolve_copy_path(name)
+    if not os.path.exists(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+    if path is not None and not _is_safe_relative_path(path):
+        raise HTTPException(status_code=400, detail="invalid path")
+
+    rel_path = None
+    if path is not None:
+        path_bp, _, rest = path.partition("/")
+        if path_bp != bp:
+            raise HTTPException(
+                status_code=400,
+                detail=f"path '{path}' is not in business process '{bp}'",
+            )
+        rel_path = rest or None
+
+    clone_path = os.path.join(copy_path, bp)
+    if os.path.isdir(os.path.join(clone_path, ".git")):
+        await fetch_main(clone_path, bp)
+    elif not await bp_main_has_content(bp):
+        return {"diff": "", "truncated": False}
+
+    cwd, _, diff_args = _incoming_revs(clone_path, bp)
+    # No pathspec at all for the whole-process diff: `cwd` is the BARE repo
+    # when the copy hasn't checked this process out, and a bare repo has no
+    # working tree for a `.` pathspec to be relative to.
+    pathspec = ["--", rel_path] if rel_path else []
+    stdout, stderr, rc = await call_git_command_with_output(
+        "git",
+        "diff",
+        f"--src-prefix=a/{bp}/",
+        f"--dst-prefix=b/{bp}/",
+        *diff_args,
+        *pathspec,
+        cwd=cwd,
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to get diff: {stderr.strip()}"
+        )
+    if len(stdout) > _INCOMING_DIFF_MAX_CHARS:
+        return {"diff": stdout[:_INCOMING_DIFF_MAX_CHARS], "truncated": True}
+    return {"diff": stdout, "truncated": False}
+
+
 @router.get("/{name}/commit/{sha}/diff")
 async def get_commit_diff(name: str, sha: str, bp: str | None = None):
     """Unified diff introduced by a single commit (`git show`), for the history

@@ -640,6 +640,49 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `GET /copies/{name}/incoming?bp=` — what pulling main into ONE business
+   *  process would bring in: the arriving commits AND the files they change,
+   *  which is what the Sync screen leads with. */
+  async copyIncoming(
+    name: string,
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/incoming?bp=${encodeURIComponent(bp)}`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /** `GET /copies/{name}/incoming/diff?bp=&path=` — the unified diff of what
+   *  that pull brings in, whole or for the one file clicked in the list. */
+  async copyIncomingDiff(
+    name: string,
+    bp: string,
+    path?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs =
+      `?bp=${encodeURIComponent(bp)}` +
+      (path ? `&path=${encodeURIComponent(path)}` : '');
+    const r = await fetch(
+      `${this.baseUrl}/copies/${encodeURIComponent(name)}/incoming/diff${qs}`,
+      { headers: { ...this.authHeaders() } },
+    );
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /** `GET /copies/{name}/divergence-all` — per-BP ahead/behind for the whole
    *  copy in one fetch (only diverging BPs are returned). */
   async copyDivergenceAll(

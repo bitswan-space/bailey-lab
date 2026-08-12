@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { ChevronRight, File as FileIcon, Folder } from 'lucide-react';
-import type { ChangedKind, FileTreeNode } from '@/lib/api';
+import { changedKindLetter, type ChangedKind, type FileTreeNode } from '@/lib/api';
 
 interface Props {
   tree: FileTreeNode[];
@@ -25,9 +25,11 @@ interface Props {
 }
 
 const KIND_STYLES: Record<ChangedKind, string> = {
-  A: 'bg-emerald-100 text-emerald-700',
-  M: 'bg-amber-100 text-amber-700',
-  D: 'bg-red-100 text-red-700',
+  added: 'bg-emerald-100 text-emerald-700',
+  modified: 'bg-amber-100 text-amber-700',
+  deleted: 'bg-red-100 text-red-700',
+  renamed: 'bg-sky-100 text-sky-700',
+  copied: 'bg-sky-100 text-sky-700',
 };
 
 export function FileTree({
@@ -160,9 +162,10 @@ function FileTreeRow({
       <span className="min-w-0 flex-1 truncate">{node.name}</span>
       {kind ? (
         <span
-          className={`inline-flex h-4 items-center rounded px-1 text-[10px] font-semibold ${KIND_STYLES[kind]}`}
+          className={`inline-flex h-4 items-center rounded px-1 text-[10px] font-semibold ${KIND_STYLES[kind] ?? KIND_STYLES.modified}`}
+          title={kind}
         >
-          {kind}
+          {changedKindLetter(kind)}
         </span>
       ) : null}
     </button>

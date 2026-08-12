@@ -2,7 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, File as FileIcon, RefreshCw, Search, Upload, X } from 'lucide-react';
 import { useDropzone, type DropEvent } from 'react-dropzone';
 import { toast } from '@/lib/notify';
-import { api, type ChangedKind, type FileSearchMatch } from '@/lib/api';
+import {
+  api,
+  changedKindLetter,
+  type ChangedKind,
+  type FileSearchMatch,
+} from '@/lib/api';
 import { useUrlParam } from '@/lib/urlState';
 import { useFileContent } from '@/hooks/useFileContent';
 import { useFileTree } from '@/hooks/useFileTree';
@@ -21,9 +26,11 @@ interface Props {
 }
 
 const SEARCH_KIND_STYLES: Record<ChangedKind, string> = {
-  A: 'bg-emerald-100 text-emerald-700',
-  M: 'bg-amber-100 text-amber-700',
-  D: 'bg-red-100 text-red-700',
+  added: 'bg-emerald-100 text-emerald-700',
+  modified: 'bg-amber-100 text-amber-700',
+  deleted: 'bg-red-100 text-red-700',
+  renamed: 'bg-sky-100 text-sky-700',
+  copied: 'bg-sky-100 text-sky-700',
 };
 
 /** Split `text` around case-insensitive occurrences of `q` so the matched
@@ -356,9 +363,10 @@ export function FilesTab({ copy, bp }: Props) {
                         </span>
                         {kind ? (
                           <span
-                            className={`inline-flex h-4 items-center rounded px-1 text-[10px] font-semibold ${SEARCH_KIND_STYLES[kind]}`}
+                            className={`inline-flex h-4 items-center rounded px-1 text-[10px] font-semibold ${SEARCH_KIND_STYLES[kind] ?? SEARCH_KIND_STYLES.modified}`}
+                            title={kind}
                           >
-                            {kind}
+                            {changedKindLetter(kind)}
                           </span>
                         ) : null}
                       </button>

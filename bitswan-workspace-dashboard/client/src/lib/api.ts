@@ -360,6 +360,20 @@ export interface CopyHistory {
   main: HistoryCommit[];
 }
 
+/** Gitops `GET /copies/{name}/incoming?bp=` — what pulling main into ONE
+ *  business process brings in, measured from the merge base (so the copy's own
+ *  work, which a pull replays on top, is not reported as arriving). */
+export interface Incoming {
+  bp: string;
+  /** Newest first. Capped — see `commits_truncated`. */
+  commits: HistoryCommit[];
+  /** Every file the pull changes. Complete regardless of the commit cap: it is
+   *  one diff, not a walk. */
+  files: ChangedFile[];
+  /** The commit list hit its cap; the file list did not. */
+  commits_truncated: boolean;
+}
+
 /** One member's baked image in a BP deployment-history entry. */
 export interface BpHistoryMember {
   image?: string | null;
@@ -1248,6 +1262,23 @@ export const api = {
       getJson<{ changed: ChangedFile[] }>(
         `/api/copies/${encodeURIComponent(name)}/status`,
       ),
+    /**
+     * What pulling main into ONE business process would bring in: the arriving
+     * commits AND the files they change. The Sync screen leads with the files —
+     * a list of commit subjects alone answers "how many" but not "what", which
+     * is the only question that screen exists for.
+     */
+    incoming: (name: string, bp: string) =>
+      getJson<Incoming>(
+        `/api/copies/${encodeURIComponent(name)}/incoming?bp=${encodeURIComponent(bp)}`,
+      ),
+    /** The diff of what that pull brings in — whole, or for the one file whose
+     *  row was clicked (`<bp>/rest`, as `incoming` reports it). */
+    incomingDiff: (name: string, bp: string, path?: string) =>
+      getJson<{ diff: string; truncated: boolean }>(
+        `/api/copies/${encodeURIComponent(name)}/incoming/diff?bp=${encodeURIComponent(bp)}` +
+          (path ? `&path=${encodeURIComponent(path)}` : ''),
+      ),
     /** Commit divergence from main split into this BP vs every other BP, so the
      *  per-BP Deploy screen reflects the BP being viewed. */
     divergence: (name: string, bp: string) =>
@@ -1522,7 +1553,26 @@ export interface FileSearchResponse {
   truncated: boolean;
 }
 
-export type ChangedKind = 'A' | 'M' | 'D';
+/**
+ * How a file changed, in GITOPS'S OWN vocabulary — this mirrors the wire, it
+ * is not a display choice. It was declared here as `'A' | 'M' | 'D'` while
+ * gitops has always sent the words (`_NAME_STATUS_KIND` in copies.py), so
+ * every badge that indexed a style table by it got `undefined` and rendered
+ * the bare word "modified" inside a 20px square. Compilers can't catch a lie
+ * about a wire format; the single-letter badge is now derived, in
+ * {@link changedKindLetter}.
+ */
+export type ChangedKind =
+  | 'added'
+  | 'modified'
+  | 'deleted'
+  | 'renamed'
+  | 'copied';
+
+/** The one-letter badge for a change kind (git's own `--name-status` letter). */
+export function changedKindLetter(kind: ChangedKind): string {
+  return kind.charAt(0).toUpperCase();
+}
 
 export interface ChangedFile {
   path: string;
