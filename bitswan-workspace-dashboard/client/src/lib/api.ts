@@ -28,22 +28,91 @@ function isSessionGone(r: Response): boolean {
   return r.type === 'opaqueredirect' || r.status === 0 || r.status === 401;
 }
 
+/**
+ * The request never reached the dashboard: the WORKSPACE ROUTER answered it.
+ *
+ * Every route this app calls exists on the dashboard server and every one of
+ * its answers — success or failure, including its own 404 handler and every
+ * error it forwards from gitops — is JSON. So a 404/502/503/504 carrying
+ * something that is NOT JSON did not come from us; it is Traefik's plain-text
+ * "404 page not found" (or a gateway page), served while it has no router for
+ * this host.
+ *
+ * That window is routine here rather than exotic: creating a business process
+ * starts containers, which reconfigures Traefik, and requests in flight across
+ * the reload get one of these. A user creating a business process was shown
+ * "Couldn't read whether main has changes bp hasn't pulled yet: 404 page not
+ * found" for it (bailey-lab #362) — a scary sentence about their git state
+ * that was really "the router blinked". Detecting it is what lets us retry
+ * instead of reporting it, and name it honestly when the retries run out.
+ */
+function isEdgeUnavailable(r: Response): boolean {
+  if (r.status !== 404 && r.status !== 502 && r.status !== 503 && r.status !== 504) {
+    return false;
+  }
+  return !(r.headers.get('content-type') ?? '').includes('json');
+}
+
+/** Thrown when the request never reached the dashboard — see
+ *  {@link isEdgeUnavailable}. Typed so callers can tell "the router blinked"
+ *  from "the server answered and said no". */
+export class EdgeUnavailableError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(
+      `the dashboard was not reachable through the workspace router (HTTP ${status}) — ` +
+        'this usually clears within a few seconds of a container starting or stopping',
+    );
+    this.name = 'EdgeUnavailableError';
+    this.status = status;
+  }
+}
+
+/** Retries for an edge blip. Two more attempts over ~1.2s: a Traefik
+ *  reconfigure is measured in hundreds of milliseconds, and a router that is
+ *  still missing after this is not a blip. */
+const EDGE_RETRY_DELAYS_MS = [300, 900];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getJson<T>(url: string): Promise<T> {
-  let r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
-  if (isSessionGone(r)) {
-    // Access token may just be stale — refetch from /oauth2/auth and retry once.
-    clearAccessToken();
-    r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
-  }
-  // Still redirected/401 after a refresh → the oauth2-proxy SESSION is gone, not
-  // just the token. Raise the app-wide signal (one banner prompts re-login) and
-  // throw a typed error so callers stay silent instead of rendering a failure.
-  if (isSessionGone(r)) {
-    notifySessionExpired();
-    throw new SessionExpiredError();
-  }
+  const r = await getOnce(url);
   if (!r.ok) await throwHttpError(url, r);
   return (await r.json()) as T;
+}
+
+/**
+ * One GET, with the two retries that are never the caller's business: a stale
+ * access token (refetched once) and an edge blip (see `isEdgeUnavailable`).
+ * Returns the last response; the caller decides what a non-2xx means.
+ */
+async function getOnce(url: string): Promise<Response> {
+  let refreshedToken = false;
+  let edgeAttempt = 0;
+  for (;;) {
+    const r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
+    if (isSessionGone(r) && !refreshedToken) {
+      // Access token may just be stale — refetch from /oauth2/auth and retry
+      // once.
+      refreshedToken = true;
+      clearAccessToken();
+      continue;
+    }
+    // Still redirected/401 after a refresh → the oauth2-proxy SESSION is gone,
+    // not just the token. Raise the app-wide signal (one banner prompts
+    // re-login) and throw a typed error so callers stay silent instead of
+    // rendering a failure.
+    if (isSessionGone(r)) {
+      notifySessionExpired();
+      throw new SessionExpiredError();
+    }
+    const delay = EDGE_RETRY_DELAYS_MS[edgeAttempt];
+    if (!isEdgeUnavailable(r) || delay === undefined) return r;
+    edgeAttempt += 1;
+    await sleep(delay);
+  }
 }
 
 /**
@@ -52,16 +121,12 @@ async function getJson<T>(url: string): Promise<T> {
  * "this BP has no database/bucket yet").
  */
 async function getJsonOr404<T>(url: string): Promise<T | null> {
-  let r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
-  if (isSessionGone(r)) {
-    clearAccessToken();
-    r = await fetch(url, { ...FETCH_BASE, headers: await authHeader() });
-  }
-  if (isSessionGone(r)) {
-    notifySessionExpired();
-    throw new SessionExpiredError();
-  }
-  if (r.status === 404) return null;
+  const r = await getOnce(url);
+  // Only OUR 404 is the typed "not found" state. A router 404 means the
+  // question was never asked, and answering it with "there is no database
+  // here" would be an invention — `getOnce` has already retried it, so let
+  // `throwHttpError` name it.
+  if (r.status === 404 && !isEdgeUnavailable(r)) return null;
   if (!r.ok) await throwHttpError(url, r);
   return (await r.json()) as T;
 }
@@ -72,6 +137,10 @@ async function getJsonOr404<T>(url: string): Promise<T | null> {
 // a Docker build error from the supply-chain preview — instead of a generic
 // "returned 502". Never swallow the reason.
 async function throwHttpError(url: string, r: Response): Promise<never> {
+  // The workspace router answered, not us. Its body ("404 page not found") is
+  // a fact about routing, and pasting it into a sentence about the user's git
+  // state is how #362 read. Say what actually happened instead.
+  if (isEdgeUnavailable(r)) throw new EdgeUnavailableError(r.status);
   let detail = '';
   try {
     const ct = r.headers.get('content-type') ?? '';
@@ -108,6 +177,7 @@ export function errorMessage(err: unknown): string {
 // ready.
 async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
   let refreshedToken = false;
+  let retriedEdge = false;
   for (let attempt = 0; ; attempt++) {
     try {
       const r = await fetch(url, {
@@ -125,6 +195,16 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
       if (isSessionGone(r)) {
         notifySessionExpired();
         throw new SessionExpiredError();
+      }
+      // A router 404 (see isEdgeUnavailable) means NO backend was contacted —
+      // Traefik matched no route at all — so even a POST is safe to send
+      // again. Deliberately only the 404: a gateway 5xx may well mean the
+      // request reached an upstream and died there, and re-sending a deploy or
+      // a delete on that guess is not a trade we make.
+      if (r.status === 404 && isEdgeUnavailable(r) && !retriedEdge) {
+        retriedEdge = true;
+        await sleep(EDGE_RETRY_DELAYS_MS[0] ?? 300);
+        continue;
       }
       // Same as the GET helpers: carry the server's own message, never a bare
       // "returned 502". Every mutating call (deploy, sync, merge, delete)
