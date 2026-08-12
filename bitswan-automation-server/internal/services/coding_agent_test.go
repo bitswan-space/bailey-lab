@@ -1,6 +1,8 @@
 package services
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -99,4 +101,101 @@ func contains(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// codingAgentWorkspace stands up a workspace on disk that looks ENABLED —
+// metadata plus an existing coding-agent compose pinning `image` — and points
+// HOME at it, which is where both the service and config.GetWorkspaceMetadata
+// resolve paths from.
+func codingAgentWorkspace(t *testing.T, name, image string) *CodingAgentService {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	wsPath := filepath.Join(home, ".config", "bitswan", "workspaces", name)
+	if err := os.MkdirAll(filepath.Join(wsPath, "deployment"), 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	metadata := "domain: example.com\ngitops-url: http://x\ngitops-secret: s\n" +
+		"coding-agent-enabled: true\ncoding-agent-secret: agent-secret\n"
+	if err := os.WriteFile(filepath.Join(wsPath, "metadata.yaml"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	compose := "services:\n  bitswan-coding-agent:\n    image: " + image + "\n"
+	if err := os.WriteFile(
+		filepath.Join(wsPath, "deployment", "docker-compose-coding-agent.yml"),
+		[]byte(compose), 0o644,
+	); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	return &CodingAgentService{WorkspaceName: name, WorkspacePath: wsPath}
+}
+
+func composeImage(t *testing.T, c *CodingAgentService) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(c.WorkspacePath, "deployment", "docker-compose-coding-agent.yml"))
+	if err != nil {
+		t.Fatalf("read compose: %v", err)
+	}
+	var compose struct {
+		Services map[string]struct {
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		t.Fatalf("parse compose: %v", err)
+	}
+	return compose.Services["bitswan-coding-agent"].Image
+}
+
+// TestRegenerateDockerComposeHonoursTheDevChannel pins the fix for a workspace
+// update putting the coding agent on the WRONG image.
+//
+// `workspace update --dev` regenerated the agent's compose with an empty
+// image, which fell through to the hard-coded "bitswan/coding-agent:latest"
+// while gitops, the dashboard and the infra-driver all went to their -dev
+// tags. The floating production tag was old enough to predate git being
+// installed in the image, so the freshly "updated" agent reported it had no
+// git — from an update that had just built and installed a dev image
+// containing one.
+func TestRegenerateDockerComposeHonoursTheDevChannel(t *testing.T) {
+	c := codingAgentWorkspace(t, "testws", "bitswan/coding-agent-staging:2026-1-git-abc")
+
+	if err := c.RegenerateDockerCompose("", false, true); err != nil {
+		t.Fatalf("RegenerateDockerCompose: %v", err)
+	}
+
+	if got := composeImage(t, c); got != "bitswan/coding-agent-dev:latest" {
+		t.Errorf("image = %q; want bitswan/coding-agent-dev:latest", got)
+	}
+}
+
+// An explicit image always wins — the --coding-agent-image override and the
+// callers that pass an already-resolved pin.
+func TestRegenerateDockerComposeKeepsAnExplicitImage(t *testing.T) {
+	c := codingAgentWorkspace(t, "testws", "bitswan/coding-agent:latest")
+
+	if err := c.RegenerateDockerCompose("registry.example/agent:pinned", false, true); err != nil {
+		t.Fatalf("RegenerateDockerCompose: %v", err)
+	}
+
+	if got := composeImage(t, c); got != "registry.example/agent:pinned" {
+		t.Errorf("image = %q; want registry.example/agent:pinned", got)
+	}
+}
+
+// CurrentImage is what lets a failed resolution keep the workspace where it
+// is instead of reaching for a floating tag: an update that cannot find a
+// NEWER image must never install an OLDER one.
+func TestCurrentImageReadsTheRunningPin(t *testing.T) {
+	c := codingAgentWorkspace(t, "testws", "bitswan/coding-agent-staging:2026-1-git-abc")
+
+	if got := c.CurrentImage(); got != "bitswan/coding-agent-staging:2026-1-git-abc" {
+		t.Errorf("CurrentImage() = %q; want the pin in the compose", got)
+	}
+
+	// No compose at all (never enabled) is "" — not a guess.
+	fresh := &CodingAgentService{WorkspaceName: "nope", WorkspacePath: t.TempDir()}
+	if got := fresh.CurrentImage(); got != "" {
+		t.Errorf("CurrentImage() on a workspace with no compose = %q; want \"\"", got)
+	}
 }
