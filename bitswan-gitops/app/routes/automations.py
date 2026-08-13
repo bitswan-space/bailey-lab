@@ -756,12 +756,16 @@ async def wake_live_dev_route(
     body: WakeLiveDevRequest,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
-    """Rehydrate an evicted live-dev instance — called when a user opens the BP
-    in a copy (dashboard) or first hits its URL (the daemon gate). Starts the
-    instance's stopped workers (or redeploys if cold-GC'd), stamps last-activity,
-    and re-enforces the pool cap. Idempotent: a running instance is a no-op
-    (well, a cheap restart). Returns the deployment_ids so the caller can poll
-    health / show a loading screen."""
+    """Rehydrate an evicted (or partially evicted) live-dev instance — called when
+    a user opens the BP in a copy (dashboard) or first hits its URL (the daemon
+    gate). Re-activates every member of the group per bitswan.yaml and redeploys
+    what is missing, stamps last-activity, and re-enforces the pool cap.
+    Idempotent: a fully-up instance is a no-op. Returns the deployment_ids so the
+    caller can poll health / show a loading screen.
+
+    No stage is passed: the caller identifies a BP+copy, not an endpoint, so every
+    ephemeral stage of the context is woken. The gate's wake-by-host DOES pass one
+    — it resolved a specific host, so it knows which stage it needs."""
     copy = body.copy
     context = f"copy-{copy}-{bp}" if copy and copy != "main" else bp
     return await automation_service.wake_live_dev(context)
