@@ -28,6 +28,12 @@ function fmtVer(v) {
   return /^\d{4}\.\d/.test(s) ? `v${s}` : s;
 }
 
+// Why a stale workspace has no Update button: applying one is owner-only, so
+// naming the owner turns a dead end into a next step.
+function ownerNote(ws) {
+  return ws.owner ? `Only ${ws.owner} can update this` : 'Only the workspace owner can update this';
+}
+
 function UpdatesView({ ctx }) {
   const { data, toast, refresh } = ctx;
   const upd = data.updates; // { server, workspaces, count, history, rollback_depth }
@@ -150,13 +156,13 @@ function UpdatesView({ ctx }) {
         </div>
         {rolling ? (
           isServer ? <WUpdateBar prog={srvProg} /> : <WUpdateBar prog={prog} />
-        ) : (
+        ) : h.can_rollback ? (
           <WBtn variant="ghost" size="xs" leftIcon="rotate-ccw" disabled={anyBusy}
             title={`Roll back to ${h.from_version}`}
             onClick={() => setConfirm(h)}>
             Roll back to {h.from_version}
           </WBtn>
-        )}
+        ) : null /* rolling a workspace back is owner-only too — see ownerNote */}
       </div>
     );
   };
@@ -196,7 +202,7 @@ function UpdatesView({ ctx }) {
           <WCard style={{ marginTop: 12 }}>
             <div style={{ fontWeight: 700, color: WC.fg, marginBottom: 8 }}>Workspaces</div>
             {(!upd.workspaces || upd.workspaces.length === 0) ? (
-              <p style={{ color: WC.muted, fontSize: 13, margin: 0 }}>All workspaces are up to date.</p>
+              <p style={{ color: WC.muted, fontSize: 13, margin: 0 }}>All workspaces you can update are up to date.</p>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column' }}>
                 {upd.workspaces.map((ws, i) => (
@@ -209,10 +215,14 @@ function UpdatesView({ ctx }) {
                     </div>
                     {busy === ws.name && !rbId ? (
                       <WUpdateBar prog={prog} />
-                    ) : (
+                    ) : ws.can_update ? (
                       <WBtn variant="primary" size="sm" leftIcon="arrow-up-circle" disabled={anyBusy} onClick={() => doUpgrade(ws.name)}>
                         Update
                       </WBtn>
+                    ) : (
+                      // Issue #367: the upgrade endpoint is owner-only, so a button
+                      // here would just 403. Say who can apply it instead.
+                      <div style={{ fontSize: 12, color: WC.muted, textAlign: 'right' }}>{ownerNote(ws)}</div>
                     )}
                   </div>
                 ))}
