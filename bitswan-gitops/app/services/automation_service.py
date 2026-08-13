@@ -1664,12 +1664,31 @@ class AutomationService:
                 dep["context"] = m["context"]
             if m.get("relative_path") is not None:
                 dep["relative_path"] = m["relative_path"]
+            # Image-baked deploys: the source lives inside the image. Record the
+            # baked image ref, its resolved id, and the source git commit so a
+            # deployment maps back to exact source (and promote/rollback reuse it).
+            #
+            # This MUST precede the resolve_automation_config calls below. Those
+            # read automation.toml "as it shipped", and for an image-baked
+            # deployment (no <gitops_dir>/<checksum> blob tree) the only handle on
+            # that is `source_commit`. Assigning it after them resolved the config
+            # against the PREVIOUS deploy's commit, so every automation.toml change
+            # to `memory-reservation` / `memory_reservation_policy` / `services`
+            # landed one deploy late: editing 128 → 256 and redeploying persisted
+            # 128, the value from the deploy before.
+            if m.get("image") is not None:
+                dep["image"] = m["image"]
+            if m.get("image_id") is not None:
+                dep["image_id"] = m["image_id"]
+            if m.get("source_commit") is not None:
+                dep["source_commit"] = m["source_commit"]
             # Persist the deployment's declared infra services INTO the entry.
             # The infra driver compiles this bitswan.yaml without access to the
             # baked image's automation.toml, so it can only merge infra services
             # (postgres/garage/…) that are explicit here. Prefer an explicit
-            # member `services`, else resolve them from the automation config
-            # now (relative_path/checksum/stage are already set on `dep`). The
+            # member `services`, else resolve them from the automation config now
+            # (relative_path/checksum/stage/source_commit are all set on `dep`
+            # above — everything resolve_automation_config reads). The
             # old in-process Python compiler backfilled this at compile time;
             # the driver needs it materialized in the file. Model the relationship
             # as explicit data — never leave the driver to infer it.
@@ -1703,15 +1722,6 @@ class AutomationService:
             dep["memory_reservation_policy"] = mem_pol or "on-demand"
             if m.get("replicas") is not None:
                 dep["replicas"] = m["replicas"]
-            # Image-baked deploys: the source lives inside the image. Record the
-            # baked image ref, its resolved id, and the source git commit so a
-            # deployment maps back to exact source (and promote/rollback reuse it).
-            if m.get("image") is not None:
-                dep["image"] = m["image"]
-            if m.get("image_id") is not None:
-                dep["image_id"] = m["image_id"]
-            if m.get("source_commit") is not None:
-                dep["source_commit"] = m["source_commit"]
             if "active" not in dep:
                 dep["active"] = True
 
