@@ -178,6 +178,81 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 	return buf.String(), nil
 }
 
+// composePath is the workspace's coding-agent compose file.
+func (c *CodingAgentService) composePath() string {
+	return filepath.Join(c.WorkspacePath, "deployment", "docker-compose-coding-agent.yml")
+}
+
+// CurrentImage returns the coding-agent image recorded in the workspace's
+// existing compose, or "" when it can't be determined (not enabled yet,
+// unreadable/malformed file, no image set).
+//
+// Mirrors daemon.currentGitopsImage, and exists for the same reason: a
+// regeneration path that can't resolve an image must carry the workspace's
+// CURRENT one forward. Anything else silently moves a running workspace onto a
+// different image than the one the operator chose.
+func (c *CodingAgentService) CurrentImage() string {
+	data, err := os.ReadFile(c.composePath())
+	if err != nil {
+		return ""
+	}
+	var compose struct {
+		Services struct {
+			CodingAgent struct {
+				Image string `yaml:"image"`
+			} `yaml:"bitswan-coding-agent"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &compose); err != nil {
+		return ""
+	}
+	return compose.Services.CodingAgent.Image
+}
+
+// RegenerateDockerCompose rewrites the coding-agent compose for an ALREADY
+// enabled workspace, resolving the image the same staging/dev-aware way
+// DashboardService.RegenerateDockerCompose does.
+//
+// It exists because the update path had no such helper and open-coded the
+// regeneration with an empty image — which fell through to the hard-coded
+// "bitswan/coding-agent:latest" below, so `workspace update --dev` (and
+// --staging, and a plain update) put every workspace onto a floating
+// production tag regardless of the channel asked for. On this sandbox that was
+// a year-old image with no git in it, and the agent said so.
+func (c *CodingAgentService) RegenerateDockerCompose(codingAgentImage string, staging, dev bool) error {
+	if !c.IsEnabled() {
+		return fmt.Errorf("Coding Agent service is not enabled for workspace '%s'", c.WorkspaceName)
+	}
+
+	metadata, err := c.GetMetadata()
+	if err != nil {
+		return fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	image := codingAgentImage
+	if image == "" {
+		image, err = dockerhub.ResolveCodingAgentImage(staging, dev)
+		if err != nil {
+			// Hub is unreachable or has no matching tag. Keep what the
+			// workspace is running rather than reaching for a floating tag —
+			// an update that can't find a NEWER image must not install an
+			// OLDER one.
+			if current := c.CurrentImage(); current != "" {
+				fmt.Printf("Could not resolve a coding-agent image (%v); keeping %s\n", err, current)
+				image = current
+			} else {
+				return fmt.Errorf("failed to get latest coding-agent image: %w", err)
+			}
+		}
+	}
+
+	content, err := c.CreateDockerCompose(metadata.CodingAgentSecret, image, metadata.Domain)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate coding-agent docker-compose: %w", err)
+	}
+	return c.SaveDockerCompose(content)
+}
+
 // SaveDockerCompose saves the docker-compose-coding-agent.yml file
 func (c *CodingAgentService) SaveDockerCompose(content string) error {
 	deploymentDir := filepath.Join(c.WorkspacePath, "deployment")

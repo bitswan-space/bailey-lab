@@ -185,7 +185,7 @@ function Shell() {
   const { processes } = useProcesses();
   const { copies: copiesSnapshot } = useCopies();
   const deployDone = useDeployDone();
-  const { startMergeBackSession } = useSessions();
+  const { sendPrompt, startMergeBackSession } = useSessions();
   // Memoise the empty-array fallback so the array identity is stable.
   const allBps = useMemo(() => processes ?? [], [processes]);
   const copies = useMemo(() => copiesSnapshot ?? [], [copiesSnapshot]);
@@ -471,7 +471,19 @@ function Shell() {
         if (res.status === 'needs_rebase') {
           toast.error(`${bpLabelForCopy}: ${res.message}`, { id, duration: 10000 });
           // Hand off to the Coding Agent on this copy to resolve the conflict.
+          // HANDING OFF MEANS GIVING IT THE TASK. Opening the tab was all this
+          // did, so the user arrived at an agent that had been told nothing,
+          // sitting at an empty prompt, with no way to know that finishing a
+          // rebase was now their job to describe — the merge-back path next to
+          // it has always sent its prompt (`startMergeBackSession`). The sync
+          // prompt is the conflict-resolution one: commit WIP, rebase onto
+          // main, resolve, push.
           setCopy(copyName);
+          await sendPrompt(copyName, bpDir, 'sync').catch((err: unknown) => {
+            toast.error(
+              `Failed to hand the rebase to the agent: ${errorMessage(err)}`,
+            );
+          });
           handleTab('agent');
           return;
         }
@@ -501,7 +513,7 @@ function Shell() {
         setSyncCheckNonce((n) => n + 1);
       }
     },
-    [handleTab],
+    [handleTab, sendPrompt],
   );
 
   const bp = useMemo(

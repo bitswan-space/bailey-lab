@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCopies, useDeployDone } from '@/components/workspace/WorkspaceProvider';
-import { api, errorMessage, type BpDivergence } from '@/lib/api';
+import {
+  api,
+  EdgeUnavailableError,
+  errorMessage,
+  type BpDivergence,
+} from '@/lib/api';
 import { SessionExpiredError } from '@/lib/session';
 
 /** Two readings that say the same thing. Compared by value so an unchanged
@@ -19,6 +24,11 @@ function sameDivergence(
     a.behind_other === b.behind_other
   );
 }
+
+/** How long to wait before asking again when the workspace router had no
+ *  route for us. Long enough that a Traefik reconfigure has finished, short
+ *  enough that a first-ever read still lands while the user is looking. */
+const EDGE_RECHECK_MS = 3_000;
 
 export interface BpDivergenceReading {
   /** null = not read yet, or the last read FAILED. Never 0-as-unknown. */
@@ -85,6 +95,9 @@ export function useBpDivergence(
   const targetRef = useRef<string>('');
   const runningRef = useRef(false);
   const againRef = useRef(false);
+  // Pending re-read after a router blip. One at a time, cancelled when the
+  // pair changes or the hook goes away.
+  const edgeRetryRef = useRef(0);
 
   const { copies: copiesSnapshot } = useCopies();
   const deployDone = useDeployDone();
@@ -127,6 +140,25 @@ export function useBpDivergence(
           // An expired session is surfaced app-wide by the re-login banner;
           // the previous reading stands until the user is back.
           if (err instanceof SessionExpiredError) return;
+          // Nor does the workspace router failing to reach us say anything
+          // about git. Creating a business process starts containers, which
+          // reconfigures Traefik, and a read caught in that window came back
+          // as "Couldn't read whether main has changes bp hasn't pulled yet:
+          // 404 page not found" — a frightening claim about the user's work,
+          // made out of a routing hiccup (bailey-lab #362). The api layer has
+          // already retried it; if it is STILL not routed, hold the last
+          // reading and wait for the next re-read. This hook re-reads on every
+          // git event and on every visit to a screen that needs it, so there
+          // is always a next one — and on a FIRST read there is nothing to
+          // hold, so ask again on a timer rather than spinning forever.
+          if (err instanceof EdgeUnavailableError) {
+            window.clearTimeout(edgeRetryRef.current);
+            edgeRetryRef.current = window.setTimeout(
+              () => recheckRef.current(),
+              EDGE_RECHECK_MS,
+            );
+            return;
+          }
           setDivergence(null);
           setError(errorMessage(err));
         })
@@ -143,14 +175,23 @@ export function useBpDivergence(
     run(target);
   }, []);
 
+  // `recheck` is stable, but the edge-retry timer above is armed from inside
+  // it — reading it through a ref keeps that self-reference out of its own
+  // dependency list.
+  const recheckRef = useRef(recheck);
+  recheckRef.current = recheck;
+
   // Changing copy OR business process invalidates the reading: the old pair's
   // count says nothing about the new one, so drop it rather than showing it
   // for a beat against the wrong process.
   useEffect(() => {
     targetRef.current = key;
+    window.clearTimeout(edgeRetryRef.current);
     setDivergence(null);
     setError(null);
   }, [key]);
+
+  useEffect(() => () => window.clearTimeout(edgeRetryRef.current), []);
 
   useEffect(() => {
     recheck();

@@ -153,6 +153,9 @@ def env(tmp_path, monkeypatch):
         "tmp_path": tmp_path,
         "user_copy": user_copy,
         "experiment": experiment,
+        # Seeding a business process AFTER a copy exists is how that copy comes
+        # to lack one — the case where a pull materialises it.
+        "seed_bp": seed_bp,
     }
 
 
@@ -713,6 +716,119 @@ def test_pulling_scopes_to_one_business_process(env, tmp_path):
     assert _read(os.path.join(alice, "bpb", "file.txt")) == "b0\n"
     assert asyncio.run(copies.get_bp_divergence("alice", bp="bpa"))["behind_bp"] == 0
     assert asyncio.run(copies.get_bp_divergence("alice", bp="bpb"))["behind_bp"] == 1
+
+
+# ── what a pull brings in ───────────────────────────────────────────────────
+
+
+def test_incoming_reports_the_files_a_pull_changes_not_only_its_commits(env, tmp_path):
+    """The Sync screen's data: the commits arriving AND their file effect.
+
+    Commit subjects alone were what it had, and on a workspace where everyone
+    edits the same file that is thirty identical lines and no answer to the
+    question the screen exists for — "what actually changes?" (user-reported,
+    with a screenshot of exactly that list). So the reading carries both.
+    """
+    env["user_copy"]("alice")
+    _advance_main(env, tmp_path, "bpa", ["a1\n", "a2\n"])
+
+    inc = asyncio.run(copies.get_incoming("alice", bp="bpa"))
+
+    assert [c["subject"] for c in inc["commits"]] == ["main moves", "main moves"]
+    assert inc["commits_truncated"] is False
+    # Paths are copy-root-relative (`<bp>/…`), the same vocabulary /status and
+    # every diff header in the app use — the file list is clickable and its
+    # rows have to name something the diff endpoint accepts.
+    assert [f["path"] for f in inc["files"]] == ["bpa/file.txt"]
+    assert (inc["files"][0]["adds"], inc["files"][0]["dels"]) == (1, 1)
+    assert inc["files"][0]["kind"] == "modified"
+
+    diff = asyncio.run(copies.get_incoming_diff("alice", bp="bpa"))
+    assert "+a2" in diff["diff"] and "-a0" in diff["diff"]
+    assert "a/bpa/file.txt" in diff["diff"], "patch headers stay copy-root-relative"
+    assert diff["truncated"] is False
+
+
+def test_incoming_is_measured_from_the_merge_base_not_from_the_copys_tip(env, tmp_path):
+    """A pull REPLAYS the copy's own commits on top of main, so the copy's work
+    is not something the pull brings in — and must not be listed as arriving.
+
+    Read as a two-dot diff (`HEAD..main`) the copy's own files show up inverted
+    — its additions as deletions — which reads as "pulling will delete my
+    work". It is measured from the merge base instead.
+    """
+    alice = env["user_copy"]("alice")
+    _commit(os.path.join(alice, "bpa"), "mine.txt", "mine\n", "my own work")
+    _advance_main(env, tmp_path, "bpa", ["a1\n"])
+
+    inc = asyncio.run(copies.get_incoming("alice", bp="bpa"))
+
+    assert [f["path"] for f in inc["files"]] == ["bpa/file.txt"]
+    assert "bpa/mine.txt" not in [f["path"] for f in inc["files"]]
+    assert [c["subject"] for c in inc["commits"]] == ["main moves"]
+    diff = asyncio.run(copies.get_incoming_diff("alice", bp="bpa"))
+    assert "mine.txt" not in diff["diff"]
+
+
+def test_incoming_answers_for_a_process_the_copy_has_never_checked_out(env, tmp_path):
+    """A business process somebody else created after this copy was made.
+
+    The copy has no clone of it, so there is no working tree to ask — the
+    answer comes from the bare repo, against the empty tree: the whole process
+    arrives. The commit-only view this replaces returned 404 here, which is
+    what the Sync screen showed for a business process that had just been
+    created (bailey-lab #362 territory: the step existed, its content did not).
+    """
+    env["user_copy"]("alice")
+    env["seed_bp"]("bpc", "new.txt", "c0\n")
+
+    # Precondition: the divergence reading — which is what puts the Sync step
+    # on screen — already says this process is behind.
+    assert asyncio.run(copies.get_bp_divergence("alice", bp="bpc"))["behind_bp"] > 0
+
+    inc = asyncio.run(copies.get_incoming("alice", bp="bpc"))
+
+    assert [f["path"] for f in inc["files"]] == ["bpc/new.txt"]
+    assert inc["files"][0]["kind"] == "added"
+    # Its whole history arrives, seed commit included — that IS the pull.
+    assert [c["subject"] for c in inc["commits"]] == [
+        "seed bpc",
+        "Initialize business process bpc",
+    ]
+    diff = asyncio.run(copies.get_incoming_diff("alice", bp="bpc"))
+    assert "+c0" in diff["diff"]
+
+
+def test_incoming_diff_scopes_to_one_file_and_rejects_another_process(env, tmp_path):
+    """Clicking a row in the file list asks for that row's diff — and only a
+    path inside the business process being pulled is a row in that list."""
+    env["user_copy"]("alice")
+    _advance_main(env, tmp_path, "bpa", ["a1\n"])
+    _advance_main(env, tmp_path, "bpb", ["b1\n"])
+
+    one = asyncio.run(copies.get_incoming_diff("alice", bp="bpa", path="bpa/file.txt"))
+    assert "+a1" in one["diff"]
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(copies.get_incoming_diff("alice", bp="bpa", path="bpb/file.txt"))
+    assert ei.value.status_code == 400
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(
+            copies.get_incoming_diff("alice", bp="bpa", path="../../etc/passwd")
+        )
+    assert ei.value.status_code == 400
+
+
+def test_incoming_is_empty_when_there_is_nothing_to_pull(env):
+    """The Sync step should not exist at all here — but when it is opened
+    anyway (a reload on a stale link), "nothing arrives" is an answer, not an
+    error."""
+    env["user_copy"]("alice")
+
+    inc = asyncio.run(copies.get_incoming("alice", bp="bpa"))
+    assert inc["commits"] == [] and inc["files"] == []
+    assert asyncio.run(copies.get_incoming_diff("alice", bp="bpa"))["diff"] == ""
 
 
 def test_ensure_bp_in_experiment_materializes_from_the_parent(env):

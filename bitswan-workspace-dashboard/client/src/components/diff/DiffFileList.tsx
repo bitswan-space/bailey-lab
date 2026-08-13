@@ -1,4 +1,4 @@
-import type { ChangedFile, ChangedKind } from '@/lib/api';
+import { changedKindLetter, type ChangedFile, type ChangedKind } from '@/lib/api';
 
 interface Props {
   files: ChangedFile[];
@@ -7,9 +7,11 @@ interface Props {
 }
 
 const KIND_STYLES: Record<ChangedKind, string> = {
-  A: 'bg-emerald-100 text-emerald-700',
-  M: 'bg-amber-100 text-amber-700',
-  D: 'bg-red-100 text-red-700',
+  added: 'bg-emerald-100 text-emerald-700',
+  modified: 'bg-amber-100 text-amber-700',
+  deleted: 'bg-red-100 text-red-700',
+  renamed: 'bg-sky-100 text-sky-700',
+  copied: 'bg-sky-100 text-sky-700',
 };
 
 export function DiffFileList({ files, selectedPath, onSelect }: Props) {
@@ -27,9 +29,10 @@ export function DiffFileList({ files, selectedPath, onSelect }: Props) {
             }`}
           >
             <span
-              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-bold ${KIND_STYLES[f.kind]}`}
+              className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[10px] font-bold ${KIND_STYLES[f.kind] ?? KIND_STYLES.modified}`}
+              title={f.kind}
             >
-              {f.kind}
+              {changedKindLetter(f.kind)}
             </span>
             <div className="min-w-0 flex-1">
               {/* Right-align the path so the filename (leaf) stays visible when truncated. */}

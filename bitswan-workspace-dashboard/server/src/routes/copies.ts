@@ -286,6 +286,63 @@ export function registerCopyRoutes(
     },
   );
 
+  // What a pull would bring into ONE business process: the arriving commits
+  // and — the half the Sync screen was missing — the files they change. Its
+  // sibling below serves the diff behind a row in that file list.
+  app.get<{ Params: { name: string }; Querystring: { bp?: string } }>(
+    '/api/copies/:name/incoming',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) {
+        return reply.code(503).send({ error: 'gitops not configured' });
+      }
+      if (!req.query.bp) {
+        return reply.code(400).send({ error: 'bp is required' });
+      }
+      try {
+        const r = await gitops.copyIncoming(req.params.name, req.query.bp);
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, name: req.params.name }, 'copy incoming failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
+  app.get<{
+    Params: { name: string };
+    Querystring: { bp?: string; path?: string };
+  }>('/api/copies/:name/incoming/diff', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
+    if (!req.query.bp) {
+      return reply.code(400).send({ error: 'bp is required' });
+    }
+    try {
+      const r = await gitops.copyIncomingDiff(
+        req.params.name,
+        req.query.bp,
+        req.query.path,
+      );
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
+    } catch (err) {
+      app.log.warn({ err, name: req.params.name }, 'copy incoming diff failed');
+      return reply.code(502).send({ error: 'gitops unreachable' });
+    }
+  });
+
   // What merging an experiment back would carry into its parent copy. The
   // experiment banner asks this instead of /status: /status measures the copy
   // against MAIN, and an experiment inherits its parent's whole divergence

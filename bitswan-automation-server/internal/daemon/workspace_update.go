@@ -190,7 +190,7 @@ func updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, c
 
 	// Always try to update the coding-agent service if enabled
 	fmt.Println("Checking coding-agent service...")
-	if err := updateCodingAgentService(workspaceName); err != nil {
+	if err := updateCodingAgentService(workspaceName, staging, dev); err != nil {
 		fmt.Printf("Warning: failed to update coding-agent service: %v\n", err)
 	} else {
 		fmt.Println("Coding-agent service updated successfully!")
@@ -216,10 +216,16 @@ func updateServices(workspaceName, dashboardImage, kafkaImage, zookeeperImage, c
 }
 
 // updateCodingAgentService regenerates and restarts the coding-agent service
-// for a workspace if it's enabled. The coding-agent has no RegenerateDockerCompose
-// helper, so we re-create the compose from the persisted secret/domain and
-// restart — this is what moves its containers onto the named-volume mounts.
-func updateCodingAgentService(workspaceName string) error {
+// for a workspace if it's enabled — on the image channel the update ASKED for,
+// the same way the dashboard and gitops are updated.
+//
+// It used to regenerate the compose with an empty image, which fell through to
+// a hard-coded "bitswan/coding-agent:latest": `workspace update --dev` (and
+// --staging, and a plain update of a staging workspace) silently moved the
+// agent onto a floating production tag while every other service went where it
+// was told. The tag was old enough to predate git being installed in the
+// image, so the symptom was the agent announcing it had no git.
+func updateCodingAgentService(workspaceName string, staging, dev bool) error {
 	svc, err := services.NewCodingAgentService(workspaceName)
 	if err != nil {
 		return fmt.Errorf("failed to create coding-agent service: %w", err)
@@ -228,21 +234,13 @@ func updateCodingAgentService(workspaceName string) error {
 		fmt.Printf("Coding-agent service is not enabled for workspace '%s', skipping update\n", workspaceName)
 		return nil
 	}
-	md, err := svc.GetMetadata()
-	if err != nil {
-		return fmt.Errorf("failed to read workspace metadata: %w", err)
-	}
 	fmt.Println("Stopping current coding-agent container...")
 	if err := svc.StopContainer(); err != nil {
 		return fmt.Errorf("failed to stop coding-agent container: %w", err)
 	}
 	fmt.Println("Regenerating coding-agent docker-compose configuration...")
-	content, err := svc.CreateDockerCompose(md.CodingAgentSecret, "", md.Domain)
-	if err != nil {
-		return fmt.Errorf("failed to regenerate coding-agent docker-compose: %w", err)
-	}
-	if err := svc.SaveDockerCompose(content); err != nil {
-		return fmt.Errorf("failed to save coding-agent docker-compose: %w", err)
+	if err := svc.RegenerateDockerCompose("", staging, dev); err != nil {
+		return err
 	}
 	fmt.Println("Starting coding-agent container...")
 	if err := svc.StartContainer(); err != nil {
