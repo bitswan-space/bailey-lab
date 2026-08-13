@@ -146,11 +146,64 @@ func triggerLiveDevWake(host string) {
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 		if err != nil {
+			log.Printf("wake-on-access: wake of %q failed: %v", outer, err)
 			return
 		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
+		defer resp.Body.Close()
+		logWakeOutcome(outer, resp)
 	}()
+}
+
+// logWakeOutcome turns gitops' wake-by-host reply into ONE log line.
+//
+// The reply used to be discarded, which made every way a wake can decline to do
+// anything — unknown host, always-on host, "already running", a redeploy that
+// raised — indistinguishable from success. The user-visible result of all of them
+// is the same self-refreshing loading page, so with nothing logged on either side
+// a stuck coldstart left no trace at all to debug (#281). This is the trace.
+func logWakeOutcome(host string, resp *http.Response) {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("wake-on-access: wake of %q returned %d: %s",
+			host, resp.StatusCode, strings.TrimSpace(string(body)))
+		return
+	}
+	var out struct {
+		OnDemand       bool     `json:"on_demand"`
+		Context        string   `json:"context"`
+		Stage          string   `json:"stage"`
+		DeploymentIDs  []string `json:"deployment_ids"`
+		Woke           []string `json:"woke"`
+		Recycled       []string `json:"recycled"`
+		AlreadyRunning bool     `json:"already_running"`
+		RedeployError  string   `json:"redeploy_error"`
+		Reason         string   `json:"reason"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		log.Printf("wake-on-access: wake of %q returned an undecodable body: %v", host, err)
+		return
+	}
+	switch {
+	case !out.OnDemand:
+		// The gate will keep serving the loading page for a host gitops won't
+		// wake, so this one is a real misconfiguration, not noise.
+		log.Printf("wake-on-access: gitops declined to wake %q (not an on-demand "+
+			"deployment it recognises: %s) — the loading page will not resolve",
+			host, out.Reason)
+	case out.RedeployError != "":
+		log.Printf("wake-on-access: wake of %q (%s/%s) FAILED to redeploy: %s",
+			host, out.Context, out.Stage, out.RedeployError)
+	case len(out.Recycled) > 0:
+		log.Printf("wake-on-access: recycled %q (%s/%s), stale source mount on %s",
+			host, out.Context, out.Stage, strings.Join(out.Recycled, ","))
+	case out.AlreadyRunning:
+		log.Printf("wake-on-access: %q (%s/%s) already up — no action",
+			host, out.Context, out.Stage)
+	default:
+		log.Printf("wake-on-access: woke %q (%s/%s), %d member(s), recreating %s",
+			host, out.Context, out.Stage, len(out.DeploymentIDs),
+			strings.Join(out.Woke, ","))
+	}
 }
 
 // serveLiveDevLoadingResponse rewrites a 5xx response from a dehydrated
