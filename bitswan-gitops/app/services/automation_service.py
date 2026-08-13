@@ -478,6 +478,12 @@ class AutomationService:
         # for direct Docker access). Lazy so tests that never deploy don't need
         # the BITSWAN_INFRA_DRIVER_* env the client requires.
         self._infra_driver = None
+        # Per-context wake serialization (wake_live_dev). The gate's loading page
+        # and the dashboard both fire wake repeatedly while an instance comes up;
+        # without this a second wake could stack another compose apply on top of
+        # an in-flight one. Each waiter re-reads the group state inside the lock,
+        # so the queued wake sees the finished one and becomes a no-op.
+        self._live_dev_wake_locks: dict[str, asyncio.Lock] = {}
         # Cache full history per deployment_id: {deployment_id: (commit_hash, [entries])}
         self._history_cache: dict[str, tuple[str, list]] = {}
         # `deployments` mapping of bitswan.yaml AS OF a git ref, keyed by that
@@ -1658,12 +1664,31 @@ class AutomationService:
                 dep["context"] = m["context"]
             if m.get("relative_path") is not None:
                 dep["relative_path"] = m["relative_path"]
+            # Image-baked deploys: the source lives inside the image. Record the
+            # baked image ref, its resolved id, and the source git commit so a
+            # deployment maps back to exact source (and promote/rollback reuse it).
+            #
+            # This MUST precede the resolve_automation_config calls below. Those
+            # read automation.toml "as it shipped", and for an image-baked
+            # deployment (no <gitops_dir>/<checksum> blob tree) the only handle on
+            # that is `source_commit`. Assigning it after them resolved the config
+            # against the PREVIOUS deploy's commit, so every automation.toml change
+            # to `memory-reservation` / `memory_reservation_policy` / `services`
+            # landed one deploy late: editing 128 → 256 and redeploying persisted
+            # 128, the value from the deploy before.
+            if m.get("image") is not None:
+                dep["image"] = m["image"]
+            if m.get("image_id") is not None:
+                dep["image_id"] = m["image_id"]
+            if m.get("source_commit") is not None:
+                dep["source_commit"] = m["source_commit"]
             # Persist the deployment's declared infra services INTO the entry.
             # The infra driver compiles this bitswan.yaml without access to the
             # baked image's automation.toml, so it can only merge infra services
             # (postgres/garage/…) that are explicit here. Prefer an explicit
-            # member `services`, else resolve them from the automation config
-            # now (relative_path/checksum/stage are already set on `dep`). The
+            # member `services`, else resolve them from the automation config now
+            # (relative_path/checksum/stage/source_commit are all set on `dep`
+            # above — everything resolve_automation_config reads). The
             # old in-process Python compiler backfilled this at compile time;
             # the driver needs it materialized in the file. Model the relationship
             # as explicit data — never leave the driver to infer it.
@@ -1697,15 +1722,6 @@ class AutomationService:
             dep["memory_reservation_policy"] = mem_pol or "on-demand"
             if m.get("replicas") is not None:
                 dep["replicas"] = m["replicas"]
-            # Image-baked deploys: the source lives inside the image. Record the
-            # baked image ref, its resolved id, and the source git commit so a
-            # deployment maps back to exact source (and promote/rollback reuse it).
-            if m.get("image") is not None:
-                dep["image"] = m["image"]
-            if m.get("image_id") is not None:
-                dep["image_id"] = m["image_id"]
-            if m.get("source_commit") is not None:
-                dep["source_commit"] = m["source_commit"]
             if "active" not in dep:
                 dep["active"] = True
 
@@ -5851,31 +5867,47 @@ class AutomationService:
         except OSError:
             return float(created or 0)
 
-    async def _live_dev_instances(self) -> dict[str, dict]:
-        """Map context → {context, created, running, hydrating, deployment_ids}
-        for every EPHEMERAL (dev/live-dev) worker (running or stopped), grouped
-        into instances. staging/production are excluded — they're protected."""
+    async def _live_dev_instances(self) -> dict[tuple[str, str], dict]:
+        """Map (context, stage) → {context, stage, created, running, hydrating,
+        deployment_ids, live_deployment_ids} for every EPHEMERAL (dev/live-dev)
+        worker (running or stopped), grouped into instances. staging/production are
+        excluded — they're protected.
+
+        Keyed on (context, stage), NOT context alone. A context can carry both a
+        dev and a live-dev group, and merging them let one stage's containers
+        speak for the other: a live-dev group whose members had been evicted
+        looked "up" because its dev sibling was running, so the wake did nothing
+        (#281). The eviction paths inherit the same scoping — evicting a live-dev
+        instance no longer collaterally kills the dev stage of the same BP.
+
+        `deployment_ids` is every member with a container in ANY state;
+        `live_deployment_ids` only those with a container that is up or coming up.
+        The difference is what tells a partially-evicted group from a healthy one.
+        """
         containers = await self.infra_driver.container_list(
             self._workspace_ctx(),
             labels={"gitops.workspace": self.workspace_name},
         )
-        instances: dict[str, dict] = {}
+        instances: dict[tuple[str, str], dict] = {}
         for c in containers:
             labels = c.labels or {}
-            if labels.get("gitops.stage") not in self.EPHEMERAL_STAGES:
+            stage = labels.get("gitops.stage")
+            if stage not in self.EPHEMERAL_STAGES:
                 continue
             ctx = labels.get("gitops.context")
             dep = labels.get("gitops.deployment_id")
             if not ctx or not dep:
                 continue
             inst = instances.setdefault(
-                ctx,
+                (ctx, stage),
                 {
                     "context": ctx,
+                    "stage": stage,
                     "created": 0,
                     "running": False,
                     "hydrating": False,
                     "deployment_ids": set(),
+                    "live_deployment_ids": set(),
                 },
             )
             inst["created"] = max(inst["created"], c.created or 0)
@@ -5887,6 +5919,7 @@ class AutomationService:
             # a container that is already coming up, or it flaps forever.
             if c.state in ("running", "created", "restarting"):
                 inst["hydrating"] = True
+                inst["live_deployment_ids"].add(dep)
         return instances
 
     async def _evict_instance_deployment(
@@ -5953,8 +5986,10 @@ class AutomationService:
     async def _evict_instance(
         self, inst: dict, reason: str = "memory-pressure"
     ) -> bool:
-        """Evict a whole instance (all its members): mark inactive + remove
-        containers. Best-effort per member; returns True if any member evicted."""
+        """Evict a whole instance — every member of that ONE (context, stage) group:
+        mark inactive + remove containers. Best-effort per member; returns True if
+        any member evicted. A member that raises leaves the group partially
+        evicted, which the wake path is built to recover from (#281)."""
         ok = False
         for dep in sorted(inst["deployment_ids"]):
             try:
@@ -5974,6 +6009,11 @@ class AutomationService:
              must hold no containers (idle == free); a wake brings it back.
           2. Cap the RUNNING pool — evict the oldest (least-recently-active)
              overflow beyond the cap.
+
+        An "instance" is one (context, stage) group — see _live_dev_instances. So a
+        BP whose dev and live-dev stages are both up counts as two against the cap
+        (they hold memory independently) and evicting one no longer drags the other
+        down with it.
 
         Never touches the shared egress gateway/proxy or staging/production.
         Idempotent + best-effort per instance."""
@@ -6006,31 +6046,104 @@ class AutomationService:
             )
         return {"running": len(running), "cap": cap, "evicted": evicted}
 
-    async def wake_live_dev(self, context: str) -> dict:
-        """Rehydrate an evicted ephemeral (dev/live-dev) instance — called on
-        BP-load and on first HTTP access via the gate — AND refresh its LRU
-        recency.
+    def _ephemeral_members(self, context: str, stage: str | None = None) -> list[str]:
+        """Deployment ids of an ephemeral group, read from bitswan.yaml — the
+        SOURCE OF TRUTH for who belongs to it, asleep members (active:false, no
+        container) included. `stage` restricts to one ephemeral stage; None means
+        every ephemeral stage of the context.
+
+        Membership must NOT be derived from live containers, which is what the
+        wake path used to do: an evicted member has no container, so it dropped
+        out of its own group. A partially-evicted group then woke only its
+        survivors and the member the user was actually waiting on stayed
+        `active: false` with no container forever (#281). The manual Sleep/Wake
+        controls always resolved membership this way — that is precisely why
+        clicking Wake in the dashboard recovered an instance that wake-on-access
+        could not."""
+        bs = read_bitswan_yaml(self.gitops_dir) or {}
+        want = self.EPHEMERAL_STAGES if stage is None else (stage,)
+        return sorted(
+            did
+            for did, conf in (bs.get("deployments") or {}).items()
+            if (conf or {}).get("context") == context
+            and ((conf or {}).get("stage") or "") in want
+        )
+
+    def _live_dev_wake_lock(self, context: str) -> asyncio.Lock:
+        """The per-context wake lock (created on first use). Serializing wakes of
+        one context is what makes the "is it already up?" check safe to act on:
+        without it, two wakes racing on the same group both see it as down and
+        stack two compose applies."""
+        lock = self._live_dev_wake_locks.get(context)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._live_dev_wake_locks[context] = lock
+        return lock
+
+    async def wake_live_dev(self, context: str, stage: str | None = None) -> dict:
+        """Rehydrate an evicted/partially-evicted ephemeral (dev/live-dev) group —
+        called on BP-load and on first HTTP access via the gate — AND refresh its
+        LRU recency. `stage` scopes it to one ephemeral stage (the gate knows it
+        from the host); None means every ephemeral stage of the context.
 
         ALWAYS stamps last-activity (so opening a BP keeps it hot / makes this a
-        true-LRU touch). If the instance is already running or mid-startup it's a
-        no-op beyond that touch (we never disturb a healthy instance, and the
-        loading page / dashboard fire this repeatedly) — UNLESS a member's source
-        dir was replaced under its running container (stale subpath mount, #123):
-        then the instance is recycled (containers removed + redeployed) so the
-        mount re-resolves, because a "healthy" container pinned to a deleted
-        inode serves a blank page forever. Otherwise it re-activates
-        the members (so the compiler includes them again) and redeploys to
-        recreate the removed containers, then re-enforces the cap. Returns the
-        deployment_ids so a caller can poll health / show a loading screen."""
+        true-LRU touch). Beyond that it is a no-op only when EVERY member of the
+        group (per bitswan.yaml) has a container that is up or coming up — we
+        never disturb a healthy instance, and the loading page / dashboard fire
+        this repeatedly. Two exceptions:
+
+          * one or more members are missing a live container — the group is
+            asleep or PARTIALLY asleep. Every member is re-activated (so the
+            compiler includes it again) and the group redeployed to recreate what
+            is gone, then the cap is re-enforced.
+          * all members are up but a member's source dir was replaced under its
+            running container (stale subpath mount, #123): the instance is
+            recycled (containers removed + redeployed) so the mount re-resolves,
+            because a "healthy" container pinned to a deleted inode serves a blank
+            page forever.
+
+        "Partially asleep" is not a corner case: the daemon's memory sweep evicts
+        only the members that were RUNNING and not always-on, so any stopped or
+        always-on sibling is left behind — and judging the group by that survivor
+        is what left users staring at the gate's loading page forever (#281).
+
+        Returns the deployment_ids it acted on plus what it decided, so a caller
+        can poll health / show a loading screen — and so a wake that could not do
+        anything says so instead of looking like a success (cf. #314)."""
         self.touch_live_dev_access(context)
+        async with self._live_dev_wake_lock(context):
+            return await self._wake_live_dev_locked(context, stage)
+
+    async def _wake_live_dev_locked(self, context: str, stage: str | None) -> dict:
+        """wake_live_dev's body, under the per-context lock. Re-reads the group
+        state so a wake that queued behind another one sees the finished work."""
         instances = await self._live_dev_instances()
-        inst = instances.get(context)
-        if inst and inst["hydrating"]:
-            deps = sorted(inst["deployment_ids"])
+        live: set[str] = set()
+        with_container: set[str] = set()
+        for (ctx, stg), inst in instances.items():
+            if ctx != context or (stage is not None and stg != stage):
+                continue
+            live |= inst["live_deployment_ids"]
+            with_container |= inst["deployment_ids"]
+        # bitswan.yaml is authoritative; the container-derived set is a fallback
+        # for groups with no yaml entry at all (orphan/agent-created deployments).
+        deps = self._ephemeral_members(context, stage) or sorted(with_container)
+        if not deps:
+            return {
+                "context": context,
+                "stage": stage,
+                "deployment_ids": [],
+                "reason": "no ephemeral deployment entries for this context",
+            }
+        missing = [d for d in deps if d not in live]
+        if not missing:
+            # Whole group is up or coming up. The only thing left that can need
+            # action is a stale source mount.
             stale = await self._stale_live_dev_members(deps)
             if not stale:
                 return {
                     "context": context,
+                    "stage": stage,
                     "deployment_ids": [],
                     "already_running": True,
                 }
@@ -6063,35 +6176,49 @@ class AutomationService:
             except Exception as e:  # noqa: BLE001
                 logger.warning("live-dev recycle redeploy of %s failed: %s", context, e)
             await self.enforce_live_dev_cap()
-            return {"context": context, "deployment_ids": deps, "recycled": stale}
+            return {
+                "context": context,
+                "stage": stage,
+                "deployment_ids": deps,
+                "recycled": stale,
+            }
 
-        # Members of this instance: from live containers if any survive, else
-        # from the (inactive) deploy entries left behind by eviction.
-        deps: list[str] = sorted(inst["deployment_ids"]) if inst else []
-        if not deps:
-            bs = read_bitswan_yaml(self.gitops_dir) or {}
-            deps = [
-                did
-                for did, conf in (bs.get("deployments") or {}).items()
-                if (conf or {}).get("context") == context
-                and (conf or {}).get("stage") in self.EPHEMERAL_STAGES
-            ]
-        if not deps:
-            return {"context": context, "deployment_ids": []}
-        # Re-activate (compiler will include them again) + redeploy to recreate.
+        # Asleep or PARTIALLY asleep: re-activate EVERY member (the compiler
+        # excludes active:false, so a member left inactive is a member that never
+        # comes back) and redeploy the whole group to recreate what is gone.
+        logger.info(
+            "WAKE context=%s stage=%s members=%d missing=%s",
+            context,
+            stage or "any-ephemeral",
+            len(deps),
+            ", ".join(missing),
+        )
+        failed: dict[str, str] = {}
         for dep in deps:
             try:
                 await self.mark_as_active(dep)
             except Exception as e:  # noqa: BLE001
+                failed[dep] = str(e)
                 logger.warning("live-dev wake mark-active of %s failed: %s", dep, e)
+        out = {
+            "context": context,
+            "stage": stage,
+            "deployment_ids": deps,
+            "woke": missing,
+        }
+        if failed:
+            out["mark_active_failed"] = failed
         try:
             await self.apply_compose_for_deployments(deps, report=None)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("live-dev wake redeploy of %s failed: %s", context, e)
+        except Exception as e:  # noqa: BLE001 — the caller is fire-and-forget; a
+            # raise here would only be swallowed, so report it in the result AND
+            # log it loudly. Silence is what made #281 undiagnosable.
+            logger.error("live-dev wake redeploy of %s failed: %s", context, e)
+            out["redeploy_error"] = str(e)
         # Waking pushes the pool to +1 — evict the new oldest to stay at the cap
         # (never this instance: it was just touched).
         await self.enforce_live_dev_cap()
-        return {"context": context, "deployment_ids": deps}
+        return out
 
     @staticmethod
     def _is_on_demand(conf: dict) -> bool:
@@ -6284,7 +6411,10 @@ class AutomationService:
         if not self._is_on_demand(conf):
             return {"on_demand": False, "context": context, "deployment_ids": []}
         if stage in self.EPHEMERAL_STAGES:
-            res = await self.wake_live_dev(context)
+            # Scope the wake to the stage the HOST resolved to — the caller asked
+            # about one endpoint, and a context's dev and live-dev groups are
+            # independently evictable.
+            res = await self.wake_live_dev(context, stage)
         else:
             res = await self._wake_context_stage(context, stage)
         return {"on_demand": True, **res}

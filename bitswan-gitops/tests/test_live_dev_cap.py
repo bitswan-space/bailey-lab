@@ -32,10 +32,16 @@ class _FakeDriver:
         self.removed: list[str] = []
 
     async def container_list(self, ctx, labels=None):
-        return list(self.containers)
+        out = []
+        for c in self.containers:
+            if labels and any(c.labels.get(k) != v for k, v in labels.items()):
+                continue
+            out.append(c)
+        return out
 
     async def container_remove(self, ctx, cid):
         self.removed.append(cid)
+        self.containers = [c for c in self.containers if c.id != cid]
 
 
 def _svc(tmp_path, cap, containers):
@@ -279,3 +285,198 @@ def test_manual_wake_reactivates_stage_group(tmp_path, monkeypatch):
     assert activated == ["be-shop-staging"]
     assert applied == [["be-shop-staging"]]
     assert res["deployment_ids"] == ["be-shop-staging"]
+
+
+# ── Partially-evicted groups (#281) ──────────────────────────────────────────
+# The daemon's memory sweep evicts only the members that were RUNNING and not
+# always-on, so any stopped or always-on sibling is left behind. The wake path
+# used to read both "is it up?" and "who belongs to it?" off the surviving
+# CONTAINERS, so a survivor spoke for the whole group: the wake either declared
+# the group already running or redeployed just the survivor, and the member the
+# user was waiting on stayed active:false with no container — the gate's loading
+# page then refreshed forever. Membership now comes from bitswan.yaml.
+
+
+def _patch_members(monkeypatch, deployments: dict):
+    """Point read_bitswan_yaml at a fixed deployments mapping."""
+    import app.services.automation_service as mod
+
+    monkeypatch.setattr(
+        mod, "read_bitswan_yaml", lambda path: {"deployments": deployments}
+    )
+
+
+_GROUP = {
+    "fe-a": {"context": "copy-a-bp", "stage": "live-dev", "active": False},
+    "be-a": {"context": "copy-a-bp", "stage": "live-dev", "active": False},
+    "wk-a": {"context": "copy-a-bp", "stage": "live-dev", "active": True},
+}
+
+
+def _wake_spy(svc, monkeypatch):
+    activated: list[str] = []
+    applied: list[list[str]] = []
+
+    async def _mark_active(dep):
+        activated.append(dep)
+
+    async def _apply(ids, deployed_by=None, report=None):
+        applied.append(sorted(ids))
+        return {}
+
+    monkeypatch.setattr(svc, "mark_as_active", _mark_active)
+    monkeypatch.setattr(svc, "apply_compose_for_deployments", _apply)
+    return activated, applied
+
+
+def test_wake_revives_group_with_running_sibling(tmp_path, monkeypatch):
+    # THE #281 case: fe + be were evicted (containers gone), the worker survived
+    # RUNNING (it was always-on, or its removal failed). The running survivor must
+    # not make the group look healthy — every member gets re-activated + redeployed.
+    conts = [_Container("copy-a-bp", "wk-a", 100, state="running")]
+    svc = _svc(tmp_path, cap=15, containers=conts)
+    _patch_members(monkeypatch, _GROUP)
+    activated, applied = _wake_spy(svc, monkeypatch)
+
+    res = asyncio.run(svc.wake_live_dev("copy-a-bp", "live-dev"))
+
+    assert res.get("already_running") is not True  # NOT mistaken for healthy
+    assert sorted(res["woke"]) == ["be-a", "fe-a"]  # the two with no container
+    assert sorted(activated) == ["be-a", "fe-a", "wk-a"]  # all members re-activated
+    assert applied == [["be-a", "fe-a", "wk-a"]]  # whole group redeployed
+
+
+def test_wake_revives_group_with_stopped_sibling(tmp_path, monkeypatch):
+    # Same group, but the leftover sibling is EXITED rather than running. The old
+    # code took its deployment_ids as the member list and woke only it.
+    conts = [_Container("copy-a-bp", "wk-a", 100, state="exited")]
+    svc = _svc(tmp_path, cap=15, containers=conts)
+    _patch_members(monkeypatch, _GROUP)
+    activated, applied = _wake_spy(svc, monkeypatch)
+
+    res = asyncio.run(svc.wake_live_dev("copy-a-bp", "live-dev"))
+
+    assert sorted(res["woke"]) == ["be-a", "fe-a", "wk-a"]  # exited counts as down
+    assert sorted(activated) == ["be-a", "fe-a", "wk-a"]
+    assert applied == [["be-a", "fe-a", "wk-a"]]
+
+
+def test_wake_is_scoped_to_the_requested_stage(tmp_path, monkeypatch):
+    # A context's dev and live-dev groups are independent. The live-dev group is
+    # evicted while the dev group runs; waking live-dev must neither be fooled by
+    # the running dev containers nor touch the dev members.
+    conts = [_Container("shop", "fe-shop-dev", 100, stage="dev")]
+    svc = _svc(tmp_path, cap=15, containers=conts)
+    _patch_members(
+        monkeypatch,
+        {
+            "fe-shop-dev": {"context": "shop", "stage": "dev", "active": True},
+            "fe-shop-ld": {"context": "shop", "stage": "live-dev", "active": False},
+        },
+    )
+    activated, applied = _wake_spy(svc, monkeypatch)
+
+    res = asyncio.run(svc.wake_live_dev("shop", "live-dev"))
+
+    assert res["stage"] == "live-dev"
+    assert activated == ["fe-shop-ld"] and applied == [["fe-shop-ld"]]
+    assert "fe-shop-dev" not in activated  # the other stage is left alone
+
+
+def test_wake_without_stage_covers_every_ephemeral_stage(tmp_path, monkeypatch):
+    # The BP-open route identifies a BP+copy, not an endpoint, so it passes no
+    # stage and every ephemeral stage of the context is woken.
+    svc = _svc(tmp_path, cap=15, containers=[])
+    _patch_members(
+        monkeypatch,
+        {
+            "fe-shop-dev": {"context": "shop", "stage": "dev"},
+            "fe-shop-ld": {"context": "shop", "stage": "live-dev"},
+            "fe-shop-stg": {"context": "shop", "stage": "staging"},  # protected
+        },
+    )
+    activated, applied = _wake_spy(svc, monkeypatch)
+
+    asyncio.run(svc.wake_live_dev("shop"))
+    assert sorted(activated) == ["fe-shop-dev", "fe-shop-ld"]
+    assert "fe-shop-stg" not in activated
+
+
+def test_cap_eviction_does_not_cross_stages(tmp_path, monkeypatch):
+    # A context running BOTH dev and live-dev is TWO instances against the cap;
+    # evicting the oldest must take only that stage's members with it.
+    conts = [
+        _Container("shop", "fe-shop-ld", 100, stage="live-dev"),  # oldest
+        _Container("shop", "fe-shop-dev", 300, stage="dev"),
+    ]
+    svc = _svc(tmp_path, cap=1, containers=conts)
+    evicted_deps: list[str] = []
+
+    async def _evict(dep, reason="memory-pressure"):
+        evicted_deps.append(dep)
+
+    monkeypatch.setattr(svc, "_evict_instance_deployment", _evict)
+    res = asyncio.run(svc.enforce_live_dev_cap())
+
+    assert res["running"] == 2  # two independent instances, not one merged context
+    assert evicted_deps == ["fe-shop-ld"]  # the dev stage of the same BP survives
+
+
+def test_wake_reports_redeploy_failure(tmp_path, monkeypatch):
+    # A wake whose redeploy raises must say so in its result — the gate is
+    # fire-and-forget, so a swallowed error read as success (cf. #314).
+    svc = _svc(tmp_path, cap=15, containers=[])
+    _patch_members(monkeypatch, {"fe-a": {"context": "copy-a-bp", "stage": "live-dev"}})
+
+    async def _mark_active(dep):
+        pass
+
+    async def _boom(ids, deployed_by=None, report=None):
+        raise RuntimeError("driver push rejected")
+
+    monkeypatch.setattr(svc, "mark_as_active", _mark_active)
+    monkeypatch.setattr(svc, "apply_compose_for_deployments", _boom)
+
+    res = asyncio.run(svc.wake_live_dev("copy-a-bp", "live-dev"))
+    assert "driver push rejected" in res["redeploy_error"]
+    assert res.get("already_running") is not True
+
+
+def test_unknown_context_says_it_did_nothing(tmp_path, monkeypatch):
+    # Nothing to wake → a reason, not a bare empty success.
+    svc = _svc(tmp_path, cap=15, containers=[])
+    _patch_members(monkeypatch, {})
+    res = asyncio.run(svc.wake_live_dev("copy-ghost-bp", "live-dev"))
+    assert res["deployment_ids"] == [] and res["reason"]
+
+
+def test_concurrent_wakes_apply_once(tmp_path, monkeypatch):
+    # The loading page refreshes every 3s and the dashboard polls too, so wakes
+    # overlap. They serialize per context and the queued one re-reads the group
+    # state, finds it up, and does nothing — no stacked compose applies.
+    svc = _svc(tmp_path, cap=15, containers=[])
+    _patch_members(monkeypatch, {"fe-a": {"context": "copy-a-bp", "stage": "live-dev"}})
+    applied: list[list[str]] = []
+
+    async def _mark_active(dep):
+        pass
+
+    async def _apply(ids, deployed_by=None, report=None):
+        await asyncio.sleep(0)  # yield, so the second waiter is definitely queued
+        applied.append(sorted(ids))
+        # the apply is what creates the containers
+        svc._infra_driver.containers.append(_Container("copy-a-bp", "fe-a", 400))
+        return {}
+
+    monkeypatch.setattr(svc, "mark_as_active", _mark_active)
+    monkeypatch.setattr(svc, "apply_compose_for_deployments", _apply)
+
+    async def _both():
+        return await asyncio.gather(
+            svc.wake_live_dev("copy-a-bp", "live-dev"),
+            svc.wake_live_dev("copy-a-bp", "live-dev"),
+        )
+
+    first, second = asyncio.run(_both())
+    assert applied == [["fe-a"]]  # exactly one redeploy
+    assert second.get("already_running") is True or first.get("already_running") is True
