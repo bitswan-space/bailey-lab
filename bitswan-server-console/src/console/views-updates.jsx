@@ -17,6 +17,17 @@ function fmtWhen(ts) {
   return isNaN(d.getTime()) ? ts : d.toLocaleString();
 }
 
+// One version style on screen. A released binary reports the CalVer without the
+// "v" (the release build passes -X main.version=$VERSION) while the AOC reports
+// the git tag "v$VERSION", so the raw pair renders as "2026.08.03.68 →
+// v2026.08.05.70" — two schemes that read as unrelated. Prefix bare CalVer for
+// display only; the values sent back to the API stay untouched.
+function fmtVer(v) {
+  if (!v) return v;
+  const s = String(v).trim();
+  return /^\d{4}\.\d/.test(s) ? `v${s}` : s;
+}
+
 function UpdatesView({ ctx }) {
   const { data, toast, refresh } = ctx;
   const upd = data.updates; // { server, workspaces, count, history, rollback_depth }
@@ -131,7 +142,7 @@ function UpdatesView({ ctx }) {
             {h.is_rollback && <WPill tone="warning" size="xs">rollback</WPill>}
           </div>
           <div style={{ fontSize: 11.5, color: WC.muted, fontFamily: 'monospace' }}>
-            {h.from_version || '?'} → {h.to_version || '?'}
+            {fmtVer(h.from_version) || '?'} → {fmtVer(h.to_version) || '?'}
           </div>
           <div style={{ fontSize: 11.5, color: WC.muted, marginTop: 1 }}>
             {(h.actor || 'system')} {verb} · {fmtWhen(h.ts)}
@@ -163,7 +174,7 @@ function UpdatesView({ ctx }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 700, color: WC.fg }}>Automation server</div>
                 <div style={{ fontSize: 12, color: WC.muted, fontFamily: 'monospace' }}>
-                  {upd.server.current}{upd.server.latest ? `  →  ${upd.server.latest}` : ''}
+                  {fmtVer(upd.server.current)}{upd.server.latest ? `  →  ${fmtVer(upd.server.latest)}` : ''}
                 </div>
               </div>
               {upd.server.update_available ? (

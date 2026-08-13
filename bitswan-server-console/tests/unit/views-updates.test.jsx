@@ -48,6 +48,18 @@ describe('UpdatesView', () => {
     expect(screen.getByText('No updates recorded yet.')).toBeTruthy();
   });
 
+  // Issue #347: the running binary reports "2026.08.03.68" and the AOC the tag
+  // "v2026.08.05.70". The server row must offer the update (not an "Up to date"
+  // pill beside a current → latest line) and render one version style.
+  it('offers the server update when the versions differ only by the "v" prefix style', () => {
+    render(<Host View={UpdatesView} data={withUpdates({
+      server: { current: '2026.08.03.68', latest: 'v2026.08.05.70', update_available: true },
+    })} />);
+    expect(screen.getByRole('button', { name: /Update available/ })).toBeTruthy();
+    expect(screen.queryByText('Up to date')).toBeNull();
+    expect(screen.getByText(/v2026\.08\.03\.68\s+→\s+v2026\.08\.05\.70/)).toBeTruthy();
+  });
+
   it('rolls a workspace back to a retained version via its history row', async () => {
     const s = spies();
     let hit = null;

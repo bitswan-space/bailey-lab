@@ -365,11 +365,12 @@ func (c *CodingAgentService) StartContainer() error {
 		return err
 	}
 
-	cmd := exec.Command("docker", "compose", "-f", "docker-compose-coding-agent.yml", "-p", projectName, "up", "-d")
-	cmd.Dir = deploymentDir
-
 	fmt.Printf("Starting Coding Agent container for workspace '%s'...\n", c.WorkspaceName)
-	return c.runCommand(cmd)
+	// Serialized + conflict-tolerant: workspace init and the daemon's service
+	// reconciler both start this sidecar, and the container_name above turns a
+	// race between them into a hard "name is already in use" error (see
+	// compose.go).
+	return composeUpSidecar(deploymentDir, "docker-compose-coding-agent.yml", projectName)
 }
 
 // StopContainer stops the Coding Agent containers

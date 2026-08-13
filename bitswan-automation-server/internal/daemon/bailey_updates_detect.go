@@ -242,8 +242,22 @@ func parseReleaseVersion(v string) ([]int, bool) {
 }
 
 // isReleaseVersion reports whether v looks like a published release tag
-// (vYYYY.MM.DD.N), as opposed to a dev / git-sha build.
+// (YYYY.MM.DD.N), as opposed to a dev / git-sha build.
+//
+// The leading "v" is OPTIONAL, and that is load-bearing: the release workflow
+// tags "v$VERSION" but builds with -X main.version=$VERSION, so a shipped
+// binary reports "2026.08.05.70" while the AOC's binary endpoint reports the
+// tag "v2026.08.05.70". Requiring the prefix made every released server read as
+// "not a release" — so update_available stayed false and the Updates view
+// showed "current → latest" next to an "Up to date" pill with no way to update.
 func isReleaseVersion(v string) bool {
 	v = strings.TrimSpace(v)
-	return strings.HasPrefix(v, "v20") && !strings.Contains(v, "git") && !strings.Contains(v, "dirty")
+	if strings.Contains(v, "git") || strings.Contains(v, "dirty") {
+		return false
+	}
+	v = strings.TrimPrefix(v, "v")
+	nums, ok := parseReleaseVersion(v)
+	// CalVer: a year-leading first component, plus at least one more (a bare
+	// "2026" is not a release tag).
+	return ok && len(nums) > 1 && nums[0] >= 2000
 }

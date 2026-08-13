@@ -236,10 +236,10 @@ func (d *DashboardService) IsContainerRunning() bool {
 func (d *DashboardService) StartContainer() error {
 	deploymentDir := filepath.Join(d.WorkspacePath, "deployment")
 	projectName := d.WorkspaceName + "-dashboard"
-	cmd := exec.Command("docker", "compose", "-f", "docker-compose-dashboard.yml", "-p", projectName, "up", "-d", "--pull", "missing")
-	cmd.Dir = deploymentDir
 	fmt.Printf("Starting Dashboard container for workspace '%s'...\n", d.WorkspaceName)
-	return d.runCommand(cmd)
+	// Same race as the coding-agent's: init and the reconciler can both bring
+	// this project up while the image is still pulling (see compose.go).
+	return composeUpSidecar(deploymentDir, "docker-compose-dashboard.yml", projectName, "--pull", "missing")
 }
 
 // StopContainer runs `docker compose down` against docker-compose-dashboard.yml.
