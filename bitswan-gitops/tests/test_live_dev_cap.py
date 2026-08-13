@@ -301,7 +301,9 @@ def _patch_members(monkeypatch, deployments: dict):
     """Point read_bitswan_yaml at a fixed deployments mapping."""
     import app.services.automation_service as mod
 
-    monkeypatch.setattr(mod, "read_bitswan_yaml", lambda path: {"deployments": deployments})
+    monkeypatch.setattr(
+        mod, "read_bitswan_yaml", lambda path: {"deployments": deployments}
+    )
 
 
 _GROUP = {

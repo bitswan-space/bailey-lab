@@ -28,8 +28,12 @@ def _svc(tmp_path):
 
 # automation.toml as of each commit of the automation's source.
 _AT_COMMIT = {
-    "commit-old": AutomationConfig(memory_reservation=128, memory_reservation_policy="on-demand"),
-    "commit-new": AutomationConfig(memory_reservation=256, memory_reservation_policy="always-on"),
+    "commit-old": AutomationConfig(
+        memory_reservation=128, memory_reservation_policy="on-demand"
+    ),
+    "commit-new": AutomationConfig(
+        memory_reservation=256, memory_reservation_policy="always-on"
+    ),
 }
 
 
