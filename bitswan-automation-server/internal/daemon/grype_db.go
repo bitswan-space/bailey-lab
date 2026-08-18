@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
@@ -25,7 +26,74 @@ import (
 // workspaces actually run (rather than baking a DB into an image, which would
 // go stale, or coupling this Go daemon to grype's DB URL/format).
 
-const grypeRefreshInterval = 24 * time.Hour
+const (
+	grypeRefreshInterval = 24 * time.Hour
+	// A FAILED refresh used to wait the full grypeRefreshInterval before trying
+	// again. On a host that was briefly not ready when the daemon started — a
+	// laptop with no egress yet, Docker Hub unreachable, the gitops image not
+	// pulled — that single miss meant no vulnerability DB for a whole day, and
+	// every workspace scan in that window failed. That is what issues #370/#271
+	// look like from the dashboard. Retry on a short exponential backoff until
+	// the DB is actually there, then settle back to the daily cadence.
+	grypeRetryMin = 2 * time.Minute
+	grypeRetryMax = 30 * time.Minute
+)
+
+// grypeDBHealth is the daemon's own record of the shared DB's state. The
+// workspaces can only observe the DB's *effects* (a scan works or it doesn't),
+// so when it is missing the operator needs the daemon's side of the story:
+// when it last tried, whether it has ever succeeded, and the exact error.
+type grypeDBHealth struct {
+	LastAttempt time.Time
+	LastSuccess time.Time
+	LastError   string
+}
+
+var (
+	grypeDBMu     sync.Mutex
+	grypeDBLast   grypeDBHealth
+	grypeDBFailed int
+)
+
+func recordGrypeDBRefresh(err error) {
+	grypeDBMu.Lock()
+	defer grypeDBMu.Unlock()
+	grypeDBLast.LastAttempt = time.Now()
+	if err != nil {
+		grypeDBLast.LastError = err.Error()
+		grypeDBFailed++
+		return
+	}
+	grypeDBLast.LastSuccess = grypeDBLast.LastAttempt
+	grypeDBLast.LastError = ""
+	grypeDBFailed = 0
+}
+
+// grypeDBStatus reports the last refresh outcome and how many attempts have
+// failed in a row.
+func grypeDBStatus() (grypeDBHealth, int) {
+	grypeDBMu.Lock()
+	defer grypeDBMu.Unlock()
+	return grypeDBLast, grypeDBFailed
+}
+
+// nextGrypeRefreshDelay picks how long to wait before the next attempt, and the
+// backoff to carry into the one after that. A success resets to the daily
+// cadence; a failure doubles the retry interval up to grypeRetryMax so a host
+// that comes online later recovers within minutes, not a day.
+func nextGrypeRefreshDelay(err error, backoff time.Duration) (wait, next time.Duration) {
+	if err == nil {
+		return grypeRefreshInterval, grypeRetryMin
+	}
+	if backoff < grypeRetryMin {
+		backoff = grypeRetryMin
+	}
+	next = backoff * 2
+	if next > grypeRetryMax {
+		next = grypeRetryMax
+	}
+	return backoff, next
+}
 
 // gitopsImageForGrype resolves the gitops image whose grype populates the shared
 // DB volume: the operator's pin (BITSWAN_GITOPS_IMAGE) if set, else the resolved
@@ -68,29 +136,45 @@ func refreshGrypeDB(ctx context.Context) error {
 
 // startGrypeDBRefresher creates the shared DB volume synchronously (instant, no
 // network — so any workspace whose external-volume compose comes up afterwards
-// finds it), then populates + refreshes the DB in the background: once now, then
-// every grypeRefreshInterval. Startup never blocks on the ~40s download.
+// finds it), then populates + refreshes the DB in the background. Startup never
+// blocks on the ~40s download.
 func startGrypeDBRefresher() {
 	// Create the volume up front so `docker compose up` (external: true) for a
 	// workspace never fails on a missing volume. Idempotent.
 	if out, err := exec.Command("docker", "volume", "create", dockercompose.GrypeDBVolume).CombinedOutput(); err != nil {
 		fmt.Printf("Warning: could not create shared grype DB volume: %v: %s\n", err, strings.TrimSpace(string(out)))
 	}
-	go func() {
-		refresh := func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	go grypeDBRefreshLoop(context.Background())
+}
+
+// grypeDBRefreshLoop refreshes now, then on the daily cadence — but retries on a
+// short backoff for as long as the refresh keeps failing, so the host is never
+// left without a vulnerability DB for a full day because of one bad moment at
+// startup. Every outcome is recorded (grypeDBStatus) and logged with the exact
+// error, since a missing DB is otherwise only visible as "scan unavailable" in
+// somebody else's dashboard.
+func grypeDBRefreshLoop(ctx context.Context) {
+	backoff := grypeRetryMin
+	for {
+		err := func() error {
+			c, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
-			if err := refreshGrypeDB(ctx); err != nil {
-				fmt.Printf("Warning: grype DB refresh failed: %v\n", err)
-				return
-			}
+			return refreshGrypeDB(c)
+		}()
+		recordGrypeDBRefresh(err)
+		var wait time.Duration
+		wait, backoff = nextGrypeRefreshDelay(err, backoff)
+		if err != nil {
+			_, failures := grypeDBStatus()
+			fmt.Printf("Warning: grype DB refresh failed (attempt %d, retrying in %s) — workspace CVE scans stay unavailable until it succeeds: %v\n",
+				failures, wait, err)
+		} else {
 			fmt.Println("Shared grype vulnerability DB refreshed (daemon-managed)")
 		}
-		refresh()
-		t := time.NewTicker(grypeRefreshInterval)
-		defer t.Stop()
-		for range t.C {
-			refresh()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
 		}
-	}()
+	}
 }

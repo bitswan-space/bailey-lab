@@ -685,6 +685,17 @@ export interface SupplyChainReport {
   stage: string;
   /** ok | pending (scan not done) | unavailable (scan failed) | not-deployed */
   status: string;
+  /** When `status` is unavailable: WHICH part of the scan broke —
+   *  `db-missing` (the daemon-owned grype vuln DB isn't on this host yet),
+   *  `scanner-missing` (no grype in this gitops image), `sbom-failed` (syft, on
+   *  the infra-driver, couldn't read the image) or `scan-failed` (grype ran and
+   *  failed). Absent on older gitops builds. */
+  // eslint-disable-next-line no-restricted-syntax -- mirrors the gitops wire shape
+  code?: string | null;
+  /** The underlying error (grype/syft stderr, the driver's message), shown
+   *  verbatim so an operator has something to act on. */
+  // eslint-disable-next-line no-restricted-syntax -- mirrors the gitops wire shape
+  reason?: string | null;
   // eslint-disable-next-line no-restricted-syntax -- null until first scan
   scanned_at: string | null;
   image_count: number;

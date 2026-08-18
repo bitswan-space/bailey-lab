@@ -10,13 +10,18 @@ are cached by the docker **image id** under a non-git cache dir:
 
 Everything degrades honestly: a missing binary / vuln-DB / unparseable output is
 recorded as an "unavailable" marker rather than crashing a build or a request.
+A failure marker also records WHICH of the four moving parts broke (`code`) and
+the underlying error (`reason`), so the panel can name the state instead of
+collapsing every failure into one sentence — and whether it is worth retrying,
+so a host that failed once (e.g. before the daemon's first DB download landed)
+heals by itself instead of serving a stale failure forever.
 """
 
 import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -77,24 +82,89 @@ def _atomic_write(path: str, text: str) -> None:
     os.replace(tmp, path)
 
 
-def _write_unavailable(path: str, reason: str) -> None:
+# Which of the four moving parts broke. The panel renders a different, actionable
+# state per code — a vuln DB the daemon hasn't downloaded yet is a completely
+# different problem from a gitops image with no grype in it, and neither is
+# "grype ran and exploded". Kept as plain strings so the marker files stay
+# readable and old cached markers (no `code`) still parse.
+FAIL_SBOM = "sbom-failed"  # syft, on the infra-driver, couldn't read the image
+FAIL_DB_MISSING = "db-missing"  # the daemon-owned vulnerability DB isn't here yet
+FAIL_SCANNER_MISSING = "scanner-missing"  # no grype binary in this gitops image
+FAIL_SCAN = "scan-failed"  # grype ran and failed / returned something unusable
+
+# How long a recorded failure is believed before a panel view retries it.
+# Practically every failure here is TRANSIENT — the daemon's first DB download is
+# still in flight, the infra-driver is restarting, the host was briefly offline.
+# Before this, a cached "unavailable" was treated as a final answer and the image
+# was never rescanned, so a host that failed once stayed broken until the daily
+# job ran (up to 24h) or somebody deleted the cache file by hand. That is the
+# gap #323 left behind: it fixed the DB refresh, not the failures already cached.
+FAILED_SCAN_RETRY_AFTER = timedelta(minutes=10)
+
+
+def _write_failure(
+    path: str, code: str, reason: str, *, retryable: bool = True
+) -> None:
+    """Record a terminal-for-now scan failure: WHAT broke (`code`), the
+    underlying error (`reason`, surfaced verbatim in the UI) and whether a later
+    view should try again."""
     _atomic_write(
         path,
         json.dumps(
-            {"scanned_at": _now(), "status": "unavailable", "reason": reason[:300]}
+            {
+                "scanned_at": _now(),
+                "status": "unavailable",
+                "code": code,
+                "reason": (reason or "").strip()[:600],
+                "retryable": bool(retryable),
+            }
         ),
     )
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(value or "")
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def should_rescan(scan: dict) -> bool:
+    """Whether a cached scan is worth (re)running. `ok` is final — image content
+    is immutable, and the daily job refreshes CVEs. Anything else is retried:
+    immediately when nothing has been scanned yet, and after
+    FAILED_SCAN_RETRY_AFTER for a recorded failure, so a host whose DB/driver has
+    since recovered heals on its own."""
+    status = scan.get("status")
+    if status == "ok":
+        return False
+    if status != "unavailable":
+        return True  # pending — no result on record yet
+    if not scan.get("retryable", True):
+        return False
+    at = _parse_ts(scan.get("scanned_at"))
+    return at is None or datetime.now(timezone.utc) - at >= FAILED_SCAN_RETRY_AFTER
+
+
+# `command not found`, the shell convention. A missing scanner binary is its own
+# diagnosis ("this gitops image has no grype"), so it must not arrive as a
+# generic exception indistinguishable from grype crashing.
+RC_NOT_FOUND = 127
 
 
 async def _run(
     *cmd: str, timeout: int = 600, env: dict | None = None
 ) -> tuple[int, bytes, bytes]:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except (FileNotFoundError, NotADirectoryError):
+        return RC_NOT_FOUND, b"", f"{cmd[0]}: not found".encode()
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
@@ -134,27 +204,35 @@ _db_ready = False
 _db_lock: asyncio.Lock | None = None
 
 
-async def ensure_vuln_db() -> bool:
+async def ensure_vuln_db() -> tuple[bool, str]:
     """Report whether grype's (daemon-owned, read-only) vulnerability DB is ready
-    to scan against. Never downloads or updates it — the automation-server daemon
-    is the sole writer. Best-effort: True once the DB is present, False while the
-    daemon's first refresh is still in flight. Never raises."""
+    to scan against, plus what `grype db status` actually said. Never downloads or
+    updates it — the automation-server daemon is the sole writer. Best-effort:
+    True once the DB is present, False while the daemon's first refresh is still
+    in flight. Never raises.
+
+    The detail string is not decoration: when the DB is the problem it is the one
+    piece of evidence an operator needs (missing vs. wrong schema vs. how stale),
+    and it rides all the way into the panel as the failure reason."""
     global _db_ready, _db_lock
     if _db_ready:
-        return True
+        return True, ""
     if _db_lock is None:
         _db_lock = asyncio.Lock()
     async with _db_lock:
         if _db_ready:
-            return True
+            return True, ""
         # `grype db status` exits non-zero when the DB is missing. With age
         # validation off it accepts a present-but-slightly-stale daemon DB.
-        rc, _, _ = await _run("grype", "db", "status", timeout=60, env=_grype_env())
+        rc, out, err = await _run("grype", "db", "status", timeout=60, env=_grype_env())
         if rc == 0:
             _db_ready = True
+        detail = (err or out or b"").decode(errors="replace").strip()
+        if rc == RC_NOT_FOUND:
+            detail = "grype is not installed in this gitops image"
         # If not ready, the daemon's refresh is still in flight — don't cache the
         # negative, so a later scan rechecks once the daemon has populated it.
-        return _db_ready
+        return _db_ready, detail
 
 
 # ── parsing ──────────────────────────────────────────────────────────────────
@@ -214,7 +292,10 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
     """Ensure an SBOM (built once) and a CVE scan exist for an image. `image_ref`
     is what syft/grype scan (a tag or id resolvable via the docker daemon);
     `image_id` is the stable cache key. Safe to call on every deploy — the SBOM
-    step is skipped when already cached. Never raises."""
+    step is skipped when already cached. Never raises.
+
+    Every failure exit records a `code` naming the broken stage, so the four ways
+    this can go wrong stay distinguishable all the way to the panel."""
     if not image_ref:
         return
     d = supply_chain_dir()
@@ -232,11 +313,19 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
             try:
                 sbom = await _driver_sbom(image_ref)
             except Exception as e:  # noqa: BLE001 — record, never crash
-                _write_unavailable(cve_path, f"sbom via driver failed: {e}")
+                _write_failure(
+                    cve_path,
+                    FAIL_SBOM,
+                    f"syft (on the infra-driver) could not read {image_ref}: {e}",
+                )
                 outcome = "unavailable"
                 return
             if not sbom:
-                _write_unavailable(cve_path, "driver returned an empty SBOM")
+                _write_failure(
+                    cve_path,
+                    FAIL_SBOM,
+                    f"the infra-driver returned an empty SBOM for {image_ref}",
+                )
                 outcome = "unavailable"
                 return
             _atomic_write(sbom_path, json.dumps(sbom))
@@ -244,15 +333,32 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
         cve_doc = _read_json(cve_path)
         if not force_cve and cve_doc and cve_doc.get("status") == "ok":
             return  # already have a CVE scan; daily job passes force_cve=True
-        # A fresh gitops image has no vuln DB yet — make sure it's downloaded
-        # once before the first scan, or grype finds nothing to match against.
-        await ensure_vuln_db()
+        # The vuln DB belongs to the automation-server daemon; a fresh or briefly
+        # offline host may not have it yet. Running grype anyway (auto-update is
+        # off, by design) just fails — and used to cache that as the image's
+        # permanent answer. Record the real state instead and let it be retried.
+        ready, db_detail = await ensure_vuln_db()
+        if not ready:
+            _write_failure(
+                cve_path,
+                FAIL_SCANNER_MISSING
+                if "not installed" in db_detail
+                else FAIL_DB_MISSING,
+                "the shared grype vulnerability database is not available on this "
+                "host yet — the automation-server daemon downloads and refreshes "
+                f"it. `grype db status`: {db_detail or 'no output'}",
+            )
+            outcome = "unavailable"
+            return
         rc, out, err = await _run(
             "grype", f"sbom:{sbom_path}", "-o", "json", env=_grype_env()
         )
         if rc != 0 or not out:
-            _write_unavailable(
-                cve_path, f"grype failed: {err.decode(errors='replace')}"
+            _write_failure(
+                cve_path,
+                FAIL_SCANNER_MISSING if rc == RC_NOT_FOUND else FAIL_SCAN,
+                f"grype exited {rc}: "
+                f"{err.decode(errors='replace').strip() or 'no error output'}",
             )
             outcome = "unavailable"
             return
@@ -263,24 +369,34 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
         )
         outcome = "ok"
     except Exception as e:  # never break a build/deploy on a scan failure
-        _write_unavailable(cve_path, f"scan error: {e}")
+        _write_failure(cve_path, FAIL_SCAN, f"scan error: {e}")
         outcome = "unavailable"
     finally:
+        _inflight.discard(k)
         if outcome is not None:
             await _broadcast_scanned(image_id or image_ref, outcome)
 
 
 # Strong refs to fire-and-forget scan tasks so they aren't GC'd mid-run.
 _bg_tasks: set = set()
+# Cache keys with a scan currently running. Now that a recorded failure is
+# retried (see should_rescan), repeated panel views of a broken image would
+# otherwise pile up concurrent syft/grype runs for the same image.
+_inflight: set[str] = set()
 
 
 def spawn_scan(image_ref: str, image_id: str, *, force_cve: bool = False) -> None:
     """Fire-and-forget background scan (called from the deploy path so it never
-    blocks the deploy). No-op outside a running event loop."""
+    blocks the deploy). No-op outside a running event loop, or while a scan of
+    the same image is already running."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
+    k = _key(image_id or image_ref)
+    if k in _inflight:
+        return
+    _inflight.add(k)
     t = loop.create_task(scan_image(image_ref, image_id, force_cve=force_cve))
     _bg_tasks.add(t)
     t.add_done_callback(_bg_tasks.discard)
@@ -296,23 +412,28 @@ def _read_json(path: str) -> dict | None:
 
 def read_image_scan(image_id: str) -> dict:
     """Merge a cached SBOM + CVE scan for one image into
-    {status, scanned_at, packages:[{name, version, type, cves:[{id, severity}]}]}.
-    status: ok | pending (no SBOM yet) | unavailable (scan failed)."""
+    {status, code, reason, scanned_at, packages:[{name, version, type, cves:[…]}]}.
+    status: ok | pending (no scan on record yet) | unavailable (scan failed)."""
     d = supply_chain_dir()
     k = _key(image_id)
     sbom = _read_json(_sbom_path(d, k))
-    if not sbom:
-        return {"status": "pending", "packages": []}
-    packages = parse_sbom(sbom)
     cve_doc = _read_json(_cve_path(d, k)) or {}
     status = cve_doc.get("status")
+    # Check the failure marker BEFORE the SBOM. A failure in the syft/driver step
+    # leaves no SBOM at all, and returning "pending" for it hid a real, recorded
+    # error behind a spinner that never resolved.
     if status == "unavailable":
         return {
             "status": "unavailable",
+            "code": cve_doc.get("code") or FAIL_SCAN,
             "reason": cve_doc.get("reason"),
+            "retryable": bool(cve_doc.get("retryable", True)),
             "scanned_at": cve_doc.get("scanned_at"),
-            "packages": [{**p, "cves": []} for p in packages],
+            "packages": [{**p, "cves": []} for p in parse_sbom(sbom or {})],
         }
+    if not sbom:
+        return {"status": "pending", "packages": []}
+    packages = parse_sbom(sbom)
     by_pkg: dict[tuple, list] = {}
     for m in cve_doc.get("matches") or []:
         by_pkg.setdefault((m["package"], m["version"]), []).append(

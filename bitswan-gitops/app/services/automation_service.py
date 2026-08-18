@@ -3332,7 +3332,11 @@ class AutomationService:
             if not iid:
                 continue
             scan = supply_chain_service.read_image_scan(iid)
-            if scan.get("status") not in ("ok", "unavailable"):
+            # A recorded FAILURE used to be treated as a final answer here, so an
+            # image scanned during a bad window (vuln DB not downloaded yet, the
+            # driver restarting) stayed "unavailable" forever even after the host
+            # recovered. should_rescan retries it on a cooldown instead.
+            if supply_chain_service.should_rescan(scan):
                 supply_chain_service.spawn_scan(ref, iid)
         return self._supply_chain_report(
             bp, realm, image_ids, cve_waivers.waiver_list(bp, None)
@@ -3348,10 +3352,13 @@ class AutomationService:
         shape."""
         merged: dict[tuple, dict] = {}
         statuses: list[str] = []
+        failures: list[dict] = []
         scanned_ats: list[str] = []
         for iid in image_ids:
             scan = supply_chain_service.read_image_scan(iid)
             statuses.append(scan.get("status"))
+            if scan.get("status") == "unavailable":
+                failures.append(scan)
             if scan.get("scanned_at"):
                 scanned_ats.append(scan["scanned_at"])
             for p in scan.get("packages", []):
@@ -3378,18 +3385,33 @@ class AutomationService:
             }
             for e in sorted(merged.values(), key=lambda x: x["name"].lower())
         ]
+        # A stage with several member images is only "ok" when EVERY image
+        # scanned. Reporting ok because one of them did made a partial scan look
+        # like a complete, clean bill of health — the one thing a supply-chain
+        # panel must never do. Failures win, then pending, then ok. The merged
+        # packages ride along either way, so the panel can still show the SBOM it
+        # does have next to the failure.
         if not image_ids:
             status = "not-deployed"
-        elif any(s == "ok" for s in statuses):
-            status = "ok"
-        elif any(s == "unavailable" for s in statuses):
+        elif failures:
             status = "unavailable"
+        elif all(s == "ok" for s in statuses):
+            status = "ok"
         else:
             status = "pending"
+        code = failures[0].get("code") if failures else None
+        reason = failures[0].get("reason") if failures else None
+        if len(failures) > 1:
+            reason = f"{len(failures)} of {len(image_ids)} images failed to scan. First: {reason}"
         return {
             "bp": bp,
             "stage": realm,
             "status": status,
+            # What broke and why, when status is unavailable — the panel names the
+            # state from `code` and shows `reason` verbatim, so an operator gets
+            # the grype/syft error instead of one catch-all sentence.
+            "code": code,
+            "reason": reason,
             "scanned_at": min(scanned_ats) if scanned_ats else None,
             "image_count": len(image_ids),
             "packages": packages,
@@ -3439,7 +3461,12 @@ class AutomationService:
         for s in members:
             image, image_id = await self._bake_source_for_scan(s["relative_path"])
             if image and image_id:
-                supply_chain_service.spawn_scan(image, image_id)
+                # Same retry rule as the deployed rollup: a cached failure is
+                # retried on a cooldown rather than re-run on every single view.
+                if supply_chain_service.should_rescan(
+                    supply_chain_service.read_image_scan(image_id)
+                ):
+                    supply_chain_service.spawn_scan(image, image_id)
                 image_ids.append(image_id)
         return self._supply_chain_report(
             bp, "dev", image_ids, cve_waivers.waiver_list(bp, copy)
