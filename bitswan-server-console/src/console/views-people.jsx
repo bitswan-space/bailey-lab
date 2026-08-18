@@ -1,11 +1,11 @@
 import React from 'react';
 // views-people.jsx — Users & roles: roster, device approvals (admin types the
-// code), org-user invites (48h emailed link) + pending-invite management.
+// code), org-user invites (48h copy-me link) + pending-invite management.
 
 const { C: PC, Icon: PIcon, Btn: PBtn, Pill: PPill } = window.WD_SHELL;
 const {
   Avatar: PAvatar, UserChip: PUserChip, Card: PCard, PageHeader: PPageHeader, Field: PField, TextInput: PTextInput,
-  Modal: PModal, EmptyState: PEmpty, Drawer: PDrawer, CopyChip: PCopyChip,
+  Modal: PModal, EmptyState: PEmpty, Drawer: PDrawer,
   SegmentedCode: PSeg, DeviceIcon: PDeviceIcon, ProtoHint: PProtoHint, LiveState: PLiveState,
 } = window.SC_UI;
 const { Api: PApi, ApiError: PApiError } = window.SC_API;
@@ -206,16 +206,78 @@ function inviteExpiryLabel(inv) {
   return `expires in ${Math.max(1, Math.floor(ms / 60000))}m`;
 }
 
+// ─── INVITE LINK PANEL ──────────────────────────────────────────────────────
+// The invite link IS a credential: whoever opens it while signed in as the
+// invited account gets a trusted device on this server. Nothing on the
+// platform delivers it — an emailed link would make possession of a mailbox
+// enough to earn device trust (#369) — so it is shown here for the admin to
+// copy and pass on over a channel they trust.
+//
+// Copy degrades on purpose: where the clipboard API is missing or refuses
+// (non-secure context, locked-down browser) the link is still readable and
+// selectable in the field, and the button says so instead of pretending. The
+// link is never logged.
+function InviteLinkPanel({ email, link, note }) {
+  const [copied, setCopied] = useP(false);
+  const [copyErr, setCopyErr] = useP('');
+  const inputRef = usePR(null);
+  const selectAll = () => {
+    const el = inputRef.current;
+    if (el) { el.focus(); el.select(); }
+  };
+  const copy = async () => {
+    setCopyErr('');
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch (e) {
+      selectAll();
+      setCopyErr('Couldn\u2019t reach the clipboard. The link is selected above — copy it with your keyboard.');
+    }
+  };
+  return (
+    <div style={{ padding: '12px 13px', background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}` }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <PIcon name="link" size={14} color={PC.mutedFg} />
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: PC.fg }}>Invite link for {email}</span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input ref={inputRef} readOnly value={link} onFocus={selectAll} onClick={selectAll}
+          aria-label={`Invite link for ${email}`}
+          style={{
+            flex: 1, minWidth: 0, height: 34, padding: '0 10px', border: `1px solid ${PC.border}`,
+            borderRadius: 8, background: '#fff', fontFamily: 'Geist Mono, monospace', fontSize: 12,
+            color: PC.fg, outline: 'none',
+          }} />
+        <PBtn variant={copied ? 'default' : 'primary'} size="sm" leftIcon={copied ? 'check' : 'copy'} onClick={copy}>
+          {copied ? 'Copied' : 'Copy link'}
+        </PBtn>
+      </div>
+      {copyErr && (
+        <div style={{ display: 'flex', gap: 7, marginTop: 8 }}>
+          <PIcon name="alert-triangle" size={13} color="#b45309" style={{ marginTop: 2, flex: '0 0 auto' }} />
+          <span style={{ fontSize: 11.5, color: '#92400e', lineHeight: '16px' }}>{copyErr}</span>
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 7, marginTop: 9 }}>
+        <PIcon name="shield-alert" size={13} color={PC.mutedFg} style={{ marginTop: 2, flex: '0 0 auto' }} />
+        <span style={{ fontSize: 11.5, color: PC.muted, lineHeight: '16px' }}>
+          {note || `Treat this like a password: anyone who opens it signed in as ${email} gets a trusted device here. Send it over a channel you trust — the server deliberately doesn\u2019t send it for you. It works once and expires in 48 hours.`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // ─── INVITE DIALOG ──────────────────────────────────────────────────────────
 // Lists the AOC organization's users (GET /bailey/api/people/org-users) — the
-// only people who may be invited — and sends the invite (POST .../invite).
-// Three outcomes:
-//   • email_sent:true  → toast + close (the invite email is on its way);
-//   • email_sent:false → the invite EXISTS but the email didn't go out (SMTP
-//     not configured / send failed) — stay open and surface the invite_link
-//     to copy and share manually;
-//   • error            → inline banner (e.g. 502 when the AOC is unreachable —
-//     nothing was created).
+// only people who may be invited — and creates the invite (POST .../invite).
+// Creating never sends anything: the response carries invite_link, which the
+// dialog shows in an InviteLinkPanel for the admin to copy and deliver
+// themselves (#369). Errors (e.g. 502 when the AOC is unreachable — nothing
+// was created) surface as an inline banner.
 function InviteDialog({ open, onClose, ctx, onChanged }) {
   const { toast } = ctx;
   const [users, setUsers] = useP(null);   // null = loading
@@ -225,7 +287,7 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
   const [role, setRole] = useP('member');
   const [busy, setBusy] = useP(false);
   const [submitErr, setSubmitErr] = useP('');
-  const [fallback, setFallback] = useP(null); // { link, error } — email failed
+  const [created, setCreated] = useP(null); // { email, link } — invite made, link to copy
 
   const load = async () => {
     setLoadErr(''); setUsers(null);
@@ -240,25 +302,20 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
   usePE(() => {
     if (!open) return;
     setQuery(''); setSelected(''); setRole('member');
-    setSubmitErr(''); setFallback(null);
+    setSubmitErr(''); setCreated(null);
     load();
   }, [open]);
 
-  const send = async () => {
+  const create = async () => {
     if (!selected) return;
-    setBusy(true); setSubmitErr(''); setFallback(null);
+    setBusy(true); setSubmitErr('');
     try {
       const r = await PApi.invite(selected, role);
       onChanged && onChanged();
-      if (r && r.email_sent) {
-        toast(`Invite sent to ${selected}`, 'success');
-        onClose();
-      } else {
-        // Invite created but the email didn't go out — hand the admin the link.
-        setFallback({ link: (r && r.invite_link) || '', error: (r && r.email_error) || 'The invite email could not be sent.' });
-      }
+      setCreated({ email: selected, link: (r && r.invite_link) || '' });
+      toast(`Invite created for ${selected}`, 'success');
     } catch (e) {
-      setSubmitErr(e.message || 'Could not send the invite.');
+      setSubmitErr(e.message || 'Could not create the invite.');
     } finally { setBusy(false); }
   };
 
@@ -268,19 +325,26 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
 
   return (
     <PModal open={open} onClose={onClose} title="Invite someone" icon="user-plus" width={560}
-      subtitle="Only members of this server's organization can be invited. They get a 48-hour link by email; their first device is trusted automatically."
+      subtitle="Only members of this server's organization can be invited. You get a single-use 48-hour link to pass on yourself — the server never sends it. Their first device is trusted when they open it."
       footer={
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
           <span style={{ flex: 1 }} />
-          <PBtn variant="default" onClick={onClose}>Close</PBtn>
-          <PBtn variant="primary" leftIcon="mail-plus" disabled={!selected || busy} onClick={send}>
-            {busy ? 'Sending…' : 'Send invite'}
-          </PBtn>
+          <PBtn variant={created ? 'primary' : 'default'} onClick={onClose}>{created ? 'Done' : 'Close'}</PBtn>
+          {!created && (
+            <PBtn variant="primary" leftIcon="link" disabled={!selected || busy} onClick={create}>
+              {busy ? 'Creating\u2026' : 'Create invite link'}
+            </PBtn>
+          )}
         </div>
       }>
+      {/* the invite exists — the admin's only job left is to deliver the link */}
+      {created ? (
+        <InviteLinkPanel email={created.email} link={created.link} />
+      ) : (
+      <>
       {/* who */}
       {users === null && !loadErr && (
-        <div style={{ fontSize: 13, color: PC.muted, padding: '6px 2px' }}>Loading organization users…</div>
+        <div style={{ fontSize: 13, color: PC.muted, padding: '6px 2px' }}>Loading organization users\u2026</div>
       )}
       {loadErr && (
         <div style={{ display: 'flex', gap: 10, padding: 13, background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}`, marginBottom: 12 }}>
@@ -295,7 +359,7 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
         <>
           <div style={{ position: 'relative', marginBottom: 10 }}>
             <PIcon name="search" size={14} color={PC.mutedFg} style={{ position: 'absolute', left: 11, top: 11 }} />
-            <PTextInput value={query} onChange={setQuery} placeholder="Search organization users…" style={{ paddingLeft: 32 }} autoFocus />
+            <PTextInput value={query} onChange={setQuery} placeholder="Search organization users\u2026" style={{ paddingLeft: 32 }} autoFocus />
           </div>
           {list.length === 0 ? (
             <PEmpty icon="users" title={query ? 'No users match' : 'No organization users'}
@@ -308,7 +372,7 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
                 return (
                   <button key={u.email} disabled={disabled}
                     title={disabled ? 'Already has access to this server' : ''}
-                    onClick={() => { setSelected(on ? '' : u.email); setSubmitErr(''); setFallback(null); }}
+                    onClick={() => { setSelected(on ? '' : u.email); setSubmitErr(''); }}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '9px 12px',
                       border: 0, borderBottom: `1px solid ${PC.surface2}`, textAlign: 'left', fontFamily: 'inherit',
@@ -342,29 +406,21 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
           <span style={{ fontSize: 12.5, color: PC.fg, lineHeight: '17px' }}>{submitErr}</span>
         </div>
       )}
-      {fallback && (
-        <div style={{ padding: '11px 13px', marginTop: 14, background: '#fffbeb', borderRadius: 10, border: `1px solid ${PC.amber}55` }}>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <PIcon name="alert-triangle" size={15} color="#b45309" style={{ marginTop: 1, flex: '0 0 auto' }} />
-            <span style={{ fontSize: 12.5, color: '#92400e', lineHeight: '17px' }}>
-              The invite was created, but the email couldn't be sent: {fallback.error}. Share the link yourself — it works for {selected} for 48 hours.
-            </span>
-          </div>
-          {fallback.link && <div style={{ marginTop: 8, paddingLeft: 25 }}><PCopyChip text={fallback.link} label="Copy invite link" /></div>}
-        </div>
+      </>
       )}
     </PModal>
   );
 }
 
 // ─── PENDING INVITES ────────────────────────────────────────────────────────
-// Outstanding (unconsumed) invites with expiry + delivery state and the
-// revoke / re-send actions. Re-sending regenerates the token and the 48h
-// window — the previously emailed link stops working.
+// Outstanding (unconsumed) invites with their expiry and the revoke /
+// new-link actions. "New link" regenerates the token and the 48h window — any
+// link handed out earlier stops working — and shows the fresh one to copy
+// (the admin delivers it; nothing here sends it).
 function PendingInvites({ invites, ctx, onChanged }) {
   const { toast } = ctx;
   const [busy, setBusy] = useP('');           // email being acted on
-  const [linkFor, setLinkFor] = useP(null);   // { email, link, error } after a failed re-send delivery
+  const [linkFor, setLinkFor] = useP(null);   // { email, link } — freshly minted link to copy
 
   const revoke = async (email) => {
     setBusy(email);
@@ -377,18 +433,15 @@ function PendingInvites({ invites, ctx, onChanged }) {
       toast(`Couldn't revoke invite: ${e.message}`, 'danger');
     } finally { setBusy(''); }
   };
-  const resend = async (email) => {
+  const newLink = async (email) => {
     setBusy(email); setLinkFor(null);
     try {
       const r = await PApi.resendInvite(email);
-      if (r && r.email_sent) {
-        toast(`Invite re-sent to ${email}`, 'success');
-      } else {
-        setLinkFor({ email, link: (r && r.invite_link) || '', error: (r && r.email_error) || 'The invite email could not be sent.' });
-      }
+      setLinkFor({ email, link: (r && r.invite_link) || '' });
+      toast(`New invite link for ${email} — the previous one no longer works`, 'success');
       onChanged && onChanged();
     } catch (e) {
-      toast(`Couldn't re-send invite: ${e.message}`, 'danger');
+      toast(`Couldn't issue a new link: ${e.message}`, 'danger');
     } finally { setBusy(''); }
   };
 
@@ -397,7 +450,7 @@ function PendingInvites({ invites, ctx, onChanged }) {
     <PCard pad={0} style={{ marginBottom: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '11px 18px', borderBottom: `1px solid ${PC.border}`, background: PC.surface,
         fontSize: 11, fontWeight: 600, color: PC.muted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-        <PIcon name="mail" size={13} color={PC.mutedFg} /> Pending invites
+        <PIcon name="link" size={13} color={PC.mutedFg} /> Pending invites
       </div>
       {invites.map(inv => {
         const expiry = inviteExpiryLabel(inv);
@@ -409,26 +462,19 @@ function PendingInvites({ invites, ctx, onChanged }) {
               <span style={{ fontSize: 12.5, color: PC.fg, fontFamily: 'Geist Mono, monospace' }}>{inv.email}</span>
               <PPill tone={P_ROLE_TONE[inv.role] || 'neutral'} size="xs">{inv.role}</PPill>
               <PPill tone={expired ? 'danger' : 'warning'} size="xs">{expiry || '48h link'}</PPill>
-              {inv.email_sent === false && (
-                <span title="The invite exists but the email could not be delivered — re-send it or share the link manually."
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: '#b45309', fontWeight: 600 }}>
-                  <PIcon name="alert-triangle" size={13} color="#b45309" /> email not delivered
-                </span>
-              )}
               <span style={{ flex: 1 }} />
               <span style={{ fontSize: 11.5, color: PC.muted }}>invited by {inv.created_by}</span>
-              <PBtn variant="default" size="sm" leftIcon="send" disabled={busy === inv.email} onClick={() => resend(inv.email)}>
-                {busy === inv.email ? 'Working…' : 'Re-send'}
+              <PBtn variant="default" size="sm" leftIcon="link" disabled={busy === inv.email}
+                title="Mint a fresh link to copy — the previous one stops working" onClick={() => newLink(inv.email)}>
+                {busy === inv.email ? 'Working…' : 'New link'}
               </PBtn>
               <PBtn variant="default" size="sm" leftIcon="x" disabled={busy === inv.email}
                 style={{ color: PC.red, borderColor: PC.red }} onClick={() => revoke(inv.email)}>Revoke</PBtn>
             </div>
-            {linkFor && linkFor.email === inv.email && (
+            {linkFor && linkFor.email === inv.email && linkFor.link && (
               <div style={{ padding: '0 18px 12px 43px' }}>
-                <div style={{ fontSize: 11.5, color: '#92400e', marginBottom: 6 }}>
-                  Email couldn't be sent: {linkFor.error}. Share the fresh link manually:
-                </div>
-                {linkFor.link && <PCopyChip text={linkFor.link} label="Copy invite link" />}
+                <InviteLinkPanel email={inv.email} link={linkFor.link}
+                  note={`The earlier link for ${inv.email} no longer works. Treat this one like a password and hand it over through a channel you trust — it works once and expires in 48 hours.`} />
               </div>
             )}
           </div>
@@ -447,7 +493,8 @@ function PendingInvites({ invites, ctx, onChanged }) {
 //
 // Inviting: the Invite button lists the AOC organization's users (the daemon
 // proxies the AOC's org roster) and creates a 48h single-use invite whose
-// link the AOC emails; see InviteDialog / PendingInvites above. People still
+// link the admin copies and delivers themselves; see InviteDialog /
+// PendingInvites above. People still
 // also appear here organically as they sign in / get access.
 function UsersView({ ctx }) {
   const { data, toast, go, navigate, routeParam, refresh } = ctx;

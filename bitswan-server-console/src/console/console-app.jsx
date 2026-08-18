@@ -209,7 +209,7 @@ const ACTIVITY_KINDS = {
   // Invite lifecycle (target = invitee email; for redeem the ACTOR is the
   // invitee and the target is who invited them — see the daemon's audit calls).
   'invite.create':    { icon: 'mail-plus',    tone: 'primary', verb: 'invited' },
-  'invite.resend':    { icon: 'mail',         tone: 'neutral', verb: 're-sent an invite to' },
+  'invite.resend':    { icon: 'link',         tone: 'neutral', verb: 'issued a new invite link for' },
   'invite.revoke':    { icon: 'mail-x',       tone: 'danger',  verb: 'revoked the invite for' },
   'invite.redeem':    { icon: 'mail-check',   tone: 'success', verb: 'accepted an invite from' },
 };
@@ -429,7 +429,7 @@ function Console({ data, setData, toast, refresh }) {
 // pickScene maps a /bailey/api/gate-state response to the scene the SPA should
 // render, per the backend's scene-selection rule. `recoverIntent` is true when
 // the URL carries an explicit recovery entry (?recover); `inviteToken` is the
-// stashed emailed-invite token (see getInviteToken). Evaluated in order:
+// stashed invite token (see getInviteToken). Evaluated in order:
 //   1. recovery intent      → 'recovery'
 //   2. trusted              → 'console' (gate cleared — render the app)
 //   3. invite token + claimed but untrusted → 'invite' (redeem the invite)
@@ -456,7 +456,7 @@ function hasRecoverIntent() {
 }
 
 // ── Invite-token intent ──────────────────────────────────────────────────────
-// The emailed invite link is https://bailey-onboard.<domain>/?invite=<token>.
+// The invite link is https://bailey-onboard.<domain>/?invite=<token>.
 // An old link opened against the console host instead survives the device-
 // trust bounce embedded in the onboarding URL's ?return=<original-url> param,
 // so we recover invite= from there too. The token is a secret: it's stashed in
@@ -756,7 +756,7 @@ function App() {
   useAE(() => { loadGate.current(); }, []);
 
   // The scene is driven SOLELY by the real gate-state (plus an explicit
-  // ?recover URL intent and a stashed emailed-invite token) — there is no
+  // ?recover URL intent and a stashed invite token) — there is no
   // preview/override path.
   const recoverIntent = hasRecoverIntent();
   const [inviteToken, setInviteToken] = useA(getInviteToken);

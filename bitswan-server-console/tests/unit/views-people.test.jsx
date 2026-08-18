@@ -209,9 +209,9 @@ describe('UsersView — device approvals', () => {
   });
 });
 
-// Invites: the dialog lists AOC org users and creates a 48h invite; the
-// pending strip manages outstanding invites (revoke / re-send). The email-
-// delivery-failed paths surface the copyable invite_link fallback.
+// Invites: the dialog lists AOC org users and creates a 48h invite, then
+// shows the resulting link for the admin to copy — nothing is emailed
+// (#369). The pending strip manages outstanding invites (revoke / new link).
 describe('UsersView — invites', () => {
   const ORG_USERS = { users: [
     { email: 'grace@h', username: 'Grace', verified: true, in_roster: false, invited: false },
@@ -220,16 +220,19 @@ describe('UsersView — invites', () => {
   ] };
   const in47h = new Date(Date.now() + 47 * 3600 * 1000).toISOString();
   const INVITES = { invites: [
-    { email: 'iva@h', role: 'member', created_by: 'tomas@h', created_at: 'x', expires_at: in47h, email_sent: true, expired: false },
-    { email: 'old@h', role: 'admin', created_by: 'tomas@h', created_at: 'x', expires_at: '2020-01-01T00:00:00Z', email_sent: false, expired: true },
+    { email: 'iva@h', role: 'member', created_by: 'tomas@h', created_at: 'x', expires_at: in47h, expired: false },
+    { email: 'old@h', role: 'admin', created_by: 'tomas@h', created_at: 'x', expires_at: '2020-01-01T00:00:00Z', expired: true },
   ] };
+  const LINK = 'https://bailey-onboard.h/?invite=tok';
 
-  it('invite dialog: lists org users, disables in-roster rows, sends an invite', async () => {
+  it('invite dialog: lists org users, disables in-roster rows, creates the invite and shows the link to copy', async () => {
     const s = spies();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'clipboard', { value: { writeText }, configurable: true });
     installFetch({
       '/bailey/api/people/invites': { json: { invites: [] } },
       '/bailey/api/people/org-users': { json: ORG_USERS },
-      '/bailey/api/people/invite': { json: { ok: true, email_sent: true, invite_link: 'https://bailey-onboard.h/?invite=t' } },
+      '/bailey/api/people/invite': { json: { ok: true, invite_link: LINK } },
     });
     render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
     fireEvent.click(screen.getByText('Invite person'));
@@ -239,24 +242,35 @@ describe('UsersView — invites', () => {
     // iva has a live invite → flagged.
     expect(screen.getAllByText('Invited').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByText('grace@h'));
-    fireEvent.click(screen.getByText('Send invite'));
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('Invite sent to grace@h'), 'success'));
+    fireEvent.click(screen.getByText('Create invite link'));
+    // The link is shown, in a selectable field, with the credential warning.
+    await waitFor(() => expect(screen.getByLabelText('Invite link for grace@h')).toBeTruthy());
+    expect(screen.getByLabelText('Invite link for grace@h').value).toBe(LINK);
+    expect(screen.getByText(/Treat this like a password/)).toBeTruthy();
     expect(s.refresh).toHaveBeenCalledWith('people');
+    // Copy puts the link on the clipboard and confirms it.
+    fireEvent.click(screen.getByText('Copy link'));
+    await waitFor(() => expect(screen.getByText('Copied')).toBeTruthy());
+    expect(writeText).toHaveBeenCalledWith(LINK);
+    delete window.navigator.clipboard;
   });
 
-  it('invite dialog: email failure keeps it open and shows the copyable link', async () => {
+  it('invite dialog: no clipboard API still leaves the link readable and says so', async () => {
     installFetch({
       '/bailey/api/people/invites': { json: { invites: [] } },
       '/bailey/api/people/org-users': { json: ORG_USERS },
-      '/bailey/api/people/invite': { json: { ok: true, email_sent: false, email_error: 'SMTP is not configured', invite_link: 'https://bailey-onboard.h/?invite=tok' } },
+      '/bailey/api/people/invite': { json: { ok: true, invite_link: LINK } },
     });
     render(<Host View={UsersView} data={makeData({ people })} />);
     fireEvent.click(screen.getByText('Invite person'));
     await waitFor(() => expect(screen.getByText('grace@h')).toBeTruthy());
     fireEvent.click(screen.getByText('grace@h'));
-    fireEvent.click(screen.getByText('Send invite'));
-    await waitFor(() => expect(screen.getByText(/SMTP is not configured/)).toBeTruthy());
-    expect(screen.getByText('Copy invite link')).toBeTruthy();
+    fireEvent.click(screen.getByText('Create invite link'));
+    await waitFor(() => expect(screen.getByLabelText('Invite link for grace@h')).toBeTruthy());
+    fireEvent.click(screen.getByText('Copy link'));
+    await waitFor(() => expect(screen.getByText(/copy it with your keyboard/)).toBeTruthy());
+    // The admin can still get the link out of the field by hand.
+    expect(screen.getByLabelText('Invite link for grace@h').value).toBe(LINK);
   });
 
   it('invite dialog: AOC unreachable surfaces the error banner', async () => {
@@ -270,35 +284,26 @@ describe('UsersView — invites', () => {
     expect(screen.getByText('Retry')).toBeTruthy();
   });
 
-  it('pending strip: expiry, delivery hint, revoke and re-send', async () => {
+  it('pending strip: expiry, revoke and a fresh copyable link', async () => {
     const s = spies();
     installFetch({
       '/bailey/api/people/invites': { json: INVITES },
       '/bailey/api/people/invites/revoke': { json: { ok: true } },
-      '/bailey/api/people/invites/resend': { json: { ok: true, email_sent: true, invite_link: 'x' } },
+      '/bailey/api/people/invites/resend': { json: { ok: true, invite_link: 'https://bailey-onboard.h/?invite=new' } },
     });
     render(<Host View={UsersView} data={makeData({ people })} extra={s} />);
     await waitFor(() => expect(screen.getByText('Pending invites')).toBeTruthy());
     expect(screen.getByText('iva@h')).toBeTruthy();
     expect(screen.getByText('expires in 46h')).toBeTruthy();
     expect(screen.getByText('expired')).toBeTruthy();
-    expect(screen.getByText('email not delivered')).toBeTruthy();
-    fireEvent.click(screen.getAllByText('Re-send')[0]);
-    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('re-sent'), 'success'));
+    // Nothing claims a delivery state any more — the platform sends nothing.
+    expect(screen.queryByText('email not delivered')).toBeNull();
+    fireEvent.click(screen.getAllByText('New link')[0]);
+    await waitFor(() => expect(screen.getByLabelText('Invite link for iva@h')).toBeTruthy());
+    expect(screen.getByLabelText('Invite link for iva@h').value).toBe('https://bailey-onboard.h/?invite=new');
+    expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('New invite link for iva@h'), 'success');
     fireEvent.click(screen.getAllByText('Revoke')[0]);
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith(expect.stringContaining('revoked'), 'danger'));
-  });
-
-  it('pending strip: failed re-send delivery shows the fresh copyable link inline', async () => {
-    installFetch({
-      '/bailey/api/people/invites': { json: INVITES },
-      '/bailey/api/people/invites/resend': { json: { ok: true, email_sent: false, email_error: 'send failed', invite_link: 'https://bailey-onboard.h/?invite=new' } },
-    });
-    render(<Host View={UsersView} data={makeData({ people })} />);
-    await waitFor(() => expect(screen.getByText('Pending invites')).toBeTruthy());
-    fireEvent.click(screen.getAllByText('Re-send')[0]);
-    await waitFor(() => expect(screen.getByText(/send failed/)).toBeTruthy());
-    expect(screen.getByText('Copy invite link')).toBeTruthy();
   });
 });
 

@@ -14,7 +14,7 @@ import (
 // member's FIRST device: the admin-facing lifecycle lives in
 // bailey_people_invites.go and redemption in the invite-redeem gate
 // API. Tokens are stored as SHA-256 hex digests (see hashInviteToken);
-// the raw token exists only in the emailed/copied link. Time fields
+// the raw token exists only in the link the admin copies. Time fields
 // are RFC3339 UTC strings in the DB, parsed back at read time.
 
 // inviteRecord is one invites row.
@@ -26,7 +26,6 @@ type inviteRecord struct {
 	CreatedAt  time.Time
 	ExpiresAt  time.Time
 	ConsumedAt string // RFC3339 ("" = unconsumed)
-	EmailSent  bool
 }
 
 // inviteTTL is how long an invite link stays redeemable.
@@ -65,26 +64,28 @@ func dbUpsertInvite(inv *inviteRecord) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO invites(email, token_hash, role, created_by, created_at, expires_at, consumed_at, email_sent)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	// Databases created before bailey-lab#369 still carry the dropped
+	// email_sent column; it is NOT NULL DEFAULT 0, so omitting it here
+	// keeps inserts valid on both old and new schemas without a
+	// migration.
+	_, err = db.Exec(`INSERT INTO invites(email, token_hash, role, created_by, created_at, expires_at, consumed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(email) DO UPDATE SET
 		  token_hash  = excluded.token_hash,
 		  role        = excluded.role,
 		  created_by  = excluded.created_by,
 		  created_at  = excluded.created_at,
 		  expires_at  = excluded.expires_at,
-		  consumed_at = excluded.consumed_at,
-		  email_sent  = excluded.email_sent`,
+		  consumed_at = excluded.consumed_at`,
 		inv.Email, inv.TokenHash, inv.Role, inv.CreatedBy,
 		inv.CreatedAt.UTC().Format(time.RFC3339Nano),
 		inv.ExpiresAt.UTC().Format(time.RFC3339Nano),
 		nullableString(inv.ConsumedAt),
-		inv.EmailSent,
 	)
 	return err
 }
 
-const inviteColumns = `email, token_hash, role, created_by, created_at, expires_at, COALESCE(consumed_at,''), email_sent`
+const inviteColumns = `email, token_hash, role, created_by, created_at, expires_at, COALESCE(consumed_at,'')`
 
 func dbLoadInviteByTokenHash(hash string) (*inviteRecord, error) {
 	db, err := openBaileyDB()
@@ -106,7 +107,7 @@ func dbLoadInviteByEmail(email string) (*inviteRecord, error) {
 
 // dbListUnconsumedInvites returns every not-yet-redeemed invite,
 // including expired ones — the People view shows those as "expired" so
-// the admin can resend or revoke them.
+// the admin can re-mint a link or revoke them.
 func dbListUnconsumedInvites() ([]inviteRecord, error) {
 	db, err := openBaileyDB()
 	if err != nil {
@@ -122,7 +123,7 @@ func dbListUnconsumedInvites() ([]inviteRecord, error) {
 		var inv inviteRecord
 		var created, expires string
 		if err := rows.Scan(&inv.Email, &inv.TokenHash, &inv.Role, &inv.CreatedBy,
-			&created, &expires, &inv.ConsumedAt, &inv.EmailSent); err != nil {
+			&created, &expires, &inv.ConsumedAt); err != nil {
 			return nil, err
 		}
 		inv.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -173,15 +174,6 @@ func dbDeleteInvite(email string) (bool, error) {
 	return n > 0, nil
 }
 
-func dbSetInviteEmailSent(email string, sent bool) error {
-	db, err := openBaileyDB()
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(`UPDATE invites SET email_sent = ? WHERE email = ? COLLATE NOCASE`, sent, email)
-	return err
-}
-
 type inviteRow interface {
 	Scan(dest ...any) error
 }
@@ -190,7 +182,7 @@ func scanInvite(row inviteRow) (*inviteRecord, error) {
 	var inv inviteRecord
 	var created, expires string
 	err := row.Scan(&inv.Email, &inv.TokenHash, &inv.Role, &inv.CreatedBy,
-		&created, &expires, &inv.ConsumedAt, &inv.EmailSent)
+		&created, &expires, &inv.ConsumedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // genuinely no row — callers treat (nil, nil) as "not found"
 	}
