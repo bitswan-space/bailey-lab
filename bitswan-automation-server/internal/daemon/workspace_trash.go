@@ -216,7 +216,9 @@ func EmptyTrashFor(callerEmail string, callerGroups []string, isServerOwner bool
 			// Only empty trash entries the caller owns. The workspace's ACL
 			// anchor is its dashboard endpoint (see workspaceRoleFor) — the same
 			// surface the UI and every other owner check use.
-			if workspaceRoleFor(name, domain, callerEmail, callerGroups) != roleOwner {
+			// An errored lookup skips the entry — never deletes on a
+			// role we couldn't confirm.
+			if role, err := workspaceRoleFor(name, domain, callerEmail, callerGroups); err != nil || role != roleOwner {
 				fmt.Fprintf(writer, "Skipping %s (not owner).\n", name)
 				continue
 			}

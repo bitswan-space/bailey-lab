@@ -140,7 +140,11 @@ func TestListAccessibleWorkspaces_OwnerSeesEntry(t *testing.T) {
 	}
 }
 
-func TestListAccessibleWorkspaces_ServerOwnerAuditView(t *testing.T) {
+// The server owner (recorded owner of bailey.<domain>) is NOT a god-mode
+// reader of the workspace list (#337). They see the workspaces they own or
+// were granted, exactly like anyone else — a third party's workspace must
+// not appear, because the gate would refuse them at its door.
+func TestListAccessibleWorkspaces_ServerOwnerSeesOnlyOwnWorkspaces(t *testing.T) {
 	domain := writeTestConfig(t)
 	host := "bailey." + domain
 	if err := deleteEndpoint(host); err != nil {
@@ -149,30 +153,181 @@ func TestListAccessibleWorkspaces_ServerOwnerAuditView(t *testing.T) {
 	if _, err := registerEndpoint(host, "lawsrv@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	// A workspace owned by someone else — the server owner still sees it.
-	ws := "lawaudit"
-	mkWorkspaceDir(t, ws, true)
-	if _, err := registerEndpoint(ws+"-gitops."+domain, "other@example.com", "", "", "", ""); err != nil {
+	// A workspace owned by someone else — invisible to the server owner.
+	other := "lawaudit"
+	mkWorkspaceDir(t, other, true)
+	if _, err := registerEndpoint(other+"-gitops."+domain, "other@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	r := baileyReq(http.MethodGet, "/bailey/api/workspaces", "lawsrv@example.com")
-	r.Host = host
+	// One the server owner really does own — still visible.
+	own := "lawsrvown"
+	mkWorkspaceDir(t, own, true)
+	if _, err := registerEndpoint(own+"-gitops."+domain, "lawsrv@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := listWorkspacesAs(t, "lawsrv@example.com", host)
+	if findWorkspace(resp, other) != nil {
+		t.Errorf("server owner was shown a third-party workspace %q — the list leaks", other)
+	}
+	if findWorkspace(resp, own) == nil {
+		t.Errorf("server owner lost sight of their own workspace %q: %+v", own, resp.Workspaces)
+	}
+}
+
+// The deny direction for an ordinary caller: a user with no role on a
+// workspace's ACL surface must not learn it exists. A member of the SAME
+// server but a DIFFERENT workspace is the exact shape of #337.
+func TestListAccessibleWorkspaces_NonMemberSeesNothing(t *testing.T) {
+	domain := writeTestConfig(t)
+	theirs := "denytheirs"
+	mine := "denymine"
+	mkWorkspaceDir(t, theirs, true)
+	mkWorkspaceDir(t, mine, true)
+	if _, err := registerEndpoint(theirs+"-dashboard."+domain, "petr@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint(mine+"-dashboard."+domain, "tomas@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := listWorkspacesAs(t, "tomas@example.com", "")
+	if findWorkspace(resp, theirs) != nil {
+		t.Errorf("non-member was shown %q", theirs)
+	}
+	if findWorkspace(resp, mine) == nil {
+		t.Errorf("owner lost sight of their own workspace %q: %+v", mine, resp.Workspaces)
+	}
+	// Nor does a stranger with no workspaces at all see either of them.
+	resp = listWorkspacesAs(t, "stranger@example.com", "")
+	for _, name := range []string{theirs, mine} {
+		if findWorkspace(resp, name) != nil {
+			t.Errorf("stranger was shown %q", name)
+		}
+	}
+}
+
+// The allow direction that must survive the fix: an access grant on the
+// workspace's dashboard (directly, or via a group) is real membership, and
+// the workspace stays listed — badged as a member, not an owner.
+func TestListAccessibleWorkspaces_GranteeAndGroupMemberStillSee(t *testing.T) {
+	domain := writeTestConfig(t)
+	ws := "grantws"
+	mkWorkspaceDir(t, ws, true)
+	dash := ws + "-dashboard." + domain
+	if _, err := registerEndpoint(dash, "wsowner@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := addGrant(dash, "email", "invited@example.com", "access", "wsowner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := addGrant(dash, "group", "/Acme/devs", "access", "wsowner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := findWorkspace(listWorkspacesAs(t, "invited@example.com", ""), ws)
+	if entry == nil {
+		t.Fatal("an explicitly granted member could not see the workspace")
+	}
+	if entry.IsOwner || entry.DashboardRole != string(roleAccess) {
+		t.Errorf("grantee entry = %+v, want role access / is_owner false", entry)
+	}
+
+	r := baileyReq(http.MethodGet, "/bailey/api/workspaces", "dev@example.com")
+	r.Header.Set("X-Forwarded-Groups", "/Acme/devs")
 	ensureTrustedDeviceForReq(r)
 	w := httptest.NewRecorder()
 	(&Server{}).handleBailey(w, r)
 	var resp listAccessibleResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v\n%s", err, w.Body.String())
+	}
+	if findWorkspace(&resp, ws) == nil {
+		t.Errorf("a member via a group grant could not see the workspace: %+v", resp.Workspaces)
+	}
+}
+
+// A membership lookup that FAILS must omit the workspace, never include it:
+// an error tells us nothing about the caller, and "unknown" is not "allowed".
+func TestListAccessibleWorkspaces_LookupErrorOmits(t *testing.T) {
+	domain := writeTestConfig(t)
+	ws := "errws"
+	mkWorkspaceDir(t, ws, true)
+	if _, err := registerEndpoint(ws+"-dashboard."+domain, "someone@example.com", "", "", endpointKindWorkspace, ""); err != nil {
 		t.Fatal(err)
 	}
-	var sawAudit bool
-	for _, e := range resp.Workspaces {
-		if e.Name == ws {
-			sawAudit = true
+	// Sanity: the owner sees it while the ACL store is healthy.
+	if findWorkspace(listWorkspacesAs(t, "someone@example.com", ""), ws) == nil {
+		t.Fatal("precondition: owner cannot see their own workspace")
+	}
+
+	// Break the ACL store so every membership lookup errors out, then call
+	// the handler directly (going through handleBailey would trip the
+	// device-trust gate on the same broken store first).
+	breakBaileyDBForTest(t)
+	r := baileyReq(http.MethodGet, "/bailey/api/workspaces", "someone@example.com")
+	w := httptest.NewRecorder()
+	handleListAccessibleWorkspaces(w, r, "someone@example.com")
+	reopenBaileyDBForTest(t)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d; body=%s", w.Code, w.Body.String())
+	}
+	var resp listAccessibleResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v\n%s", err, w.Body.String())
+	}
+	if findWorkspace(&resp, ws) != nil {
+		t.Errorf("workspace listed despite an errored membership lookup: %+v", resp.Workspaces)
+	}
+}
+
+// breakBaileyDBForTest closes the cached DB handle WITHOUT clearing the
+// sync.Once, so every subsequent store call fails with "database is closed" —
+// the cheapest faithful stand-in for an unreadable ACL store. Callers must
+// follow with reopenBaileyDBForTest to hand the rest of the suite a live
+// handle again.
+func breakBaileyDBForTest(t *testing.T) {
+	t.Helper()
+	if _, err := openBaileyDB(); err != nil {
+		t.Fatalf("open bailey db: %v", err)
+	}
+	if baileyDB == nil {
+		t.Fatal("bailey db handle is nil; cannot break it")
+	}
+	if err := baileyDB.Close(); err != nil {
+		t.Fatalf("close bailey db: %v", err)
+	}
+}
+
+// listWorkspacesAs performs GET /bailey/api/workspaces as email. host, when
+// non-empty, is the bailey host the request is addressed to.
+func listWorkspacesAs(t *testing.T, email, host string) *listAccessibleResponse {
+	t.Helper()
+	r := baileyReq(http.MethodGet, "/bailey/api/workspaces", email)
+	if host != "" {
+		r.Host = host
+	}
+	ensureTrustedDeviceForReq(r)
+	w := httptest.NewRecorder()
+	(&Server{}).handleBailey(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list = %d; body=%s", w.Code, w.Body.String())
+	}
+	var resp listAccessibleResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v\n%s", err, w.Body.String())
+	}
+	return &resp
+}
+
+func findWorkspace(resp *listAccessibleResponse, name string) *accessibleWorkspace {
+	for i := range resp.Workspaces {
+		if resp.Workspaces[i].Name == name {
+			return &resp.Workspaces[i]
 		}
 	}
-	if !sawAudit {
-		t.Error("server owner audit view did not include a third-party workspace")
-	}
+	return nil
 }
 
 func TestHandleTrashWorkspace_OwnerSuccess(t *testing.T) {
