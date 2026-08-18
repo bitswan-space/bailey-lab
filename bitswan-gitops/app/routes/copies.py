@@ -1042,6 +1042,9 @@ async def _spawn_dev_deploy(bp: str, deployer: str | None) -> str | None:
             commit_subject=(f"{deployer} synced {bp}" if deployer else None),
             service=service,
             deployed_by=deployer,
+            # `members_for_bp` is the BP's whole dev stage, and making dev track
+            # main means dropping what main no longer has (#378).
+            prune_scope=True,
         )
         deploy = res.get("deploy")
         if res.get("error"):

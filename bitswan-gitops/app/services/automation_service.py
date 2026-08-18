@@ -1597,6 +1597,7 @@ class AutomationService:
         deployed_by: str | None = None,
         commit_subject: str | None = None,
         report: Callable[..., Any] | None = None,
+        prune_scope: bool = False,
     ) -> dict:
         """Upsert several deployment entries into bitswan.yaml in ONE write +
         ONE git commit, then auto-enable their declared infra services.
@@ -1605,6 +1606,11 @@ class AutomationService:
         relative_path, automation_name, context (+ optional services/replicas).
         Mirrors the per-field mapping `deploy_automation` does, but batched.
         Returns the re-read bs_yaml.
+
+        `prune_scope` declares that `members` is the COMPLETE desired set for
+        every (context, stage) scope it covers — so entries in those scopes that
+        are NOT in `members` are removed (#378). Only a caller that enumerated
+        the whole scope may pass it; see the prune block below.
         """
 
         async def _report(step: str, message: str):
@@ -1736,12 +1742,60 @@ class AutomationService:
             logger.warning("Removing stale live-dev entry: %s", k)
             del deployments[k]
 
+        # Retire what the caller's scope no longer contains (#378). Deleting an
+        # automation from a BP's source left its deployment entry here FOREVER:
+        # a redeploy upserted the survivors and this map is the desired state the
+        # driver compiles, so the ghost stayed in the compose — never an orphan
+        # to retire — and its container kept running on the stage.
+        #
+        # It also broke the BP that outlived it. With its source gone the driver
+        # cannot read the ghost's automation.toml and falls back to the DEFAULT
+        # config (expose=false, port 8080), so a deleted FRONTEND recompiled as a
+        # non-exposed worker: joined its firewall gateway's network namespace and
+        # bound the :8080 its image hard-codes, which the shim cannot be told to
+        # change. The BP's real backend then lost the race for that port in the
+        # shared netns and crash-looped on `bind: address already in use`.
+        #
+        # Scoped to (context, stage) — `context` is bp-scoped (the bp itself, or
+        # `copy-<copy>-<bp>`), so this only ever touches the same BP's same stage
+        # in the same copy. Off-limits without `prune_scope`, because a PARTIAL
+        # deploy (one freshly scaffolded automation, a pull-triggered subset)
+        # would otherwise delete the siblings it deliberately left running.
+        # Membership is `automation.toml` (scan_workspace_sources), which is also
+        # what a delete removes — so "absent from members" means "deleted".
+        pruned_bps: set[str] = set()
+        if prune_scope:
+            keep = {m["deployment_id"] for m in members}
+            # A context-less member (a top-level automation with no bp segment)
+            # carries no bp scope, so its "scope" would span the whole workspace.
+            scopes = {
+                (m.get("context"), "" if m.get("stage") == "production" else m["stage"])
+                for m in members
+                if m.get("context") and m.get("stage") is not None
+            }
+            for dep_id in [
+                k
+                for k, v in deployments.items()
+                if k not in keep
+                and ((v or {}).get("context"), (v or {}).get("stage") or "") in scopes
+            ]:
+                conf = deployments[dep_id] or {}
+                logger.info(
+                    "Retiring deployment %s: no longer present in %s/%s",
+                    dep_id,
+                    conf.get("context"),
+                    conf.get("stage") or "production",
+                )
+                if bp := deployment_bp(conf):
+                    pruned_bps.add(bp)
+                del deployments[dep_id]
+
         changed = {
             deployment_bp(
                 (bs_yaml.get("deployments") or {}).get(m["deployment_id"], {})
             )
             for m in members
-        }
+        } | pruned_bps
         await self._persist_bp_state(
             bs_yaml,
             {bp for bp in changed if bp},
@@ -4059,6 +4113,7 @@ class AutomationService:
         deployed_by: str | None = None,
         commit_subject: str | None = None,
         progress_callback: Callable[..., Any] | None = None,
+        prune_scope: bool = False,
     ) -> dict:
         """Deploy an arbitrary set of scanned automation sources as one unit.
 
@@ -4069,6 +4124,11 @@ class AutomationService:
         preps succeed do we write the config once and run a single compose-up
         over the member services. `label` is cosmetic (logs/commit context);
         the caller owns deploy-task creation and member locking.
+
+        `prune_scope` passes through to `write_deployment_entries`: set it ONLY
+        when `members` is every automation of the (context, stage) scopes it
+        covers, so deployments deleted from the source are retired (#378). An
+        arbitrary SUBSET must leave it False or it retires its own siblings.
         """
 
         async def _report(step: str, message: str, current: int | None = None):
@@ -4140,6 +4200,7 @@ class AutomationService:
             deployed_by=deployed_by,
             commit_subject=commit_subject or f"deploy {label}",
             report=_report,
+            prune_scope=prune_scope,
         )
         logger.info(
             "PERF deploy_source_set %s: write_entries=%.2fs",
@@ -4216,6 +4277,11 @@ class AutomationService:
             deployed_by=deployed_by,
             commit_subject=f"deploy business process {bp}",
             progress_callback=progress_callback,
+            # `members` is the BP's every scanned automation at this stage (the
+            # caller's own override is the same enumeration), so an automation
+            # deleted from the source is retired here rather than left running
+            # on the stage forever (#378).
+            prune_scope=True,
         )
 
         # Record the BP-level deploy (shared git commit + per-member images +

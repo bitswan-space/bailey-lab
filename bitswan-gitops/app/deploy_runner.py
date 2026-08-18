@@ -44,6 +44,7 @@ async def _run_set_deploy_with_progress(
     copy: str | None,
     commit_subject: str | None,
     deployed_by: str | None = None,
+    prune_scope: bool = False,
 ):
     """Background coroutine driving `deploy_source_set` with progress
     broadcasting. Mirrors `_run_bp_deploy_with_progress`; on terminal status
@@ -85,6 +86,7 @@ async def _run_set_deploy_with_progress(
             commit_subject=commit_subject,
             deployed_by=deployed_by,
             progress_callback=progress_callback,
+            prune_scope=prune_scope,
         )
 
         await deploy_manager.update_task(
@@ -116,9 +118,14 @@ async def spawn_set_deploy(
     commit_subject: str | None = None,
     service=None,
     deployed_by: str | None = None,
+    prune_scope: bool = False,
 ) -> dict:
     """Reserve the deployable members under one task and spawn the background
     set deploy. Never raises.
+
+    `prune_scope` declares `members` the COMPLETE set for its (context, stage)
+    scopes, so automations deleted from the source are retired (#378). It is
+    dropped when any member is `skipped` below — see the guard at the spawn.
 
     Members already being deployed are dropped into `skipped` (logged) rather
     than failing the batch. Returns:
@@ -185,6 +192,13 @@ async def spawn_set_deploy(
                 copy,
                 commit_subject,
                 deployed_by,
+                # Pruning retires every entry in scope that isn't in `members_f`,
+                # so it is only sound while `members_f` IS the complete scope.
+                # Anything in `skipped` was dropped for being mid-deploy — very
+                # much still wanted — so a filtered batch must not prune, or a
+                # concurrent deploy would have its live deployment retired out
+                # from under it (#378).
+                prune_scope=prune_scope and not skipped,
             )
         )
         return {
