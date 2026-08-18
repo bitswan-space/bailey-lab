@@ -389,6 +389,8 @@ def spawn_scan(image_ref: str, image_id: str, *, force_cve: bool = False) -> Non
     """Fire-and-forget background scan (called from the deploy path so it never
     blocks the deploy). No-op outside a running event loop, or while a scan of
     the same image is already running."""
+    if not image_ref:
+        return  # scan_image no-ops on this; don't leave a key stuck in _inflight
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
