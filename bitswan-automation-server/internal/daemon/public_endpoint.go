@@ -309,6 +309,17 @@ func registerPublicRoute(publicHost string) error {
 		return fmt.Errorf("malformed public host %q", publicHost)
 	}
 	publicBase := parts[1] // public.<aoc-id>.bswn.io
+	// A published public host lives in the AOC's own namespace and can only ever
+	// be certified through the AOC's zone. A server whose TLS mode contacts no CA
+	// therefore cannot serve one, and silently registering the route would publish
+	// a URL that answers with an untrusted certificate. Refuse with the reason.
+	if !currentTLSMode().usesACME() {
+		return fmt.Errorf(
+			"cannot publish %s: this server's TLS mode is %s, and a public endpoint's certificate "+
+				"can only be issued through the AOC's zone (mode %s). Publishing is unavailable on "+
+				"this server",
+			publicHost, currentTLSMode(), TLSModeAOCDNS)
+	}
 	return traefikapi.AddRouteWithTLSDomains(
 		publicHost, upstream, "", dnsCertResolverName,
 		traefikapi.WildcardTLSDomains(publicBase))

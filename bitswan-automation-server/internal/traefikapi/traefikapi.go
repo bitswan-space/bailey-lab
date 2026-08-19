@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -569,29 +570,102 @@ func AddRouteWithTLSDomains(hostname, upstream, traefikBaseURL, resolver string,
 
 // ApplyWildcardCertResolver switches existing ACME routes whose hostname is
 // covered by *.domain to the given cert resolver with a shared wildcard
-// certificate. Routes using mkcert or manually installed certificates
-// (TLS enabled but no cert resolver) are left untouched.
+// certificate. Routes using mkcert or manually installed certificates are left
+// untouched.
+//
+// Thin wrapper kept for its callers; SetWildcardCertResolver is the general form.
 func ApplyWildcardCertResolver(domain, resolver string) error {
+	_, err := SetWildcardCertResolver(domain, resolver, WildcardTLSDomains(domain))
+	return err
+}
+
+// SetWildcardCertResolver points every route under *.domain at an ACME resolver,
+// or takes them all OFF ACME when resolver is empty. Returns how many routers it
+// changed.
+//
+// The interesting part is which routes it refuses to touch. A router that has a
+// certificate installed for its own hostname — mkcert, or `--certs-dir` — is
+// manual BY INTENT: somebody supplied that certificate deliberately, and putting
+// it on ACME would replace it with one issued for a name the operator may not
+// even control publicly. A router with TLS but no resolver and no installed
+// certificate is a different thing entirely: that is what a server-wide switch to
+// manual mode leaves behind, and it must come back onto ACME when the server
+// switches back. The old implementation could not tell those two apart (it keyed
+// off "no resolver" alone), so a mode switch was a one-way door.
+//
+// Idempotent, and safe to call on every ingress init: routers already in the
+// target state are not counted, so a no-op reconcile stays silent.
+func SetWildcardCertResolver(domain, resolver string, tlsDomains []TLSDomain) (int, error) {
 	traefikBaseURL := getTraefikBaseURL()
-	return modifyState(traefikBaseURL, func(state *traefikDynConfig) error {
-		migrated := 0
+	changed := 0
+	err := modifyState(traefikBaseURL, func(state *traefikDynConfig) error {
+		installed := hostsWithInstalledCerts(state)
 		for _, router := range state.HTTP.Routers {
-			if router.TLS == nil || router.TLS.CertResolver == "" {
-				continue
+			if router.TLS == nil {
+				continue // plain HTTP route; nothing to decide
 			}
 			hostname := extractHostFromRule(router.Rule)
 			if !HostCoveredByWildcard(hostname, domain) {
 				continue
 			}
+			if installed[sanitizeHostname(hostname)] {
+				continue // has its own certificate: manual by intent
+			}
+			if router.TLS.CertResolver == resolver {
+				continue // already there
+			}
 			router.TLS.CertResolver = resolver
-			router.TLS.Domains = WildcardTLSDomains(domain)
-			migrated++
-		}
-		if migrated > 0 {
-			fmt.Printf("ApplyWildcardCertResolver: %d route(s) under %s switched to resolver %s\n", migrated, domain, resolver)
+			router.TLS.Domains = tlsDomains
+			changed++
 		}
 		return nil
 	})
+	if err != nil {
+		return 0, err
+	}
+	if changed > 0 {
+		if resolver == "" {
+			fmt.Printf("SetWildcardCertResolver: %d route(s) under %s taken off ACME\n", changed, domain)
+		} else {
+			fmt.Printf("SetWildcardCertResolver: %d route(s) under %s switched to resolver %s\n",
+				changed, domain, resolver)
+		}
+	}
+	return changed, nil
+}
+
+// InstalledCertHostnames lists the sanitized hostnames that have an
+// operator-installed certificate in the TLS store. Exported for the status
+// surface: whether anything is installed is what decides if a manual mode can
+// serve traffic at all, and whether an ACME mode is being shadowed.
+func InstalledCertHostnames() []string {
+	state, err := loadState(getStateFilePath(getTraefikBaseURL()))
+	if err != nil {
+		return nil
+	}
+	hosts := make([]string, 0)
+	for h := range hostsWithInstalledCerts(state) {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+// hostsWithInstalledCerts is the set of sanitized hostnames that have a
+// certificate file registered in the TLS store (the /tls/<host>/... entries
+// InstallTLSCerts writes). Membership is what marks a route as deliberately
+// manual, as opposed to merely resolver-less.
+func hostsWithInstalledCerts(state *traefikDynConfig) map[string]bool {
+	hosts := map[string]bool{}
+	if state.TLS == nil {
+		return hosts
+	}
+	for _, cert := range state.TLS.Certificates {
+		if seg := tlsCertHostSegment(cert.CertFile); seg != "" {
+			hosts[seg] = true
+		}
+	}
+	return hosts
 }
 
 // RemoveRoute removes a route by hostname using the default Traefik base URL.

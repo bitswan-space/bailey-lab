@@ -148,6 +148,8 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressProvisionProtectedProxy(w, r)
 	case path == "wait":
 		s.handleIngressWait(w, r)
+	case path == "tls":
+		s.handleIngressTLS(w, r)
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}
@@ -334,7 +336,16 @@ providers:
 `
 
 func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
-	cfg := fmt.Sprintf(`entryPoints:
+	return renderTraefikStaticConfigForMode(acmeEmail, dnsChallenge, DefaultTLSMode)
+}
+
+// renderTraefikStaticConfigForMode renders the static config for a given TLS
+// mode. A mode that contacts no CA gets NO certificatesResolvers at all —
+// not even the HTTP-01 one — so a route that somehow kept a resolver name cannot
+// quietly start an ACME order that could never succeed, and nothing on the server
+// waits on a challenge that will never be answered.
+func renderTraefikStaticConfigForMode(acmeEmail string, dnsChallenge bool, mode TLSMode) string {
+	cfg := `entryPoints:
   web:
     address: ":80"
   websecure:
@@ -350,7 +361,15 @@ providers:
   docker:
     exposedByDefault: false
     network: bitswan_network
-certificatesResolvers:
+`
+
+	if !mode.usesACME() {
+		// Certificates come from the file-provider TLS store (see
+		// traefikapi.InstallTLSCerts); Traefik picks them by SNI.
+		return cfg
+	}
+
+	cfg += fmt.Sprintf(`certificatesResolvers:
   letsencrypt:
     acme:
       email: %s
@@ -490,9 +509,13 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	// DNS-01 cert resolver so Traefik can obtain a *.<domain> wildcard
 	// certificate. Traefik's httpreq provider authenticates against the
 	// daemon's bridge endpoints with basic auth using a shared secret.
+	//
+	// A mode that contacts no CA gets none of this: no bridge credentials in
+	// Traefik's environment, and no resolver in the static config.
+	tlsMode := currentTLSMode()
 	wildcardDomain := getWildcardCertDomain()
 	var traefikEnv map[string]string
-	if wildcardDomain != "" {
+	if wildcardDomain != "" && tlsMode.usesACME() {
 		secret, err := getOrCreateACMEBridgeSecret(traefikConfig)
 		if err != nil {
 			return false, err
@@ -504,7 +527,8 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		}
 	}
 
-	traefikStaticConfig := renderTraefikStaticConfig(acmeEmail, wildcardDomain != "")
+	traefikStaticConfig := renderTraefikStaticConfigForMode(
+		acmeEmail, wildcardDomain != "" && tlsMode.usesACME(), tlsMode)
 
 	hostHomeDir := os.Getenv("HOST_HOME")
 	traefikConfigForCompose := traefikConfig
@@ -555,8 +579,12 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		currentCompose, _ := os.ReadFile(traefikDockerComposePath)
 		if string(currentConfig) == traefikStaticConfig && string(currentCompose) == traefikDockerCompose {
 			// Running and unchanged — just refresh the file-provider config from
-			// the saved state in case it drifted, then leave it.
+			// the saved state in case it drifted, then leave it. The route table is
+			// still reconciled onto the configured TLS mode: a route added while the
+			// mode was something else would otherwise keep the wrong backend
+			// forever, and this is the cheap, idempotent place to catch that.
 			_ = traefikapi.InitTraefik()
+			reconcileTLSMode()
 			return false, nil
 		}
 		if verbose {
@@ -620,13 +648,9 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		return false, fmt.Errorf("failed to init ingress: %w", err)
 	}
 
-	// Switch any existing ACME routes under the wildcard domain to the
-	// shared wildcard certificate.
-	if wildcardDomain != "" {
-		if err := traefikapi.ApplyWildcardCertResolver(wildcardDomain, dnsCertResolverName); err != nil {
-			fmt.Printf("Warning: failed to apply wildcard cert resolver to existing routes: %v\n", err)
-		}
-	}
+	// Put the live route table on the backend the configured mode implies: the
+	// shared wildcard certificate under aoc-dns, no ACME at all under manual.
+	reconcileTLSMode()
 
 	return true, nil
 }

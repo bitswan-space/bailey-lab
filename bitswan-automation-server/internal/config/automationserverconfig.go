@@ -36,6 +36,11 @@ type Config struct {
 	// address with the right SNI still reaches the ingress).
 	IngressBindAddress string `toml:"ingress_bind_address,omitempty"`
 
+	// TLSMode selects how the server's public hostnames get their certificates
+	// ("aoc-dns", "manual", …; see daemon.TLSMode). Empty means the default,
+	// which every server registered before this option existed relies on.
+	TLSMode string `toml:"tls_mode,omitempty"`
+
 	AutomationOperationsCenter AutomationOperationsCenterSettings `toml:"aoc"`
 	LocalServer                LocalServerSettings                `toml:"local_server"`
 }
@@ -299,6 +304,30 @@ func (m *AutomationServerConfig) SetIngressBindAddress(addr string) error {
 	}
 
 	config.IngressBindAddress = addr
+	return m.SaveConfig(config)
+}
+
+// GetTLSMode returns the configured certificate mode, or "" when the server has
+// never set one (the caller substitutes the default). A missing config file is
+// not an error for the same reason as GetIngressBindAddress.
+func (m *AutomationServerConfig) GetTLSMode() string {
+	config, err := m.LoadConfig()
+	if err != nil {
+		return ""
+	}
+	return config.TLSMode
+}
+
+// SetTLSMode records the certificate mode. Validation belongs to the caller (the
+// daemon owns the set of known modes); this only persists the string.
+func (m *AutomationServerConfig) SetTLSMode(mode string) error {
+	config, err := m.LoadConfig()
+	if err != nil {
+		// If no config exists, create a new one
+		config = &Config{}
+	}
+
+	config.TLSMode = mode
 	return m.SaveConfig(config)
 }
 
