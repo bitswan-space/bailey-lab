@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +23,13 @@ import (
 // IngressInitRequest represents the request to initialize ingress
 type IngressInitRequest struct {
 	Verbose bool `json:"verbose"`
+	// BindAddress narrows the host address Traefik publishes :80/:443 on
+	// (see config.Config.IngressBindAddress). Three states, which is why it is
+	// a pointer: nil leaves the stored value alone (every existing caller),
+	// a pointer to an address sets it, and a pointer to "" clears it back to
+	// every interface. Stating it forces the reconfigure path even when Traefik
+	// is already running, since the point of the call is to change how it binds.
+	BindAddress *string `json:"bind_address,omitempty"`
 }
 
 // IngressInitResponse represents the response from initializing ingress
@@ -216,7 +224,35 @@ func (s *Server) handleIngressInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newlyInitialized, err := initIngress(req.Verbose)
+	// A stated bind address is a change to HOW Traefik listens, so persist it
+	// and take the reconfigure path directly: initIngress short-circuits when
+	// the container is already up, which would silently accept the new address
+	// and never apply it.
+	forceReconfigure := false
+	if req.BindAddress != nil {
+		addr := strings.TrimSpace(*req.BindAddress)
+		if err := validateIngressBindAddress(addr); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg := config.NewAutomationServerConfig()
+		if cfg.GetIngressBindAddress() != addr {
+			if err := cfg.SetIngressBindAddress(addr); err != nil {
+				writeJSONError(w, "failed to persist ingress bind address: "+err.Error(),
+					http.StatusInternalServerError)
+				return
+			}
+			forceReconfigure = true
+		}
+	}
+
+	var newlyInitialized bool
+	var err error
+	if forceReconfigure {
+		newlyInitialized, err = initTraefikIngress(req.Verbose)
+	} else {
+		newlyInitialized, err = initIngress(req.Verbose)
+	}
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -349,6 +385,63 @@ certificatesResolvers:
 	return cfg
 }
 
+// validateIngressBindAddress rejects anything that isn't a bare IP literal.
+//
+// The value is interpolated into a docker-compose port mapping
+// ("<addr>:443:443"), so a hostname or a stray colon would either fail at
+// container-create time with an opaque Docker error or, worse, change which
+// port is published. An IP is also the only thing that is stable enough to bind
+// to: publishing follows the address, not the interface name. Empty is valid and
+// means "every interface".
+func validateIngressBindAddress(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return fmt.Errorf(
+			"ingress bind address %q is not an IP address; pass the address Traefik should "+
+				"publish on (e.g. the server's VPN address, 10.8.0.7), or \"\" for every interface",
+			addr)
+	}
+	// A publish bound to a v6 address needs brackets in the mapping; we don't
+	// render those, so refuse rather than emit a mapping Docker misreads.
+	if ip.To4() == nil {
+		return fmt.Errorf(
+			"ingress bind address %q is IPv6; only IPv4 bind addresses are supported today",
+			addr)
+	}
+	return nil
+}
+
+// localAddressExists reports whether addr is assigned to an interface on this
+// machine. Used only to explain a failure, never to decide behaviour — an
+// interface that is merely late (a VPN tunnel coming up after boot) must not
+// change how the ingress is published.
+func localAddressExists(addr string) bool {
+	want := net.ParseIP(addr)
+	if want == nil {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true // can't tell; don't claim a problem we haven't observed
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil && ip.Equal(want) {
+			return true
+		}
+	}
+	return false
+}
+
 // initTraefikIngress starts a new Traefik ingress proxy, or reconfigures a
 // running one when the desired configuration has changed (e.g. the
 // automation server registered with the AOC and was assigned a domain, so
@@ -415,7 +508,20 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		}
 	}
 
-	traefikDockerCompose, err := dockercompose.CreateTraefikDockerComposeFile(traefikConfigForCompose, traefikEnv)
+	bindAddress := config.NewAutomationServerConfig().GetIngressBindAddress()
+	// Diagnose the one failure mode a narrowed publish adds, BEFORE Docker turns
+	// it into an opaque "cannot assign requested address". We deliberately do not
+	// widen back to every interface as a fallback: on a private server that would
+	// silently start publishing on the public one, which is the exact outcome the
+	// bind address exists to prevent. Fail closed, but say why.
+	if bindAddress != "" && !localAddressExists(bindAddress) {
+		fmt.Printf("Warning: ingress bind address %s is not configured on any interface of this "+
+			"machine, so Traefik cannot publish on it. If this is a VPN address, bring the tunnel up "+
+			"(the container's restart policy will keep retrying until then); if the machine's address "+
+			"changed, re-point it with 'bitswan ingress init --bind-address <addr>'.\n", bindAddress)
+	}
+	traefikDockerCompose, err := dockercompose.CreateTraefikDockerComposeFile(
+		traefikConfigForCompose, traefikEnv, bindAddress)
 	if err != nil {
 		return false, fmt.Errorf("failed to create ingress docker-compose file: %w", err)
 	}

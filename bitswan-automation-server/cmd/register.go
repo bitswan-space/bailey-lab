@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/cmd/automationserverdaemon"
@@ -33,6 +34,9 @@ func newRegisterCmd() *cobra.Command {
 	var forceProxy bool
 	var relayAddr string
 	var relayFingerprint string
+	var private bool
+	var privateAddress string
+	var bindAddress string
 
 	cmd := &cobra.Command{
 		Use:          "register",
@@ -51,6 +55,41 @@ func newRegisterCmd() *cobra.Command {
 
 			if automationServerId == "" {
 				return fmt.Errorf("automation server ID is required. Use --server-id flag to provide the automation server ID from the web interface")
+			}
+
+			// A private server and a proxied server are opposite answers to the
+			// same question, and --private is the stronger claim: it exists to
+			// guarantee this server is never published on the public internet.
+			if private && forceProxy {
+				return fmt.Errorf("--private and --force-proxy are mutually exclusive: the relay publishes this " +
+					"server on the public internet, which is what --private exists to prevent")
+			}
+			if privateAddress != "" && !private {
+				return fmt.Errorf("--private-address requires --private")
+			}
+			if private {
+				if privateAddress == "" {
+					return fmt.Errorf("--private requires --private-address: the AOC has to publish SOME address " +
+						"for this server, and on a private deployment it cannot discover one (pass the address " +
+						"clients reach it on, e.g. the VPN address 10.8.0.7)")
+				}
+				if net.ParseIP(privateAddress) == nil {
+					return fmt.Errorf("--private-address %q is not an IP address", privateAddress)
+				}
+			}
+			if bindAddress != "" && net.ParseIP(bindAddress) == nil {
+				return fmt.Errorf("--bind-address %q is not an IP address", bindAddress)
+			}
+
+			// Fail closed by default: a private server that keeps publishing on
+			// every interface is still listening on its public one, and Docker's
+			// publish cannot be firewalled off from the host. So unless the
+			// operator says otherwise, bind the ingress to the address they just
+			// told us clients use. `--bind-address 0.0.0.0` opts out.
+			if private && !cmd.Flags().Changed("bind-address") {
+				bindAddress = privateAddress
+				fmt.Printf("🔒 Binding the ingress to %s (pass --bind-address 0.0.0.0 to publish on every interface).\n",
+					bindAddress)
 			}
 
 			// Bring the daemon up first: it is the single owner of
@@ -98,6 +137,12 @@ func newRegisterCmd() *cobra.Command {
 			// here on the daemon holds a valid token to talk to the AOC (wildcard
 			// ingress, protected proxy, workspace connect).
 			proxyCfg := daemon.ProxyConfig{}
+			if private {
+				proxyCfg = daemon.ProxyConfig{
+					Private:        true,
+					PrivateAddress: privateAddress,
+				}
+			}
 			if forceProxy {
 				if relayAddr == "" || relayFingerprint == "" {
 					return fmt.Errorf("--force-proxy requires --relay-addr and --relay-fingerprint (the AOC relay's tunnel endpoint and pinned cert fingerprint)")
@@ -118,6 +163,27 @@ func newRegisterCmd() *cobra.Command {
 
 			fmt.Printf("✅ Successfully registered automation server '%s' with ID: %s\n", serverInfo.Name, serverInfo.AutomationServerId)
 			fmt.Println("AOC URL, access token, and server ID have been saved to the daemon (no config is written on the host).")
+
+			// Narrow (or widen) how Traefik publishes before anything else asks it
+			// to serve: stating the address persists it and reconfigures a running
+			// Traefik, so this is the point at which a private server stops
+			// listening on its public interface.
+			if cmd.Flags().Changed("bind-address") || private {
+				if bindAddress == "" || bindAddress == "0.0.0.0" {
+					fmt.Println("\n🌐 Publishing the ingress on every interface.")
+				} else {
+					fmt.Printf("\n🔒 Publishing the ingress on %s only...\n", bindAddress)
+				}
+				addr := bindAddress
+				if addr == "0.0.0.0" {
+					addr = "" // Docker's own "every interface"; keep the compose byte-identical
+				}
+				if _, err := client.InitIngressWithBindAddress(false, addr); err != nil {
+					fmt.Printf("Warning: failed to apply the ingress bind address: %v\n", err)
+					fmt.Println("The ingress may still be published on every interface — re-run with " +
+						"'bitswan ingress init --bind-address <addr>' before exposing this server.")
+				}
+			}
 
 			// If the AOC assigned this server a domain, stand up the full
 			// protected-ingress stack BEFORE (re)deploying workspaces, so each
@@ -162,7 +228,11 @@ func newRegisterCmd() *cobra.Command {
 				// fail registration.
 				baileyURL := fmt.Sprintf("https://bailey.%s", serverInfo.Domain)
 				fmt.Printf("\n📓 Reporting Bailey console URL to the AOC: %s\n", baileyURL)
-				domainStatus, err := aocClient.ReportBaileyURL(baileyURL, forceProxy)
+				domainStatus, err := aocClient.ReportBaileyURL(baileyURL, aoc.BaileyURLReport{
+					ForceProxy:     forceProxy,
+					Private:        private,
+					PrivateAddress: privateAddress,
+				})
 				if err != nil {
 					fmt.Printf("Warning: Failed to report Bailey URL to the AOC: %v\n", err)
 				} else {
@@ -174,7 +244,27 @@ func newRegisterCmd() *cobra.Command {
 				// was passed) it routes *.<domain> through the reverse-proxy relay
 				// and reports "proxied". The daemon started before this decision, so
 				// kick the tunnel now (idempotent).
-				if domainStatus == "proxied" || forceProxy {
+				switch {
+				case private:
+					// The tunnel is pinned off locally whatever the AOC says, so the
+					// only thing to do here is tell the operator whether the AOC
+					// actually honoured the declaration. A 'proxied' verdict means it
+					// did not: DNS now points at the relay, nothing is tunnelling to
+					// it, and the hostname is dead until the record is fixed. That is
+					// a failure to surface, not a state to accept quietly.
+					if domainStatus == "proxied" {
+						fmt.Println("\n⚠️  The AOC put this server on its public relay despite --private.")
+						fmt.Printf("   *.%s now points at the relay, and this daemon will NOT tunnel to it,\n",
+							serverInfo.Domain)
+						fmt.Println("   so the hostname will not resolve to anything reachable.")
+						fmt.Println("   This AOC is probably too old to understand private servers. Ask an AOC")
+						fmt.Printf("   operator to point *.%s at %s and set the server's domain status to 'private'.\n",
+							serverInfo.Domain, privateAddress)
+					} else {
+						fmt.Printf("\n🔒 This server stays private: reached at %s over your own network, never through the AOC relay.\n",
+							privateAddress)
+					}
+				case domainStatus == "proxied" || forceProxy:
 					fmt.Println("\n🌐 This server will be reached through the AOC reverse-proxy relay (no public inbound route).")
 					if err := client.StartRelayTunnel(); err != nil {
 						fmt.Printf("Warning: failed to start the reverse-proxy tunnel: %v\n", err)
@@ -256,10 +346,21 @@ func newRegisterCmd() *cobra.Command {
 					time.Sleep(5 * time.Second)
 				}
 				if !verified {
+					hint := "The certificate may still be issuing — re-check in a minute; if it persists, the DNS/relay path needs attention"
+					if private {
+						// On a private server the usual suspect is name resolution
+						// from the server itself: this check dials the public
+						// hostname, so the box needs to resolve it to the private
+						// address and reach it over the same network clients use.
+						hint = fmt.Sprintf(
+							"On a private server this usually means %s does not resolve to %s from this machine, "+
+								"or the ingress is bound to an address this machine cannot reach itself on. "+
+								"Check DNS from the server, then re-run 'bitswan ingress init'",
+							baileyURL, privateAddress)
+					}
 					return fmt.Errorf(
-						"registered, but %s did not become verifiably live within 8 minutes (last status: %s).\n"+
-							"The certificate may still be issuing — re-check in a minute; if it persists, the DNS/relay path needs attention",
-						baileyURL, lastReason,
+						"registered, but %s did not become verifiably live within 8 minutes (last status: %s).\n%s",
+						baileyURL, lastReason, hint,
 					)
 				}
 			}
@@ -273,6 +374,16 @@ func newRegisterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&otp, "otp", "", "One-time password from web interface (required)")
 	cmd.Flags().StringVar(&automationServerId, "server-id", "", "Automation server ID from web interface (required)")
 	cmd.Flags().BoolVar(&forceProxy, "force-proxy", false, "Reach this server through the AOC reverse-proxy relay even if it has a public IP (for testing the NAT path)")
+	cmd.Flags().BoolVar(&private, "private", false,
+		"This server is reached over a private network (VPN, ZTNA, LAN) and must never be published "+
+			"through the AOC relay. Requires --private-address; binds the ingress to it unless "+
+			"--bind-address says otherwise.")
+	cmd.Flags().StringVar(&privateAddress, "private-address", "",
+		"The address clients reach this server on (e.g. the VPN address 10.8.0.7). The AOC publishes "+
+			"this in DNS instead of pointing the record at its relay.")
+	cmd.Flags().StringVar(&bindAddress, "bind-address", "",
+		"Publish the ingress (:80/:443) on this host address only. Defaults to --private-address "+
+			"under --private; 0.0.0.0 means every interface.")
 	cmd.Flags().StringVar(&relayAddr, "relay-addr", "", "Relay tunnel endpoint host:port to dial (required with --force-proxy)")
 	cmd.Flags().StringVar(&relayFingerprint, "relay-fingerprint", "", "Relay tunnel-cert sha256 fingerprint to pin (required with --force-proxy)")
 

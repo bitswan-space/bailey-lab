@@ -40,7 +40,7 @@ func TestReportBaileyURL(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if _, err := newTestClient(ts.URL).ReportBaileyURL(want, false); err != nil {
+	if _, err := newTestClient(ts.URL).ReportBaileyURL(want, BaileyURLReport{}); err != nil {
 		t.Fatalf("ReportBaileyURL returned error: %v", err)
 	}
 
@@ -65,7 +65,66 @@ func TestReportBaileyURLServerError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if _, err := newTestClient(ts.URL).ReportBaileyURL("nope", false); err == nil {
+	if _, err := newTestClient(ts.URL).ReportBaileyURL("nope", BaileyURLReport{}); err == nil {
 		t.Fatal("expected an error on non-200 response, got nil")
+	}
+}
+
+// TestReportBaileyURLDeclaresPrivatePosition: the AOC cannot discover that a
+// server sits behind a VPN, and it cannot discover the address to publish for it
+// either — pointing the record at its relay is its uniform default. Both facts
+// therefore have to travel on this report, and the absence of either one is what
+// would silently put a private server on the public internet.
+func TestReportBaileyURLDeclaresPrivatePosition(t *testing.T) {
+	var payload map[string]interface{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &payload)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"domain_status":"private"}`))
+	}))
+	defer ts.Close()
+
+	status, err := newTestClient(ts.URL).ReportBaileyURL(
+		"https://bailey.acme-prod.bswn.io",
+		BaileyURLReport{Private: true, PrivateAddress: "10.8.0.7"},
+	)
+	if err != nil {
+		t.Fatalf("ReportBaileyURL returned error: %v", err)
+	}
+	if status != "private" {
+		t.Errorf("domain_status = %q, want %q", status, "private")
+	}
+	if payload["private"] != true {
+		t.Errorf("payload private = %v, want true", payload["private"])
+	}
+	if payload["private_address"] != "10.8.0.7" {
+		t.Errorf("payload private_address = %v, want 10.8.0.7", payload["private_address"])
+	}
+	if _, ok := payload["force_proxy"]; ok {
+		t.Error("a private report must not also ask for the relay")
+	}
+}
+
+// A plain report must stay byte-compatible with what an older AOC accepts: no
+// private keys at all, so an AOC that doesn't know the field can't 400 on it.
+func TestReportBaileyURLOmitsPrivateWhenNotDeclared(t *testing.T) {
+	var payload map[string]interface{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &payload)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+
+	if _, err := newTestClient(ts.URL).ReportBaileyURL("https://bailey.acme-prod.bswn.io",
+		BaileyURLReport{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"private", "private_address", "force_proxy"} {
+		if _, ok := payload[k]; ok {
+			t.Errorf("payload carries %q on a plain report: %v", k, payload)
+		}
 	}
 }

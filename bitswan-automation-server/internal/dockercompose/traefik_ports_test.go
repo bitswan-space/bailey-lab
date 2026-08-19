@@ -36,7 +36,7 @@ func TestTraefikComposesNeverPublishAdminPort(t *testing.T) {
 		}
 	}
 
-	global, err := CreateTraefikDockerComposeFile(t.TempDir(), nil)
+	global, err := CreateTraefikDockerComposeFile(t.TempDir(), nil, "")
 	if err != nil {
 		t.Fatalf("global traefik compose: %v", err)
 	}
