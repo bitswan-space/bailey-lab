@@ -150,6 +150,10 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressWait(w, r)
 	case path == "tls":
 		s.handleIngressTLS(w, r)
+	case path == "tls/install-cert":
+		s.handleIngressTLSInstallCert(w, r)
+	case path == "tls/remove-cert":
+		s.handleIngressTLSRemoveCert(w, r)
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}
@@ -656,6 +660,9 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	// Put the live route table on the backend the configured mode implies: the
 	// shared wildcard certificate under aoc-dns, no ACME at all under manual.
 	reconcileTLSMode()
+	// Nothing renews an operator-installed certificate, so boot is the earliest
+	// anyone can be told one is running out.
+	warnAboutInstalledCertExpiry()
 
 	return true, nil
 }

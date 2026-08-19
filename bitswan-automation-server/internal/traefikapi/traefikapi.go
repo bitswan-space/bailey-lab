@@ -634,6 +634,74 @@ func SetWildcardCertResolver(domain, resolver string, tlsDomains []TLSDomain) (i
 	return changed, nil
 }
 
+// TLSCertEntry is one operator-installed certificate as Traefik is told about it:
+// the sanitized-hostname path segment and the in-container file paths.
+type TLSCertEntry struct {
+	HostSegment string
+	CertFile    string
+	KeyFile     string
+}
+
+// InstalledCertEntries lists the certificates registered in the TLS store. The
+// caller maps CertFile ("/tls/<segment>/full-chain.pem", a path inside the Traefik
+// container) onto the daemon's own view of the same volume when it needs to read
+// them.
+func InstalledCertEntries() []TLSCertEntry {
+	state, err := loadState(getStateFilePath(getTraefikBaseURL()))
+	if err != nil || state.TLS == nil {
+		return nil
+	}
+	entries := make([]TLSCertEntry, 0, len(state.TLS.Certificates))
+	for _, cert := range state.TLS.Certificates {
+		seg := tlsCertHostSegment(cert.CertFile)
+		if seg == "" {
+			continue // not one of ours; leave it alone
+		}
+		entries = append(entries, TLSCertEntry{
+			HostSegment: seg,
+			CertFile:    cert.CertFile,
+			KeyFile:     cert.KeyFile,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].HostSegment < entries[j].HostSegment })
+	return entries
+}
+
+// RemoveTLSCert drops the TLS store entry for hostname and reports whether there
+// was one. The files themselves are the caller's to delete: this package only owns
+// what Traefik is told about.
+//
+// Needed because an installed certificate SHADOWS an ACME one — Traefik prefers a
+// matching certificate from its file store — so a server switching back to a CA
+// mode has to be able to get rid of it, not merely stop using it.
+func RemoveTLSCert(hostname string) (bool, error) {
+	want := sanitizeHostname(hostname)
+	removed := false
+	err := modifyState(getTraefikBaseURL(), func(state *traefikDynConfig) error {
+		if state.TLS == nil {
+			return nil
+		}
+		kept := make([]traefikTLSCert, 0, len(state.TLS.Certificates))
+		for _, cert := range state.TLS.Certificates {
+			if tlsCertHostSegment(cert.CertFile) == want {
+				removed = true
+				continue
+			}
+			kept = append(kept, cert)
+		}
+		state.TLS.Certificates = kept
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return removed, nil
+}
+
+// TLSCertDirSegment is the on-disk directory name InstallTLSCerts uses for a
+// hostname, exported so a caller can find (or delete) the files it wrote.
+func TLSCertDirSegment(hostname string) string { return sanitizeHostname(hostname) }
+
 // InstalledCertHostnames lists the sanitized hostnames that have an
 // operator-installed certificate in the TLS store. Exported for the status
 // surface: whether anything is installed is what decides if a manual mode can

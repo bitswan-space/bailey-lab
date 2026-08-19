@@ -327,7 +327,18 @@ func newRegisterCmd() *cobra.Command {
 					res, err := client.VerifyEndpoint()
 					switch {
 					case err == nil && res.OK:
-						fmt.Printf("\n\n✅ %s is live — certificate issued by %q, verified end-to-end (not intercepted).\n", baileyURL, res.Issuer)
+						if res.Trust == "private" {
+							// Say exactly what was and was not verified: nothing public
+							// trusts this certificate, so every browser needs the CA
+							// installed. Claiming it is "live" without that would be a
+							// promise the server cannot keep.
+							fmt.Printf("\n\n✅ %s is live — certificate issued by %q, verified end-to-end (not intercepted).\n",
+								baileyURL, res.Issuer)
+							fmt.Println("   It is NOT signed by a public CA: browsers will warn until this server's")
+							fmt.Println("   issuing CA is trusted on each machine that uses it.")
+						} else {
+							fmt.Printf("\n\n✅ %s is live — certificate issued by %q, verified end-to-end (not intercepted).\n", baileyURL, res.Issuer)
+						}
 						verified = true
 					case err != nil:
 						// Daemon/socket hiccup — transient; keep waiting quietly.

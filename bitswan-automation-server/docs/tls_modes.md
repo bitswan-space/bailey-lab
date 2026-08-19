@@ -44,6 +44,60 @@ HTTP-01 cannot work either — that is the case `custom-dns` and `manual` exist
 for. The value is captured at registration, so a domain that later changes hands
 needs a re-register or an explicit mode.
 
+### Installing your own certificates (`manual`)
+
+```
+# One wildcard covers everything this server serves:
+bitswan ingress tls manual
+bitswan ingress tls install-cert --domain acme.example.com --certs-dir /path/to/certs
+
+# ...or a single hostname:
+bitswan ingress tls install-cert --hostname bailey.acme.example.com --certs-dir /path
+
+# Moving back onto a CA later — an installed certificate shadows an ACME one:
+bitswan ingress tls remove-cert --hostname '*.acme.example.com'
+bitswan ingress tls aoc-dns
+```
+
+Prefer `--domain`. It installs one wildcard for `*.<domain>`, which is what the
+hostnames actually need: several are registered by the daemon rather than by you
+(the Bailey console and its `--inner` twin, the device-trust onboarding host, the
+docs host) and every workspace adds more, so installing per hostname means
+chasing a set you do not control.
+
+**The directory is read by content, not by filename.** Whatever your issuer
+called the files — `fullchain.pem`/`privkey.pem`, `tls.crt`/`tls.key`,
+`cert.pem`/`key.pem`, or one combined file — the chain and key are found by their
+PEM blocks, and the full chain is preferred over a bare leaf.
+
+**The certificate is checked before anything is written**: that the key belongs to
+it, that it covers the name being installed, and that it is in date. Each of those
+otherwise fails invisibly, at handshake time, long after the install said "ok".
+
+Two things worth knowing:
+
+- A wildcard does not cover the bare domain. If your certificate has no apex SAN,
+  the install says so — any route on the domain itself will not be served.
+- **Nothing renews these.** `bitswan ingress tls` reports the expiry of every
+  installed certificate, the daemon warns at boot within 30 days of expiry, and
+  re-running `install-cert` with the replacement is the renewal (Traefik picks it
+  up without a restart).
+
+### Registration on a privately-trusted certificate
+
+`bitswan register` finishes by fetching the server's own public URL and checking
+three things: that it answers, that the certificate validates against the public
+CA roots, and that the certificate is byte-for-byte the one local Traefik holds.
+An internal CA is by definition not in the public root store, so the second check
+can never pass in `manual` mode — requiring it would make registration impossible
+on exactly the servers this mode exists for.
+
+So in a mode that contacts no CA, the check falls back to the first and third
+alone and reports the trust as *private*. The third property is the one that
+actually detects interception, and it does not depend on who signed anything.
+`register` says plainly that the certificate is not publicly trusted and that
+browsers will warn until the CA is installed on each machine.
+
 `manual` is for the case `aoc-dns` cannot cover — an internal CA, a corporate
 PKI, or DNS the operator keeps in-house on a provider that cannot be automated.
 In this mode Traefik's static configuration contains **no** ACME resolvers at
