@@ -885,6 +885,59 @@ func (c *Client) initIngress(reqBody IngressInitRequest) (*IngressInitResponse, 
 	return &result, nil
 }
 
+// IngressTLS reports the server's certificate mode and anything about it worth
+// warning an operator about.
+func (c *Client) IngressTLS() (*IngressTLSStatus, error) {
+	req, err := http.NewRequest("GET", "http://unix/ingress/tls", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	return c.ingressTLSCall(req)
+}
+
+// SetIngressTLSMode switches the certificate mode and applies it: the static
+// config is rewritten (which recreates Traefik) and the live route table is
+// reconciled onto the new backend. Long-running for the same reason as
+// InitIngress.
+func (c *Client) SetIngressTLSMode(mode string) (*IngressTLSStatus, error) {
+	bodyBytes, err := json.Marshal(IngressTLSModeRequest{Mode: mode})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix/ingress/tls", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.ingressTLSCall(req)
+}
+
+func (c *Client) ingressTLSCall(req *http.Request) (*IngressTLSStatus, error) {
+	resp, err := c.doLongRunningRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("%s", errResp.Error)
+		}
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result IngressTLSStatus
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
+}
+
 // ProvisionProtectedProxy asks the daemon to bring up the shared
 // bitswan-protected-proxy (oauth2-proxy) container that fronts every protected
 // endpoint. Requires a configured domain + reachable AOC; safe to call again

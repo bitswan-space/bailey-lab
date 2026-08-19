@@ -107,9 +107,14 @@ func loadACMEBridgeSecret() (string, error) {
 // Hostnames covered by the automation server's wildcard domain share one
 // DNS-01 wildcard certificate; anything else gets a per-hostname HTTP-01
 // certificate. Returns ("", nil) for .localhost hostnames, which use local
-// certificates instead of ACME.
+// certificates instead of ACME — and for every hostname when the server's TLS
+// mode does not use a CA at all, which is the single place that decision is made
+// (see tls_mode.go).
 func certResolverForHostname(hostname string) (string, []traefikapi.TLSDomain) {
 	if strings.HasSuffix(hostname, ".localhost") {
+		return "", nil
+	}
+	if !currentTLSMode().usesACME() {
 		return "", nil
 	}
 	if domain := getWildcardCertDomain(); domain != "" && traefikapi.HostCoveredByWildcard(hostname, domain) {
