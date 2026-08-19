@@ -370,12 +370,35 @@ func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
 	return renderTraefikStaticConfigForMode(acmeEmail, dnsChallenge, DefaultTLSMode)
 }
 
-// renderTraefikStaticConfigForMode renders the static config for a given TLS
-// mode. A mode that contacts no CA gets NO certificatesResolvers at all —
-// not even the HTTP-01 one — so a route that somehow kept a resolver name cannot
-// quietly start an ACME order that could never succeed, and nothing on the server
-// waits on a challenge that will never be answered.
+// renderTraefikStaticConfigForMode renders the static config for a mode that
+// needs no further parameters.
 func renderTraefikStaticConfigForMode(acmeEmail string, dnsChallenge bool, mode TLSMode) string {
+	return renderTraefikStaticConfigOpts(traefikStaticOptions{
+		ACMEEmail:    acmeEmail,
+		DNSChallenge: dnsChallenge,
+		Mode:         mode,
+	})
+}
+
+// traefikStaticOptions is everything the static config depends on. A struct
+// because the variations are no longer one boolean: which CA backend, whose DNS,
+// and whether a DNS-01 resolver is wanted at all.
+type traefikStaticOptions struct {
+	ACMEEmail string
+	// DNSChallenge asks for a DNS-01 wildcard resolver (the server has a domain).
+	DNSChallenge bool
+	Mode         TLSMode
+	// DNSProvider is the lego provider id for custom-dns mode.
+	DNSProvider string
+}
+
+// renderTraefikStaticConfigOpts renders the global Traefik static configuration.
+// A mode that contacts no CA gets NO certificatesResolvers at all — not even the
+// HTTP-01 one — so a route that somehow kept a resolver name cannot quietly start
+// an ACME order that could never succeed, and nothing on the server waits on a
+// challenge that will never be answered.
+func renderTraefikStaticConfigOpts(o traefikStaticOptions) string {
+	acmeEmail, dnsChallenge, mode := o.ACMEEmail, o.DNSChallenge, o.Mode
 	cfg := `entryPoints:
   web:
     address: ":80"
@@ -408,6 +431,25 @@ providers:
       httpChallenge:
         entryPoint: web
 `, acmeEmail)
+
+	if dnsChallenge && mode.usesCustomDNSProvider() {
+		// The operator's own provider. Two deliberate differences from the AOC
+		// bridge below: lego's propagation pre-flight is LEFT ON, because against a
+		// real provider API it is a correct and useful check (the bridge disables it
+		// only because it already waits for the record to be live, and because a
+		// NAT'd server often cannot reach arbitrary nameservers on :53); and the
+		// resolver keeps the same name and storage file as aoc-dns, so switching
+		// between the two modes needs no route migration and re-uses the existing
+		// ACME account and certificates.
+		cfg += fmt.Sprintf(`  %s:
+    acme:
+      email: %s
+      storage: /acme/acme-dns.json
+      dnsChallenge:
+        provider: %s
+`, dnsCertResolverName, acmeEmail, o.DNSProvider)
+		return cfg
+	}
 
 	if dnsChallenge {
 		// disablePropagationCheck: lego's default pre-flight queries the zone's
@@ -546,13 +588,17 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	tlsMode := currentTLSMode()
 	wildcardDomain := getWildcardCertDomain()
 	// The DNS-01 resolver is only configured when the challenge can actually be
-	// written: the mode has to use the AOC bridge, and the AOC has to manage the
-	// zone. Rendering it for a domain the AOC does not own gives Traefik a
-	// resolver whose every order 502s, retried forever, with the ACME bridge
-	// credentials in its environment for no reason.
-	dnsChallenge := wildcardDomain != "" && aocDNSUsable(tlsMode)
+	// written. For custom-dns that is the operator's own provider; for aoc-dns it
+	// also requires the AOC to manage the zone, because the bridge writes into the
+	// AOC's own hosted zone and refuses anything outside it. Rendering the resolver
+	// for a domain it can never write to gives Traefik an order that 502s forever,
+	// with the bridge credentials in its environment for no reason.
+	dnsChallenge := wildcardDomain != "" && canIssueWildcard(tlsMode)
+
 	var traefikEnv map[string]string
-	if dnsChallenge {
+	dnsProvider := ""
+	switch {
+	case dnsChallenge && tlsMode.usesAOCBridge():
 		secret, err := getOrCreateACMEBridgeSecret(traefikConfig)
 		if err != nil {
 			return false, err
@@ -562,9 +608,33 @@ func initTraefikIngress(verbose bool) (bool, error) {
 			"HTTPREQ_USERNAME": acmeBridgeUsername,
 			"HTTPREQ_PASSWORD": secret,
 		}
+	case dnsChallenge && tlsMode.usesCustomDNSProvider():
+		// The operator's provider credentials, and ONLY those: the AOC bridge
+		// secret has no business in Traefik's environment in this mode, and a
+		// leftover HTTPREQ_ENDPOINT would point lego at a bridge that cannot write
+		// to this zone.
+		dns := config.NewAutomationServerConfig().GetTLSDNS()
+		if err := validateCustomDNS(dns); err != nil {
+			// Refuse to render a resolver that cannot work. Falling back to the AOC
+			// bridge would be worse than failing: on a customer-owned zone it cannot
+			// succeed, and the failure would look like a DNS problem rather than a
+			// misconfiguration here.
+			return false, fmt.Errorf("TLS mode %s is selected but its DNS provider is not usable: %w",
+				tlsMode, err)
+		}
+		dnsProvider = dns.Provider
+		traefikEnv = map[string]string{}
+		for k, v := range dns.Credentials {
+			traefikEnv[k] = v
+		}
 	}
 
-	traefikStaticConfig := renderTraefikStaticConfigForMode(acmeEmail, dnsChallenge, tlsMode)
+	traefikStaticConfig := renderTraefikStaticConfigOpts(traefikStaticOptions{
+		ACMEEmail:    acmeEmail,
+		DNSChallenge: dnsChallenge,
+		Mode:         tlsMode,
+		DNSProvider:  dnsProvider,
+	})
 
 	hostHomeDir := os.Getenv("HOST_HOME")
 	traefikConfigForCompose := traefikConfig

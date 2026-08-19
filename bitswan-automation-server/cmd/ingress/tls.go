@@ -12,6 +12,9 @@ import (
 // newTLSCmd is the certificate-mode surface: how this server's public hostnames
 // get their TLS certificates, and what switching that costs.
 func newTLSCmd() *cobra.Command {
+	var dnsProvider string
+	var dnsCredentials []string
+
 	cmd := &cobra.Command{
 		Use:   "tls",
 		Short: "Show or change how the ingress obtains TLS certificates",
@@ -25,8 +28,20 @@ func newTLSCmd() *cobra.Command {
 			"  aoc-dns  Let's Encrypt over the DNS-01 challenge, solved through the AOC's zone.\n" +
 			"           Works on a server with no public inbound route at all: the CA reads DNS\n" +
 			"           and never connects to the server. This is the default.\n" +
+			"  custom-dns\n" +
+			"           The same CA over the same challenge, solved against a DNS provider you\n" +
+			"           run, using lego's provider for it. For a customer who keeps their own\n" +
+			"           zone: the AOC's bridge has no zone to write to there, but certificates\n" +
+			"           and renewal work exactly as they do on aoc-dns. Needs --dns-provider\n" +
+			"           and the provider's credentials.\n" +
 			"  manual   Serve certificates you install yourself; no CA is contacted. For an\n" +
-			"           internal CA, a corporate PKI, or a DNS provider that cannot be automated.",
+			"           internal CA, a corporate PKI, or a DNS provider that cannot be automated.\n\n" +
+			"Example:\n" +
+			"  bitswan ingress tls custom-dns --dns-provider cloudflare \\\n" +
+			"      --dns-credential CF_DNS_API_TOKEN=…\n\n" +
+			"Credentials are stored in the daemon's config volume and rendered into Traefik's\n" +
+			"environment. That file is part of a server backup, so scope the token to the zone\n" +
+			"it needs, as you would for any ACME client.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := daemon.NewClient()
@@ -43,9 +58,21 @@ func newTLSCmd() *cobra.Command {
 				if _, err := daemon.ParseTLSMode(args[0]); err != nil {
 					return err
 				}
+				credentials, err := parseCredentials(dnsCredentials)
+				if err != nil {
+					return err
+				}
 				fmt.Printf("Switching the ingress to TLS mode %q...\n", args[0])
-				status, err = client.SetIngressTLSMode(args[0])
+				status, err = client.SetIngressTLSModeWithDNS(args[0], dnsProvider, credentials)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
 			} else {
+				if dnsProvider != "" || len(dnsCredentials) > 0 {
+					return fmt.Errorf("--dns-provider/--dns-credential only apply when selecting a mode, " +
+						"e.g. 'bitswan ingress tls custom-dns --dns-provider cloudflare'")
+				}
 				status, err = client.IngressTLS()
 			}
 			if err != nil {
@@ -59,6 +86,12 @@ func newTLSCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newTLSInstallCertCmd())
 	cmd.AddCommand(newTLSRemoveCertCmd())
+
+	cmd.Flags().StringVar(&dnsProvider, "dns-provider", "",
+		"lego DNS provider id for custom-dns mode (e.g. cloudflare, route53, azuredns)")
+	cmd.Flags().StringArrayVar(&dnsCredentials, "dns-credential", nil,
+		"NAME=value environment variable the DNS provider reads; repeat for each one. "+
+			"Stating any replaces the stored set.")
 
 	return cmd
 }
@@ -158,6 +191,22 @@ func newTLSRemoveCertCmd() *cobra.Command {
 	return cmd
 }
 
+// parseCredentials turns repeated NAME=value flags into the map the daemon stores.
+func parseCredentials(pairs []string) (map[string]string, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		name, value, err := daemon.ParseCredentialFlag(pair)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = value
+	}
+	return out, nil
+}
+
 func printTLSStatus(status *daemon.IngressTLSStatus) {
 	fmt.Printf("TLS mode: %s — %s\n", status.Mode, status.Description)
 	if status.Domain != "" {
@@ -166,6 +215,10 @@ func printTLSStatus(status *daemon.IngressTLSStatus) {
 			managed = "NOT managed by the AOC — its DNS-01 challenges cannot be written here"
 		}
 		fmt.Printf("Domain:   %s (DNS %s)\n", status.Domain, managed)
+	}
+	if status.DNSProvider != "" {
+		fmt.Printf("DNS provider: %s (credentials: %s)\n",
+			status.DNSProvider, strings.Join(status.DNSCredentialNames, ", "))
 	}
 	if len(status.Certificates) > 0 {
 		fmt.Println("Installed certificates:")

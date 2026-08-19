@@ -15,6 +15,7 @@ bitswan ingress tls manual       # switch mode, and move existing routes onto it
 | Mode | Certificates from | Renewal | Needs |
 | --- | --- | --- | --- |
 | `aoc-dns` (default) | Let's Encrypt, DNS-01 solved through the AOC's zone | automatic | the server's hostnames to live in a zone the AOC controls |
+| `custom-dns` | Let's Encrypt, DNS-01 solved against your own DNS provider | automatic | a lego-supported provider and a token scoped to the zone |
 | `manual` | certificates you install | **yours to do** | nothing; no CA is contacted |
 
 `aoc-dns` is the default and is what every server registered before this setting
@@ -43,6 +44,36 @@ If your domain is not AOC-managed and the server has no public inbound route,
 HTTP-01 cannot work either — that is the case `custom-dns` and `manual` exist
 for. The value is captured at registration, so a domain that later changes hands
 needs a re-register or an explicit mode.
+
+`custom-dns` is for a customer who keeps their own DNS. The AOC's bridge has no
+zone to write to there, but nothing else about the certificate story changes: the
+same CA, the same challenge type, automatic renewal, and a registration
+verification that keeps working unchanged. Prefer it over `manual` whenever the
+provider is one lego supports — which is most of them.
+
+```
+bitswan ingress tls custom-dns --dns-provider cloudflare     --dns-credential CF_DNS_API_TOKEN=…
+```
+
+The provider id is a [lego DNS provider](https://go-acme.github.io/lego/dns/) id;
+the credentials are the environment variables that provider reads, and you can
+repeat `--dns-credential` for each. Two deliberate differences from the AOC
+bridge: lego's propagation pre-flight stays **on** (the bridge disables it only
+because it already waits for the record to be live, and because a NAT'd server
+often cannot reach arbitrary nameservers on port 53), and the resolver keeps the
+same name and ACME storage as `aoc-dns` — so switching between the two DNS-01
+modes re-uses the existing account and certificates and touches no routes.
+
+### Where the credentials live
+
+In the daemon's config volume, and rendered into Traefik's compose environment
+(mode 0600) — because Traefik is what consumes them, and they have to survive the
+daemon container being recreated. That file is part of a server backup, so a
+restic snapshot of this server contains them, encrypted with a key that is never
+escrowed. Scope the token to the zone it needs, as you would for any ACME client.
+
+`bitswan ingress tls` reports the provider and the credential **names**; values
+are never returned by the API, printed, or logged.
 
 ### Installing your own certificates (`manual`)
 
@@ -123,7 +154,7 @@ is skipped and the message names the backends that would work. A publicly
 reachable server on an unmanaged domain still waits, because there the per-host
 HTTP-01 fallback genuinely can succeed.
 
-`manual` is for the case `aoc-dns` cannot cover — an internal CA, a corporate
+`manual` is for the case neither DNS-01 mode can cover — an internal CA, a corporate
 PKI, or DNS the operator keeps in-house on a provider that cannot be automated.
 In this mode Traefik's static configuration contains **no** ACME resolvers at
 all, not even the HTTP-01 one, so nothing on the server can start a certificate

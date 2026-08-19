@@ -50,7 +50,7 @@ func TestAOCManagesDNSDefaultsToTrue(t *testing.T) {
 	if !aocManagesDNS() {
 		t.Error("an absent dns_managed must be read as managed")
 	}
-	if !aocDNSUsable(TLSModeAOCDNS) {
+	if !canIssueWildcard(TLSModeAOCDNS) {
 		t.Error("aoc-dns must remain usable when the AOC never reported the field")
 	}
 
@@ -70,7 +70,7 @@ func TestAOCManagesDNSHonoursAnExplicitValue(t *testing.T) {
 	if aocManagesDNS() {
 		t.Error("explicit false read as true")
 	}
-	if aocDNSUsable(TLSModeAOCDNS) {
+	if canIssueWildcard(TLSModeAOCDNS) {
 		t.Error("aoc-dns cannot be usable on a domain the AOC does not manage")
 	}
 }

@@ -25,6 +25,10 @@ type IngressTLSStatus struct {
 	// certificate. Reported in every mode, because their presence is what decides
 	// whether a mode switch leaves anything behind.
 	InstalledCerts []string `json:"installed_certs,omitempty"`
+	// DNSProvider / DNSCredentialNames describe a custom-dns configuration. Names
+	// only, never values: this payload reaches a terminal and the daemon's logs.
+	DNSProvider        string   `json:"dns_provider,omitempty"`
+	DNSCredentialNames []string `json:"dns_credential_names,omitempty"`
 	// CanIssueHere is false when the configured mode asks a CA that cannot
 	// validate this server — no certificate is coming, and waiting will not
 	// change that. Callers use it to fail fast instead of polling.
@@ -39,9 +43,20 @@ type IngressTLSStatus struct {
 	Warnings []string `json:"warnings,omitempty"`
 }
 
-// IngressTLSModeRequest sets the server's certificate mode.
+// IngressTLSModeRequest sets the server's certificate mode, and for custom-dns
+// the provider it should challenge against.
+//
+// Provider and credentials travel with the mode rather than in a separate call so
+// the switch is validated as a whole: selecting custom-dns and configuring the
+// provider in two steps means the server spends the gap in a mode that cannot
+// issue anything.
 type IngressTLSModeRequest struct {
 	Mode string `json:"mode"`
+	// DNSProvider is a lego provider id. Stating it REPLACES the stored provider
+	// and credentials; omitting it keeps them, so re-selecting the mode does not
+	// require re-sending secrets.
+	DNSProvider    string            `json:"dns_provider,omitempty"`
+	DNSCredentials map[string]string `json:"dns_credentials,omitempty"`
 }
 
 // handleIngressTLS handles GET /ingress/tls (status) and POST /ingress/tls (set
@@ -185,8 +200,37 @@ func (s *Server) setTLSMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cfg := config.NewAutomationServerConfig()
+
+	// Resolve the DNS configuration this mode will run with, and validate it
+	// BEFORE storing the mode. A server left in custom-dns with an unusable
+	// provider cannot issue or renew anything, and the failure would surface much
+	// later as an ACME error rather than here as a bad request.
+	dns := cfg.GetTLSDNS()
+	if req.DNSProvider != "" {
+		dns = config.TLSDNSSettings{Provider: req.DNSProvider, Credentials: req.DNSCredentials}
+	}
+	if mode.usesCustomDNSProvider() {
+		if err := validateCustomDNS(dns); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if req.DNSProvider != "" {
+		writeJSONError(w, fmt.Sprintf(
+			"a DNS provider only applies to mode %s, not %s", TLSModeCustomDNS, mode),
+			http.StatusBadRequest)
+		return
+	}
+
 	previous := currentTLSMode()
-	if err := config.NewAutomationServerConfig().SetTLSMode(string(mode)); err != nil {
+	if req.DNSProvider != "" {
+		if err := cfg.SetTLSDNS(dns); err != nil {
+			writeJSONError(w, "failed to persist the DNS provider: "+err.Error(),
+				http.StatusInternalServerError)
+			return
+		}
+	}
+	if err := cfg.SetTLSMode(string(mode)); err != nil {
 		writeJSONError(w, "failed to persist TLS mode: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -233,6 +277,7 @@ func validateTLSModeChoice(mode TLSMode) error {
 // surprise an operator.
 func tlsStatus() IngressTLSStatus {
 	mode := currentTLSMode()
+	dns := config.NewAutomationServerConfig().GetTLSDNS()
 	status := IngressTLSStatus{
 		Mode:            string(mode),
 		Description:     TLSModeDescription(mode),
@@ -241,12 +286,22 @@ func tlsStatus() IngressTLSStatus {
 		CanIssueHere:    canObtainCertificate(mode),
 		InstalledCerts:  traefikapi.InstalledCertHostnames(),
 	}
-	if status.Domain != "" && mode.usesACME() && !aocDNSUsable(mode) {
+	if status.Domain != "" && mode.usesACME() && !canIssueWildcard(mode) {
 		status.Warnings = append(status.Warnings, fmt.Sprintf(
 			"the AOC does not manage DNS for %s, so this mode cannot obtain a wildcard for it: "+
 				"hosts fall back to per-host HTTP-01, which needs inbound :80 from the internet. "+
 				"Use %s to issue here",
 			status.Domain, strings.Join(alternativeTLSModes(mode), " or ")))
+	}
+	if mode.usesCustomDNSProvider() || dns.Provider != "" {
+		status.DNSProvider = dns.Provider
+		status.DNSCredentialNames = credentialNames(dns)
+	}
+	if mode.usesCustomDNSProvider() {
+		if err := validateCustomDNS(dns); err != nil {
+			status.Warnings = append(status.Warnings,
+				"this mode cannot issue certificates as configured: "+err.Error())
+		}
 	}
 	status.Certificates = installedCertDetails()
 	for _, cert := range status.Certificates {
@@ -282,6 +337,14 @@ func tlsModeSwitchNotes(from, to TLSMode, status IngressTLSStatus) []string {
 		return []string{fmt.Sprintf("mode was already %s; the ingress was reconciled anyway", to)}
 	}
 	notes := []string{fmt.Sprintf("switched from %s to %s", from, to)}
+	if from.usesACME() && to.usesACME() && from != to {
+		// Both DNS-01 backends share the resolver name and the ACME storage, so
+		// nothing is re-issued and no route changes. Worth saying, because "0 routes
+		// reconciled" otherwise reads like the switch did not take.
+		notes = append(notes,
+			"both modes issue from the same CA over the same challenge, so existing certificates "+
+				"and routes are re-used as they are; only how the challenge is solved changed")
+	}
 	if !to.usesACME() {
 		notes = append(notes,
 			"existing certificates issued by a CA are left in Traefik's ACME store but will not be "+

@@ -36,6 +36,18 @@ const (
 	// connects to the server.
 	TLSModeAOCDNS TLSMode = "aoc-dns"
 
+	// TLSModeCustomDNS obtains the same wildcard from the same CA over the same
+	// challenge, but solves it against a DNS provider the OPERATOR runs, using
+	// lego's provider for it. For a customer who keeps their own zone: the AOC
+	// bridge has no zone to write to there, but the certificate story is otherwise
+	// identical — real certificates, automatic renewal, and a registration
+	// verification that keeps working unchanged.
+	//
+	// Only HOW the challenge is solved differs from aoc-dns, so the two modes use
+	// the same resolver name and the same ACME storage: switching between them
+	// needs no route migration and no re-issuance.
+	TLSModeCustomDNS TLSMode = "custom-dns"
+
 	// TLSModeManual serves certificates the operator installed, and asks no CA
 	// for anything. For an internal CA, a corporate PKI, or a DNS provider that
 	// cannot be automated. Certificates are installed per hostname (or once as a
@@ -45,8 +57,9 @@ const (
 
 // tlsModes is the set of accepted values, in a stable order for messages.
 var tlsModes = map[TLSMode]string{
-	TLSModeAOCDNS: "Let's Encrypt over DNS-01, solved through the AOC's zone (default)",
-	TLSModeManual: "certificates you install yourself; no CA is contacted",
+	TLSModeAOCDNS:    "Let's Encrypt over DNS-01, solved through the AOC's zone (default)",
+	TLSModeCustomDNS: "Let's Encrypt over DNS-01, solved against your own DNS provider",
+	TLSModeManual:    "certificates you install yourself; no CA is contacted",
 }
 
 // DefaultTLSMode is what a server with nothing configured runs. It must stay
@@ -99,6 +112,17 @@ func currentTLSMode() TLSMode {
 // usesACME reports whether the mode obtains certificates from a CA at all.
 func (m TLSMode) usesACME() bool { return m != TLSModeManual }
 
+// usesAOCBridge reports whether the DNS-01 challenge is solved through the AOC's
+// zone. Only aoc-dns is: the ACME bridge credentials must not appear in Traefik's
+// environment in any other mode, and a mode that solves the challenge elsewhere
+// must not inherit the bridge's propagation-check workaround.
+func (m TLSMode) usesAOCBridge() bool { return m == TLSModeAOCDNS }
+
+// usesCustomDNSProvider reports whether the mode needs an operator-configured
+// lego provider (and therefore has something to validate before it can be
+// selected at all).
+func (m TLSMode) usesCustomDNSProvider() bool { return m == TLSModeCustomDNS }
+
 // aocManagesDNS reports whether the AOC controls this server's domain — and
 // therefore whether the ACME bridge can write a challenge for it at all. The
 // bridge writes into the AOC's own hosted zone and rejects anything outside it.
@@ -115,6 +139,9 @@ func aocManagesDNS() bool {
 	}
 	return *settings.DNSManaged
 }
+
+// canIssueWildcard reports whether the mode's DNS-01 backend can actually obtain
+// the shared wildcard for this server.
 
 // isPrivateServer reports whether this server declared itself reached over a
 // private network. It matters to the certificate story for one reason: HTTP-01
@@ -142,26 +169,28 @@ func canObtainCertificate(mode TLSMode) bool {
 	if !mode.usesACME() {
 		return true
 	}
-	if aocDNSUsable(mode) {
+	if canIssueWildcard(mode) {
 		return true
 	}
 	return !isPrivateServer()
 }
 
-// aocDNSUsable reports whether the mode's DNS-01 wildcard is actually obtainable:
-// the mode has to use the AOC bridge AND the AOC has to own the zone the
-// challenge is written into.
+// canIssueWildcard reports whether the mode's DNS-01 wildcard is actually
+// obtainable: the challenge has to be writable in a zone the mode can reach.
 //
-// The absence of this check is why a bring-your-own domain fails the way it does
-// today. The AOC has published dns_managed all along — its serializer documents
-// it as the flag for "DNS-01 wildcard (AOC-managed domain) versus per-host
-// HTTP-01 (bring-your-own)" — and nothing on this side ever read it. So a server
-// on a customer's own domain asks for the wildcard anyway, the bridge answers 502
-// from a DNS endpoint on every attempt, Traefik retries an order that can never
-// complete, and registration gives up eight minutes later having named none of
-// the cause.
-func aocDNSUsable(m TLSMode) bool {
-	return m == TLSModeAOCDNS && aocManagesDNS()
+// The two DNS-01 modes differ here, and only here. custom-dns challenges against
+// a zone the OPERATOR runs, so whether the AOC manages the domain is irrelevant
+// to it. aoc-dns challenges through the AOC's bridge, which writes into the AOC's
+// own hosted zone and refuses anything outside it — so on a bring-your-own domain
+// it cannot write the challenge at all, and the absence of that check is why such
+// a domain fails the way it does today: the bridge answers 502 from a DNS
+// endpoint on every attempt, Traefik retries an order that can never complete,
+// and registration gives up eight minutes later having named none of the cause.
+func canIssueWildcard(m TLSMode) bool {
+	if m.usesCustomDNSProvider() {
+		return true
+	}
+	return m.usesAOCBridge() && aocManagesDNS()
 }
 
 // reconcileTLSMode moves the LIVE route table onto the certificate backend the
@@ -187,7 +216,7 @@ func reconcileTLSMode() {
 	resolver := ""
 	var tlsDomains []traefikapi.TLSDomain
 	switch {
-	case aocDNSUsable(mode):
+	case canIssueWildcard(mode):
 		// One wildcard shared by every host under the domain.
 		resolver = dnsCertResolverName
 		tlsDomains = traefikapi.WildcardTLSDomains(domain)
@@ -202,7 +231,7 @@ func reconcileTLSMode() {
 		fmt.Printf("Warning: could not reconcile existing routes onto TLS mode %s: %v\n", mode, err)
 		return
 	}
-	if mode.usesACME() && !aocDNSUsable(mode) {
+	if mode.usesACME() && !canIssueWildcard(mode) {
 		fmt.Printf("Warning: TLS mode %s obtains its wildcard through the AOC's zone, but the AOC "+
 			"does not manage DNS for %s — no DNS-01 challenge for it can succeed. These hosts fall "+
 			"back to per-host HTTP-01, which needs inbound :80 from the internet. Switch to a mode "+
