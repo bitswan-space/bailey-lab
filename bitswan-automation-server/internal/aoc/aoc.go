@@ -191,21 +191,48 @@ func (c *AOCClient) GetAutomationServerInfo() (*AutomationServerInfo, error) {
 // console and to tell Bailey servers apart from legacy ones. Callers treat
 // failures as non-fatal: registration must still succeed against an older AOC
 // that predates this endpoint.
+// BaileyURLReport carries the network position a server declares along with its
+// console URL. A struct rather than more positional bools: the three fields are
+// mutually exclusive states of one decision (relay / private / let the AOC
+// decide), and a call site reads far better naming which one it means.
+type BaileyURLReport struct {
+	// ForceProxy asks the AOC to route this server through the relay even if it
+	// has a public IP — the server-side counterpart of `register --force-proxy`,
+	// so DNS and domain_status agree with the tunnel the daemon opens.
+	ForceProxy bool
+	// Private declares that this server is reached over a private network (VPN,
+	// ZTNA, LAN) and must NEVER be put on the relay. The AOC publishes DNS at
+	// PrivateAddress instead of at its relay.
+	Private bool
+	// PrivateAddress is the address to publish for a private server, e.g. the
+	// VM's VPN address. Required when Private is set — without it the AOC would
+	// have a private server with no way for anyone to reach it.
+	PrivateAddress string
+}
+
 // ReportBaileyURL tells the AOC where this server's Bailey console lives. The
 // AOC treats this as the "ingress is up" signal and provisions the server's
-// public DNS, returning the resulting domain_status ("active" when a direct A
-// record works, "proxied" when the server was routed through the relay, or ""
-// from an older AOC). The caller uses a "proxied" result to start the tunnel.
-func (c *AOCClient) ReportBaileyURL(baileyURL string, forceProxy bool) (string, error) {
+// public DNS, returning the resulting domain_status: "proxied" when the wildcard
+// was pointed at the relay (the AOC's default for its own domains, since it
+// cannot reliably probe direct reachability), "private" when the server declared
+// itself privately reached and the record was pointed at the address it
+// declared, "active" for a direct A record, or "" from an older AOC.
+//
+// The caller uses a "proxied" result to start the tunnel — and a "proxied"
+// result on a report that declared Private means the AOC did not honour the
+// declaration, which is a loud failure rather than something to act on.
+func (c *AOCClient) ReportBaileyURL(baileyURL string, report BaileyURLReport) (string, error) {
 	payload := map[string]interface{}{
 		"bailey_url": baileyURL,
 	}
-	// force_proxy tells the AOC to route this server through the relay even if
-	// its public IP is reachable — the server-side counterpart of the
-	// `register --force-proxy` testing flag, so DNS and domain_status agree with
-	// the tunnel the daemon opens.
-	if forceProxy {
+	if report.ForceProxy {
 		payload["force_proxy"] = true
+	}
+	if report.Private {
+		payload["private"] = true
+		if report.PrivateAddress != "" {
+			payload["private_address"] = report.PrivateAddress
+		}
 	}
 
 	jsonBytes, err := json.Marshal(payload)

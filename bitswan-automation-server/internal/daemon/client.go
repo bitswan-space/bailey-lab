@@ -831,7 +831,18 @@ func (c *Client) RemoveCertAuthority(certName string) error {
 
 // InitIngress initializes the Traefik ingress proxy.
 func (c *Client) InitIngress(verbose bool) (*IngressInitResponse, error) {
-	reqBody := IngressInitRequest{Verbose: verbose}
+	return c.initIngress(IngressInitRequest{Verbose: verbose})
+}
+
+// InitIngressWithBindAddress initializes the ingress AND states which host
+// address Traefik publishes :80/:443 on — "" for every interface. Stating it
+// persists the choice and reconfigures a running Traefik, so this is also how an
+// already-deployed server is narrowed onto a VPN address after the fact.
+func (c *Client) InitIngressWithBindAddress(verbose bool, bindAddress string) (*IngressInitResponse, error) {
+	return c.initIngress(IngressInitRequest{Verbose: verbose, BindAddress: &bindAddress})
+}
+
+func (c *Client) initIngress(reqBody IngressInitRequest) (*IngressInitResponse, error) {
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -1374,6 +1385,11 @@ type ProxyConfig struct {
 	Proxied          bool
 	RelayAddr        string
 	RelayFingerprint string
+	// Private / PrivateAddress declare the opposite position: a server reached
+	// over a VPN, ZTNA overlay or LAN, which must never be put on the relay.
+	// Mutually exclusive with Proxied (the daemon rejects both at once).
+	Private        bool
+	PrivateAddress string
 }
 
 func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string, proxy ProxyConfig) error {
@@ -1386,6 +1402,8 @@ func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt
 		Proxied:            proxy.Proxied,
 		RelayAddr:          proxy.RelayAddr,
 		RelayFingerprint:   proxy.RelayFingerprint,
+		Private:            proxy.Private,
+		PrivateAddress:     proxy.PrivateAddress,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

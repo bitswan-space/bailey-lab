@@ -200,6 +200,18 @@ func recoverServerBringUpIngress(ctx context.Context, st *recoverServerState, st
 	}
 
 	if !step("ingress", func() (string, error) {
+		// A restored config can carry an ingress bind address that belonged to the
+		// machine that was lost — and Traefik cannot publish on an address this
+		// machine does not have, so it would never start and every step below
+		// would fail against a dead ingress. --private-address is how the operator
+		// states the new one; stating it here re-points the publish in the same
+		// call that reconfigures Traefik.
+		if o.privateAddr != "" {
+			if _, err := st.client.InitIngressWithBindAddress(false, o.privateAddr); err != nil {
+				return "", err
+			}
+			return "Traefik reconfigured on the restored route table, publishing on " + o.privateAddr, nil
+		}
 		if _, err := st.client.InitIngress(false); err != nil {
 			return "", err
 		}
@@ -239,14 +251,43 @@ func recoverServerBringUpIngress(ctx context.Context, st *recoverServerState, st
 	}
 
 	// The AOC has to repoint DNS: this is a different machine with a different IP.
+	//
+	// A private (VPN/LAN-reached) server keeps that position across a recovery —
+	// the restored config says so — but NOT its address, which belonged to the
+	// machine that was lost. So the position is re-declared from the restored
+	// config and the address from --private-address; without the flag we
+	// deliberately do not report an address at all rather than republish the dead
+	// one, and the operator is told DNS still needs pointing.
 	if !step("dns", func() (string, error) {
 		client, err := aoc.NewAOCClientWithToken(o.aocAPI, o.serverID, st.token)
 		if err != nil {
 			return "", err
 		}
-		status, err := client.ReportBaileyURL("https://bailey."+domain, false)
+		wasPrivate := false
+		if status, serr := st.client.AOCStatus(); serr == nil && status != nil {
+			wasPrivate = status.Private
+		}
+		report := aoc.BaileyURLReport{Private: wasPrivate, PrivateAddress: o.privateAddr}
+		if wasPrivate && o.privateAddr == "" {
+			st.todo = append(st.todo,
+				"point the AOC's DNS record for this server at THIS machine's private address: "+
+					"the recovery kept the server private but could not know its new address "+
+					"(re-run with --private-address, or fix the record in the AOC)")
+		}
+		status, err := client.ReportBaileyURL("https://bailey."+domain, report)
 		if err != nil {
 			return "", err
+		}
+		if wasPrivate {
+			if status == "proxied" {
+				return "private", fmt.Errorf(
+					"the AOC put this private server on its public relay; DNS now points at the relay "+
+						"and this daemon will not tunnel to it — repoint *.%s at this machine", domain)
+			}
+			if o.privateAddr != "" {
+				return "reported; private, the AOC points DNS at " + o.privateAddr, nil
+			}
+			return "reported; still private (no new address stated)", nil
 		}
 		if status == "proxied" {
 			if err := st.client.StartRelayTunnel(); err != nil {

@@ -44,6 +44,20 @@ func (s *Server) startRelayTunnel() {
 		return // not registered, or no domain
 	}
 
+	// A private server never dials the relay — full stop, before we even ask the
+	// AOC. The relay is the AOC's uniform default for its own domains, so a
+	// server deployed behind a VPN would otherwise be re-published to the public
+	// internet through the relay on the next daemon restart. This local pin is
+	// what makes that impossible rather than merely unlikely: it holds even if
+	// the AOC's record for this server is wrong, is changed later, or the AOC is
+	// rolled back to a build that doesn't know about private servers.
+	if settings.Private {
+		s.relayMu.Unlock()
+		fmt.Printf("relay: this server is registered as private (reached over a VPN or LAN at %s) — "+
+			"not dialing the AOC relay\n", privateAddressLabel(settings.PrivateAddress))
+		return
+	}
+
 	// Resolve the relay endpoint. Two sources, in order:
 	//   1. Local config set by `register --force-proxy` (--relay-addr /
 	//      --relay-fingerprint) — the testing path, forces the proxy on a
@@ -174,12 +188,35 @@ func (s *Server) handleRelayVerify(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(s.verifyPublicEndpoint(settings.Domain))
 }
 
+// privateAddressLabel renders a declared private address for a log line,
+// falling back to a phrase when the operator didn't state one (the address is
+// the AOC's to publish; a server can be private without knowing it).
+func privateAddressLabel(addr string) string {
+	if addr == "" {
+		return "an address this server did not declare"
+	}
+	return addr
+}
+
 // handleRelayStart lets `register` kick the tunnel after the AOC has just
 // provisioned the proxy path — the daemon started before the AOC knew this
 // server was proxied, so its boot-time check found nothing. Idempotent.
+//
+// Refuses outright on a private server: the caller is asking for the one thing
+// a private registration exists to prevent, so this answers with an error the
+// operator can act on rather than quietly doing nothing.
 func (s *Server) handleRelayStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := config.NewAutomationServerConfig()
+	if settings, err := cfg.GetAutomationOperationsCenterSettings(); err == nil &&
+		settings != nil && settings.Private {
+		writeJSONError(w,
+			"this server is registered as private (reached over a VPN or LAN); the AOC relay "+
+				"would republish it on the public internet. Re-register without --private to use the relay.",
+			http.StatusConflict)
 		return
 	}
 	s.startRelayTunnel()
