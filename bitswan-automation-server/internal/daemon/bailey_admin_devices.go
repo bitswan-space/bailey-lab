@@ -22,11 +22,10 @@ type adminUserDevice struct {
 }
 
 type adminUserRow struct {
-	Email         string            `json:"email"`
-	TOTPEnrolled  bool              `json:"totp_enrolled"`
-	IsServerOwner bool              `json:"is_server_owner"`
-	Devices       []adminUserDevice `json:"devices"`
-	PendingPair   *adminPendingPair `json:"pending_pair,omitempty"`
+	Email        string            `json:"email"`
+	TOTPEnrolled bool              `json:"totp_enrolled"`
+	Devices      []adminUserDevice `json:"devices"`
+	PendingPair  *adminPendingPair `json:"pending_pair,omitempty"`
 }
 
 type adminPendingPair struct {

@@ -144,8 +144,7 @@ func (s *Server) handleBaileyWorkspaceRollback(w http.ResponseWriter, r *http.Re
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
-	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+	if !callerOwnsWorkspace(email, groups, workspaceName) {
 		writeJSONError(w, "only the workspace owner can roll it back", http.StatusForbidden)
 		return
 	}

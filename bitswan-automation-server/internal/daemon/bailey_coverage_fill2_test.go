@@ -147,14 +147,15 @@ func TestGateAPI_EnrollReusesCandidateCookie(t *testing.T) {
 
 // /bailey/api/endpoints is the source for the console's "Apps you can
 // access" grid, so a row in it is a claim that the caller can open that
-// endpoint. The server owner used to get a read-only "viewer" row for every
-// endpoint on the server, which leaked third-party app hostnames, display
-// names and business processes into that grid (#337). They now see exactly
-// what they own or were granted — no more.
-func TestEndpoints_ServerOwnerGetsNoViewerRows(t *testing.T) {
+// endpoint. Owning the bailey.<domain> endpoint used to make its owner a
+// "server owner" who received a read-only "viewer" row for every endpoint on
+// the server, leaking third-party app hostnames, display names and business
+// processes into that grid (#337). That identity no longer exists: owning the
+// bailey row confers nothing at all here.
+func TestEndpoints_OwningBaileyHostConfersNothing(t *testing.T) {
 	domain := writeTestConfig(t)
 	host := "bailey." + domain
-	// Make srvowner the bailey-admin endpoint owner → server owner.
+	// Own the bailey-admin endpoint — the old god-mode qualification.
 	if err := deleteEndpoint(host); err != nil {
 		t.Fatal(err)
 	}
@@ -183,13 +184,10 @@ func TestEndpoints_ServerOwnerGetsNoViewerRows(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &listing); err != nil {
 		t.Fatal(err)
 	}
-	if !listing.IsServerOwner {
-		t.Fatal("caller not recognised as server owner")
-	}
 	var sawOwn bool
 	for _, e := range listing.Endpoints {
 		if strings.EqualFold(e.Hostname, other) {
-			t.Errorf("server owner was shown a third-party endpoint (%q, role %q) — the listing leaks", e.Hostname, e.CallerRole)
+			t.Errorf("the bailey-host owner was shown a third-party endpoint (%q, role %q) — the listing leaks", e.Hostname, e.CallerRole)
 		}
 		if e.CallerRole == "viewer" || e.CallerRole == "" {
 			t.Errorf("endpoint %q carries role %q — every listed row must be openable", e.Hostname, e.CallerRole)
@@ -199,7 +197,7 @@ func TestEndpoints_ServerOwnerGetsNoViewerRows(t *testing.T) {
 		}
 	}
 	if !sawOwn {
-		t.Errorf("server owner lost sight of an endpoint they own (%q)", own)
+		t.Errorf("caller lost sight of an endpoint they genuinely own (%q)", own)
 	}
 }
 

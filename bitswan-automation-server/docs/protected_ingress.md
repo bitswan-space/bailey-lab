@@ -102,8 +102,15 @@ Resolution order for a request to endpoint `H` by user `U`:
    `U` who owns the endpoint.
 
 `bailey.<domain>` (the management surface) is never gated — its pages apply
-their own per-page authorization — but it is registered as an endpoint on
-first sign-in so it has an owner ("the server owner") for later stages.
+their own per-page authorization. It is also registered as an endpoint on
+first sign-in, which records whoever signed in first as its `owner_email`.
+That ownership carries **no privilege of any kind**: it is bookkeeping for the
+audit listing, nothing more. It used to designate a "server owner" who could
+see every workspace and endpoint on the server and trash, restore, update,
+upgrade and roll back workspaces they did not own; that identity was removed
+(#337). Server-wide auditing is the admin-gated `/bailey/api/admin/acl`, and
+the only remaining way to act on a workspace whose owner is gone is host
+access via the CLI.
 
 ### Workspace inheritance
 

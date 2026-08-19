@@ -140,11 +140,11 @@ func TestListAccessibleWorkspaces_OwnerSeesEntry(t *testing.T) {
 	}
 }
 
-// The server owner (recorded owner of bailey.<domain>) is NOT a god-mode
-// reader of the workspace list (#337). They see the workspaces they own or
-// were granted, exactly like anyone else — a third party's workspace must
-// not appear, because the gate would refuse them at its door.
-func TestListAccessibleWorkspaces_ServerOwnerSeesOnlyOwnWorkspaces(t *testing.T) {
+// Owning bailey.<domain> is not a god-mode read of the workspace list
+// (#337). Its owner sees the workspaces they own or were granted, exactly
+// like anyone else — a third party's workspace must not appear, because the
+// gate would refuse them at its door.
+func TestListAccessibleWorkspaces_BaileyHostOwnerSeesOnlyOwnWorkspaces(t *testing.T) {
 	domain := writeTestConfig(t)
 	host := "bailey." + domain
 	if err := deleteEndpoint(host); err != nil {
@@ -168,10 +168,10 @@ func TestListAccessibleWorkspaces_ServerOwnerSeesOnlyOwnWorkspaces(t *testing.T)
 
 	resp := listWorkspacesAs(t, "lawsrv@example.com", host)
 	if findWorkspace(resp, other) != nil {
-		t.Errorf("server owner was shown a third-party workspace %q — the list leaks", other)
+		t.Errorf("the bailey-host owner was shown a third-party workspace %q — the list leaks", other)
 	}
 	if findWorkspace(resp, own) == nil {
-		t.Errorf("server owner lost sight of their own workspace %q: %+v", own, resp.Workspaces)
+		t.Errorf("the bailey-host owner lost sight of their own workspace %q: %+v", own, resp.Workspaces)
 	}
 }
 
@@ -490,16 +490,16 @@ func TestWorkspaceOwnership_AnchoredOnDashboard(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !callerOwnsWorkspace(creator, nil, false, ws) {
+	if !callerOwnsWorkspace(creator, nil, ws) {
 		t.Error("recorded dashboard owner should own the workspace")
 	}
-	if !callerOwnsWorkspace("coowner@example.com", nil, false, ws) {
+	if !callerOwnsWorkspace("coowner@example.com", nil, ws) {
 		t.Error("dashboard owner-GRANT should confer workspace ownership (the reported bug)")
 	}
-	if callerOwnsWorkspace("viewer@example.com", nil, false, ws) {
+	if callerOwnsWorkspace("viewer@example.com", nil, ws) {
 		t.Error("a dashboard access grant must NOT confer ownership")
 	}
-	if callerOwnsWorkspace("stranger@example.com", nil, false, ws) {
+	if callerOwnsWorkspace("stranger@example.com", nil, ws) {
 		t.Error("a non-member must not own the workspace")
 	}
 
@@ -508,7 +508,7 @@ func TestWorkspaceOwnership_AnchoredOnDashboard(t *testing.T) {
 	if err := addGrant(gitopsHost, "email", "gitopsonly@example.com", "owner", creator); err != nil {
 		t.Fatal(err)
 	}
-	if callerOwnsWorkspace("gitopsonly@example.com", nil, false, ws) {
+	if callerOwnsWorkspace("gitopsonly@example.com", nil, ws) {
 		t.Error("owning the gitops endpoint must NOT confer workspace ownership when a dashboard exists")
 	}
 
@@ -517,7 +517,7 @@ func TestWorkspaceOwnership_AnchoredOnDashboard(t *testing.T) {
 	if _, err := registerEndpoint(nd+"-gitops."+domain, "legacy@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if !callerOwnsWorkspace("legacy@example.com", nil, false, nd) {
+	if !callerOwnsWorkspace("legacy@example.com", nil, nd) {
 		t.Error("--no-dashboard workspace should fall back to the gitops endpoint owner")
 	}
 }

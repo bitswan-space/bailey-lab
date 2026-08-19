@@ -182,11 +182,13 @@ func RestoreWorkspace(workspaceName string, writer io.Writer) error {
 	return nil
 }
 
-// EmptyTrashFor permanently removes every trashed workspace the
-// caller owns (resolved by checking the workspace's gitops-endpoint
-// ACL row). Server owners empty the whole trash regardless of who
-// owns each entry.
-func EmptyTrashFor(callerEmail string, callerGroups []string, isServerOwner bool, writer io.Writer) error {
+// EmptyTrashFor permanently removes every trashed workspace the caller owns,
+// resolved on the workspace's dashboard ACL endpoint (workspaceRoleFor), and
+// skips the rest. Entries owned by other people are never touched — there is
+// no server-wide override: this call hard-deletes data, and no browser
+// session should be able to do that to a workspace it does not own. Host
+// access remains the escape hatch (`bitswan workspace remove`).
+func EmptyTrashFor(callerEmail string, callerGroups []string, writer io.Writer) error {
 	homeDir, err := config.GetRealUserHomeDir()
 	if err != nil {
 		homeDir = os.Getenv("HOME")
@@ -212,16 +214,13 @@ func EmptyTrashFor(callerEmail string, callerGroups []string, isServerOwner bool
 		if !IsWorkspaceTrashed(name) {
 			continue
 		}
-		if !isServerOwner {
-			// Only empty trash entries the caller owns. The workspace's ACL
-			// anchor is its dashboard endpoint (see workspaceRoleFor) — the same
-			// surface the UI and every other owner check use.
-			// An errored lookup skips the entry — never deletes on a
-			// role we couldn't confirm.
-			if role, err := workspaceRoleFor(name, domain, callerEmail, callerGroups); err != nil || role != roleOwner {
-				fmt.Fprintf(writer, "Skipping %s (not owner).\n", name)
-				continue
-			}
+		// Only empty trash entries the caller owns. The workspace's ACL anchor
+		// is its dashboard endpoint (see workspaceRoleFor) — the same surface
+		// the UI and every other owner check use. An errored lookup skips the
+		// entry: never delete on a role we couldn't confirm.
+		if role, err := workspaceRoleFor(name, domain, callerEmail, callerGroups); err != nil || role != roleOwner {
+			fmt.Fprintf(writer, "Skipping %s (not owner).\n", name)
+			continue
 		}
 		fmt.Fprintf(writer, "Permanently removing trashed workspace %s...\n", name)
 		if err := RunWorkspaceRemove(name, writer); err != nil {

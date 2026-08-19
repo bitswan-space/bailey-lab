@@ -42,10 +42,36 @@ func withTrustedDevice(t *testing.T, r *http.Request, email string) *http.Reques
 
 // --- callerOwnsWorkspace (the auth check) -------------------------------
 
-func TestCallerOwnsWorkspace_ServerOwnerOverride(t *testing.T) {
-	writeTestConfig(t)
-	if !callerOwnsWorkspace("anyone@example.com", nil, true, "anyworkspace") {
-		t.Error("server owner should own any workspace")
+// There is no override. Owning the bailey.<domain> endpoint — the old
+// "server owner" qualification, handed out to whoever first signed in to the
+// console host — must confer no ownership of anyone's workspace. It used to
+// grant trash, restore, update, upgrade and rollback on every workspace on
+// the server, which contradicts Bailey's documented model (a role grants
+// capabilities, never blanket reach; deliberately no god-mode admin).
+func TestCallerOwnsWorkspace_OwningBaileyHostConfersNothing(t *testing.T) {
+	domain := writeTestConfig(t)
+	baileyHost := "bailey." + domain
+	if err := deleteEndpoint(baileyHost); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint(baileyHost, "srvowner@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// A workspace owned by somebody else.
+	ws := "notmine"
+	if _, err := registerEndpoint(ws+"-dashboard."+domain, "someone@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if callerOwnsWorkspace("srvowner@example.com", nil, ws) {
+		t.Error("the bailey-host owner was treated as owner of someone else's workspace")
+	}
+	// And a workspace that does not exist at all is owned by nobody.
+	if callerOwnsWorkspace("srvowner@example.com", nil, "anyworkspace") {
+		t.Error("the bailey-host owner was treated as owner of an unregistered workspace")
+	}
+	// The real owner is unaffected.
+	if !callerOwnsWorkspace("someone@example.com", nil, ws) {
+		t.Error("the genuine workspace owner was denied")
 	}
 }
 
@@ -55,10 +81,10 @@ func TestCallerOwnsWorkspace_DirectGitopsOwner(t *testing.T) {
 	if _, err := registerEndpoint(ws+"-gitops."+domain, "gitops-owner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	if !callerOwnsWorkspace("gitops-owner@example.com", nil, false, ws) {
+	if !callerOwnsWorkspace("gitops-owner@example.com", nil, ws) {
 		t.Error("direct gitops owner not recognised")
 	}
-	if callerOwnsWorkspace("stranger@example.com", nil, false, ws) {
+	if callerOwnsWorkspace("stranger@example.com", nil, ws) {
 		t.Error("stranger recognised as owner")
 	}
 }
@@ -92,6 +118,35 @@ func TestWorkspaceAction_NonOwnerForbidden(t *testing.T) {
 		w := dispatch(withTrustedDevice(t, baileyReq(http.MethodPost, "/bailey/api/workspaces/"+ws+"/"+action, "intruder@example.com"), "intruder@example.com"))
 		if w.Code != http.StatusForbidden {
 			t.Errorf("%s by non-owner = %d, want 403; body=%s", action, w.Code, w.Body.String())
+		}
+	}
+}
+
+// End to end at the dispatcher: owning the bailey.<domain> endpoint gets a
+// 403 on EVERY write action against a workspace the caller doesn't own. This
+// is the through-the-door version of
+// TestCallerOwnsWorkspace_OwningBaileyHostConfersNothing — the override used
+// to be resolved per handler, so each one needs its own guard against the
+// two-line `serverOwner, _ := callerIsServerOwner(...)` idiom creeping back.
+func TestWorkspaceAction_BaileyHostOwnerStillForbidden(t *testing.T) {
+	domain := writeTestConfig(t)
+	baileyHost := "bailey." + domain
+	if err := deleteEndpoint(baileyHost); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint(baileyHost, "srvowner@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	ws := "godmodews"
+	if _, err := registerEndpoint(ws+"-dashboard."+domain, "realowner@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"trash", "restore", "update", "upgrade", "rollback"} {
+		r := baileyReq(http.MethodPost, "/bailey/api/workspaces/"+ws+"/"+action, "srvowner@example.com")
+		r.Host = baileyHost
+		w := dispatch(withTrustedDevice(t, r, "srvowner@example.com"))
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s by the bailey-host owner = %d, want 403; body=%s", action, w.Code, w.Body.String())
 		}
 	}
 }

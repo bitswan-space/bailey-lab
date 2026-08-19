@@ -52,10 +52,11 @@ type listAccessibleResponse struct {
 // uses — reports a real role (owner, grantee, or member of a granted group)
 // on the workspace's ACL endpoint.
 //
-// SECURITY (#337): there is deliberately NO server-wide override here. An
-// earlier version listed every workspace on the server for the "server
-// owner" (the recorded owner of the bailey.<domain> endpoint, which is set
-// by whoever first signs in to the console host). That disclosed the names,
+// SECURITY (#337): there is deliberately NO server-wide override here, and
+// no identity left that could carry one. An earlier version listed every
+// workspace on the server for the "server owner" — the recorded owner of the
+// bailey.<domain> endpoint, set by whoever first signs in to the console
+// host. That disclosed the names,
 // build identifiers and membership of other people's workspaces to someone
 // the gate then refused at the door — the list and the enforcement
 // disagreed, and the list was the one that was wrong. It also contradicted
@@ -475,13 +476,22 @@ func workspaceRoleFor(workspaceName, domain, email string, groups []string) (end
 }
 
 // callerOwnsWorkspace is the auth check for trash + restore + update +
-// empty-trash. A caller owns the workspace if they own its dashboard ACL
-// endpoint (recorded owner_email OR an owner grant), OR they're the server
-// owner (audit override).
-func callerOwnsWorkspace(callerEmail string, callerGroups []string, isServerOwner bool, workspaceName string) bool {
-	if isServerOwner {
-		return true
-	}
+// empty-trash. A caller owns the workspace if — and only if — they own its
+// dashboard ACL endpoint: its recorded owner_email, or an owner grant on it.
+//
+// There is no override. This used to return true unconditionally for the
+// "server owner" (the recorded owner of the bailey.<domain> endpoint), which
+// let one arbitrary account trash, restore, update, upgrade and roll back
+// every workspace on the server. That identity has been removed entirely.
+// Bailey's own documented model is that a role grants capabilities, never
+// blanket reach over other people's data, and that there is deliberately no
+// god-mode admin; the override contradicted both.
+//
+// The escape hatch for a workspace whose owner is gone is host access:
+// `bitswan workspace remove` over the daemon's local socket, authorised by
+// being able to reach the machine. That is the right place for it — it cannot
+// be reached from a browser session.
+func callerOwnsWorkspace(callerEmail string, callerGroups []string, workspaceName string) bool {
 	sc, _ := config.NewAutomationServerConfig().LoadConfig()
 	if sc == nil {
 		return false
@@ -504,8 +514,7 @@ func (s *Server) handleTrashWorkspace(w http.ResponseWriter, r *http.Request, em
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
-	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+	if !callerOwnsWorkspace(email, groups, workspaceName) {
 		http.Error(w, `{"error":"only the workspace owner can trash it"}`, http.StatusForbidden)
 		return
 	}
@@ -537,8 +546,7 @@ func (s *Server) handleRestoreWorkspace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
-	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+	if !callerOwnsWorkspace(email, groups, workspaceName) {
 		http.Error(w, `{"error":"only the workspace owner can restore it"}`, http.StatusForbidden)
 		return
 	}
@@ -573,7 +581,6 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request, email 
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
 
 	// Stream the log just like the create flow — empty-trash can also
 	// take a while if there are several workspaces to tear down.
@@ -599,7 +606,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request, email 
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- EmptyTrashFor(email, groups, serverOwner, pw)
+		done <- EmptyTrashFor(email, groups, pw)
 		pw.Close()
 	}()
 	// The relay goroutine writes `log` events to `w` as output streams in. We
