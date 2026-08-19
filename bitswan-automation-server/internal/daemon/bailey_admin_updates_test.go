@@ -320,13 +320,88 @@ func TestAdminUpdates_MarksWhatTheCallerCanApply(t *testing.T) {
 	// can_update that matches the owner check, and never be one the caller can't
 	// even see.
 	for _, ws := range body.Workspaces {
-		serverOwner, _ := callerIsServerOwner(caller, baileyReq(http.MethodGet, "/x", caller))
-		if want := callerOwnsWorkspace(caller, nil, serverOwner, ws.Name); ws.CanUpdate != want {
+		if want := callerOwnsWorkspace(caller, nil, ws.Name); ws.CanUpdate != want {
 			t.Errorf("%s can_update = %v, want %v", ws.Name, ws.CanUpdate, want)
 		}
-		if !ws.CanUpdate && workspaceRoleFor(ws.Name, domain, caller, nil) == roleNone {
+		role, err := workspaceRoleFor(ws.Name, domain, caller, nil)
+		if !ws.CanUpdate && (err != nil || role == roleNone) {
 			t.Errorf("%s is listed but the caller has no role on it", ws.Name)
 		}
+	}
+}
+
+// The Updates view must not carry the removed "server owner" override either
+// (#337). An earlier draft of this view computed
+// `callerOwns := serverOwner || callerRole(name) == roleOwner`, which had two
+// effects for whoever owned the bailey.<domain> endpoint: every workspace
+// became can_update/can_rollback, AND — because the drop rule is
+// `!can && callerRole == roleNone` — nothing was dropped, so the page listed
+// every stale workspace on the server by name and version. Owning the bailey
+// row must confer nothing here.
+func TestAdminUpdates_BaileyHostOwnerGetsNoCapability(t *testing.T) {
+	domain := writeTestConfig(t)
+	const caller = "srvowner@example.com"
+	baileyHost := "bailey." + domain
+	if err := deleteEndpoint(baileyHost); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint(baileyHost, caller, "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// A workspace owned by somebody else, with a rollback point in the ledger.
+	if _, err := registerEndpoint("notourws-dashboard."+domain, "someone@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbInsertUpdateHistory(updateHistoryEntry{
+		Actor: "x@example.com", TargetKind: updateTargetWorkspace,
+		TargetName: "notourws", FromVersion: "g1", ToVersion: "g2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{version: "v2026.07.07.21-git-test"}
+	w := newRecorder()
+	srv.handleAdminUpdates(w, baileyReq(http.MethodGet, "/bailey/api/admin/updates", caller, adminGrp))
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin updates = %d, want 200", w.Code)
+	}
+	var body struct {
+		Workspaces []struct {
+			Name      string `json:"name"`
+			CanUpdate bool   `json:"can_update"`
+		} `json:"workspaces"`
+		History []struct {
+			TargetKind  string `json:"target_kind"`
+			TargetName  string `json:"target_name"`
+			CanRollback bool   `json:"can_rollback"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, w.Body.String())
+	}
+	// Nothing they don't own is offered — and nothing they have no role on is
+	// even listed. (Whether a workspace is stale depends on docker state, so
+	// this asserts the negative, which holds either way.)
+	for _, ws := range body.Workspaces {
+		if ws.CanUpdate && !callerOwnsWorkspace(caller, nil, ws.Name) {
+			t.Errorf("%s offered can_update to the bailey-host owner, who does not own it", ws.Name)
+		}
+		if ws.Name == "notourws" {
+			t.Errorf("someone else's workspace %q was listed to the bailey-host owner", ws.Name)
+		}
+	}
+	var sawRow bool
+	for _, h := range body.History {
+		if h.TargetKind != updateTargetWorkspace || h.TargetName != "notourws" {
+			continue
+		}
+		sawRow = true
+		if h.CanRollback {
+			t.Error("the bailey-host owner was offered rollback on someone else's workspace")
+		}
+	}
+	if !sawRow {
+		t.Fatal("seeded history row missing from the payload — the assertion above proved nothing")
 	}
 }
 

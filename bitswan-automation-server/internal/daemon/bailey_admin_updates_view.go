@@ -31,7 +31,6 @@ func (s *Server) handleAdminUpdates(w http.ResponseWriter, r *http.Request) {
 	server := detectServerVersion(s.version)
 
 	email, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
 	sc, _ := config.NewAutomationServerConfig().LoadConfig()
 	domain := ""
 	if sc != nil {
@@ -48,14 +47,21 @@ func (s *Server) handleAdminUpdates(w http.ResponseWriter, r *http.Request) {
 		}
 		v := roleNone
 		if domain != "" {
-			v = workspaceRoleFor(name, domain, email, groups)
+			// An errored lookup stays roleNone, so the row is dropped rather
+			// than offered — a role we could not confirm is not a capability
+			// (#337).
+			if role, err := workspaceRoleFor(name, domain, email, groups); err == nil {
+				v = role
+			}
 		}
 		roleCache[key] = v
 		return v
 	}
 	// Mirrors callerOwnsWorkspace — the check handleUpgradeWorkspace and
-	// handleBaileyWorkspaceRollback actually enforce.
-	callerOwns := func(name string) bool { return serverOwner || callerRole(name) == roleOwner }
+	// handleBaileyWorkspaceRollback actually enforce. Owning the workspace's
+	// dashboard ACL endpoint is the whole of it: there is no server-wide
+	// override to widen this, and nothing to widen it with (#337).
+	callerOwns := func(name string) bool { return callerRole(name) == roleOwner }
 
 	type wsUpdate struct {
 		Name      string            `json:"name"`
