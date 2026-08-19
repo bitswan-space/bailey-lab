@@ -331,6 +331,36 @@ def test_grype_db_missing_is_its_own_diagnosis(tmp_path, monkeypatch):
     assert [p["name"] for p in scan["packages"]] == ["openssl"]
 
 
+def test_unreadable_db_is_not_reported_as_a_missing_one(tmp_path, monkeypatch):
+    """The real #370/#271 failure: the daemon downloads the shared DB as root and
+    grype makes its schema dir 0700, but gitops scans as user1000 — so the DB is
+    present and unreadable. Reporting that as "not downloaded yet" points the
+    operator at a download that already succeeded and never resolves."""
+    d = str(tmp_path / "sc")
+    monkeypatch.setattr(scs, "supply_chain_dir", lambda: d)
+    os.makedirs(d)
+    k = scs._key("sha256:abc")
+    with open(scs._sbom_path(d, k), "w") as f:
+        json.dump({"artifacts": [{"name": "openssl", "version": "3.0.11"}]}, f)
+
+    denied = (
+        "[0000] ERROR failed to access database file: "
+        "stat /grype-db/6/vulnerability.db: permission denied"
+    )
+
+    async def fake_ensure():
+        return False, denied
+
+    monkeypatch.setattr(scs, "ensure_vuln_db", fake_ensure)
+    asyncio.run(scs.scan_image("internal/ws-x:sha1", "sha256:abc"))
+
+    scan = scs.read_image_scan("sha256:abc")
+    assert scan["code"] == scs.FAIL_DB_UNREADABLE
+    assert scan["code"] != scs.FAIL_DB_MISSING
+    assert "not allowed to read it" in scan["reason"]
+    assert denied in scan["reason"]  # the operator gets grype's own words
+
+
 def test_missing_grype_binary_reports_scanner_missing(tmp_path, monkeypatch):
     """A gitops image without grype is a different problem from a missing DB —
     `_run` turns the spawn failure into rc 127 and the code says so."""

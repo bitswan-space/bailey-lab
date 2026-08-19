@@ -89,6 +89,7 @@ def _atomic_write(path: str, text: str) -> None:
 # readable and old cached markers (no `code`) still parse.
 FAIL_SBOM = "sbom-failed"  # syft, on the infra-driver, couldn't read the image
 FAIL_DB_MISSING = "db-missing"  # the daemon-owned vulnerability DB isn't here yet
+FAIL_DB_UNREADABLE = "db-unreadable"  # it IS here, but this process can't read it
 FAIL_SCANNER_MISSING = "scanner-missing"  # no grype binary in this gitops image
 FAIL_SCAN = "scan-failed"  # grype ran and failed / returned something unusable
 
@@ -235,6 +236,31 @@ async def ensure_vuln_db() -> tuple[bool, str]:
         return _db_ready, detail
 
 
+def _classify_db_failure(detail: str) -> tuple[str, str]:
+    """Turn `grype db status`'s complaint into a code + a plain-language cause.
+
+    "Present but unreadable" is a genuinely different problem from "not
+    downloaded yet" and needs a different fix, so it must not be reported as the
+    latter: the daemon writes the shared DB as root and workspaces scan as
+    user1000, so a permissions slip on the shared volume looks exactly like a DB
+    that never arrived while actually never resolving on its own."""
+    low = (detail or "").lower()
+    if "not installed" in low:
+        return FAIL_SCANNER_MISSING, "grype is not installed in this gitops image."
+    if "permission denied" in low or "operation not permitted" in low:
+        return (
+            FAIL_DB_UNREADABLE,
+            "the shared vulnerability database is on this host but this workspace "
+            "is not allowed to read it — the automation-server daemon owns that "
+            "volume and must leave it readable.",
+        )
+    return (
+        FAIL_DB_MISSING,
+        "the shared grype vulnerability database is not available on this host "
+        "yet — the automation-server daemon downloads and refreshes it.",
+    )
+
+
 # ── parsing ──────────────────────────────────────────────────────────────────
 def parse_sbom(raw: dict) -> list[dict]:
     """syft-json `artifacts[]` → [{name, version, type}] (named packages only)."""
@@ -339,14 +365,11 @@ async def scan_image(image_ref: str, image_id: str, *, force_cve: bool = False) 
         # permanent answer. Record the real state instead and let it be retried.
         ready, db_detail = await ensure_vuln_db()
         if not ready:
+            code, why = _classify_db_failure(db_detail)
             _write_failure(
                 cve_path,
-                FAIL_SCANNER_MISSING
-                if "not installed" in db_detail
-                else FAIL_DB_MISSING,
-                "the shared grype vulnerability database is not available on this "
-                "host yet — the automation-server daemon downloads and refreshes "
-                f"it. `grype db status`: {db_detail or 'no output'}",
+                code,
+                f"{why} `grype db status`: {db_detail or 'no output'}",
             )
             outcome = "unavailable"
             return

@@ -51,6 +51,10 @@ const SCAN_FAILURES: Record<string, { title: string; hint: string }> = {
     title: 'Waiting for the shared vulnerability database',
     hint: "The automation server downloads grype's vulnerability database once per host and shares it read-only with every workspace. It isn't on this host yet — on a fresh or briefly-offline host the first download can fail, and it retries in the background. Scans pick it up automatically once it lands.",
   },
+  'db-unreadable': {
+    title: 'The shared vulnerability database isn’t readable',
+    hint: 'The database is on this host, but this workspace isn’t permitted to read it. The automation server owns that shared volume and has to leave it readable by the workspaces — this does not resolve on its own, so an operator needs to look at the server.',
+  },
   'scanner-missing': {
     title: 'The vulnerability scanner is missing from this workspace',
     hint: "grype isn't installed in this workspace's gitops container, which usually means the workspace is running an old gitops image. Updating the workspace restores scanning.",

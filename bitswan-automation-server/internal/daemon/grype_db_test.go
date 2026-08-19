@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 )
 
 // gitopsImageForGrype prefers the operator's explicit pin. (The fallback path
@@ -71,5 +74,40 @@ func TestRecordGrypeDBRefresh_TracksLastErrorAndSuccess(t *testing.T) {
 	}
 	if health.LastSuccess.IsZero() {
 		t.Error("LastSuccess not recorded after a successful refresh")
+	}
+}
+
+// The daemon writes the shared DB as root and grype makes its schema dir 0700,
+// but workspaces scan as user1000 — so the refresh MUST leave the volume
+// readable or every scan on every workspace fails with "permission denied"
+// (issues #370 / #271). The chmod also has to survive a failed update, so an
+// already-broken host repairs itself on the next cycle.
+func TestGrypeRefreshArgs_LeavesTheSharedDBReadable(t *testing.T) {
+	args := grypeRefreshArgs("bitswan/gitops:pinned")
+	joined := strings.Join(args, " ")
+
+	if !strings.Contains(joined, "chmod -R a+rX /grype-db") {
+		t.Errorf("refresh does not make the shared DB readable: %s", joined)
+	}
+	// Capital X: traverse on directories only — never mark the DB executable.
+	if strings.Contains(joined, "a+rx ") {
+		t.Errorf("chmod uses a+rx (would mark files executable); want a+rX: %s", joined)
+	}
+	// The chmod must not be gated on the update succeeding.
+	if strings.Contains(joined, "grype db update && chmod") {
+		t.Errorf("chmod is skipped when the update fails, so a broken host never repairs: %s", joined)
+	}
+	// The update's exit code still decides whether the refresh reports failure.
+	if !strings.Contains(joined, "exit $rc") {
+		t.Errorf("refresh swallows the update's exit code: %s", joined)
+	}
+	if !strings.Contains(joined, dockercompose.GrypeDBVolume+":/grype-db") {
+		t.Errorf("refresh does not mount the shared volume: %s", joined)
+	}
+	if !strings.Contains(joined, "GRYPE_DB_CACHE_DIR=/grype-db") {
+		t.Errorf("refresh does not point grype at the shared volume: %s", joined)
+	}
+	if args[len(args)-3] != "bitswan/gitops:pinned" {
+		t.Errorf("image is not the argument before `-c <script>`: %v", args)
 	}
 }

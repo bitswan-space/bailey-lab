@@ -114,20 +114,48 @@ func gitopsImageForGrype() string {
 	return img
 }
 
+// The refresh runs as root (the throwaway container's default user), and grype
+// creates its schema directory mode 0700 — root-only. But a workspace's gitops
+// does NOT scan as root: start.sh drops the app to user1000. So a DB downloaded
+// perfectly still left every scan on every workspace failing with
+//
+//	failed to access database file: stat /grype-db/6/vulnerability.db: permission denied
+//
+// permanently, on every host — the real cause of issues #370 / #271, and the
+// reason #323's staleness fix did not make scans work. Whoever writes the shared
+// volume owns leaving it readable, so the refresh chmods it afterwards.
+// `a+rX` adds read for everyone and traverse on DIRECTORIES only (capital X), so
+// the DB file itself never becomes executable.
+//
+// The chmod runs even when `grype db update` fails, and the update's exit code is
+// preserved: an existing DB with bad permissions must be repaired on the next
+// cycle whether or not there was a new database to fetch. That makes already-broken
+// hosts self-heal on the daemon's next refresh, with no manual intervention.
+const grypeRefreshScript = `grype db update; rc=$?; chmod -R a+rX /grype-db 2>/dev/null || true; exit $rc`
+
+// grypeRefreshArgs builds the `docker run` argv that refreshes the shared DB.
+// Split out from refreshGrypeDB so the contract above is unit-testable without
+// a Docker daemon.
+func grypeRefreshArgs(img string) []string {
+	return []string{"run", "--rm",
+		"-v", dockercompose.GrypeDBVolume + ":/grype-db",
+		"-e", "GRYPE_DB_CACHE_DIR=/grype-db",
+		"--entrypoint", "sh",
+		img, "-c", grypeRefreshScript,
+	}
+}
+
 // refreshGrypeDB runs `grype db update` into the shared volume using the pinned
-// gitops image's grype. Best-effort by contract: a failure leaves the previous
-// DB in place (scans then match against the last-good DB) and is never fatal.
+// gitops image's grype, then makes the result readable by the unprivileged user
+// the workspaces actually scan as. Best-effort by contract: a failure leaves the
+// previous DB in place (scans then match against the last-good DB) and is never
+// fatal.
 func refreshGrypeDB(ctx context.Context) error {
 	img := gitopsImageForGrype()
 	if img == "" {
 		return fmt.Errorf("no gitops image available to source grype from")
 	}
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm",
-		"-v", dockercompose.GrypeDBVolume+":/grype-db",
-		"-e", "GRYPE_DB_CACHE_DIR=/grype-db",
-		"--entrypoint", "grype",
-		img, "db", "update",
-	)
+	cmd := exec.CommandContext(ctx, "docker", grypeRefreshArgs(img)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("grype db update (%s): %w: %s", img, err, strings.TrimSpace(string(out)))
 	}

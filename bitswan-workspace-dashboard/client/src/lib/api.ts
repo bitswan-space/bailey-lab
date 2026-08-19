@@ -687,6 +687,7 @@ export interface SupplyChainReport {
   status: string;
   /** When `status` is unavailable: WHICH part of the scan broke —
    *  `db-missing` (the daemon-owned grype vuln DB isn't on this host yet),
+   *  `db-unreadable` (it is here, but this workspace may not read it),
    *  `scanner-missing` (no grype in this gitops image), `sbom-failed` (syft, on
    *  the infra-driver, couldn't read the image) or `scan-failed` (grype ran and
    *  failed). Absent on older gitops builds. */
