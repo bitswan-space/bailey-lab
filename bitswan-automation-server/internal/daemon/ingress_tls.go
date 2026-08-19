@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
@@ -23,6 +25,10 @@ type IngressTLSStatus struct {
 	// certificate. Reported in every mode, because their presence is what decides
 	// whether a mode switch leaves anything behind.
 	InstalledCerts []string `json:"installed_certs,omitempty"`
+	// Certificates is the detail behind InstalledCerts: what each one is and when
+	// it expires. Nothing renews these, so the expiry is the operationally
+	// important field.
+	Certificates []InstalledCertInfo `json:"certificates,omitempty"`
 	// Warnings are conditions that are not errors but will surprise someone: a
 	// manual mode with no certificate installed, or installed certificates that
 	// now shadow an ACME mode.
@@ -44,6 +50,111 @@ func (s *Server) handleIngressTLS(w http.ResponseWriter, r *http.Request) {
 		s.setTLSMode(w, r)
 	default:
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleIngressTLSInstallCert handles POST /ingress/tls/install-cert.
+func (s *Server) handleIngressTLSInstallCert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req IngressTLSInstallRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.CertsDir == "" {
+		writeJSONError(w, "certs_dir is required", http.StatusBadRequest)
+		return
+	}
+
+	hostname, err := installTargetHostname(req)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	info, notes, err := installCertificate(hostname, req.CertsDir)
+	if err != nil {
+		// A certificate that cannot serve traffic is a bad request, not a server
+		// error: the operator supplied it and the message says what is wrong with it.
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	status := tlsStatus()
+	status.Warnings = append(notes, status.Warnings...)
+	if currentTLSMode().usesACME() {
+		status.Warnings = append(status.Warnings, fmt.Sprintf(
+			"this server's TLS mode is %s, which renews from a CA; Traefik prefers a matching "+
+				"installed certificate, so %s is now served from the file you just installed. "+
+				"Switch to mode %s, or remove it with 'bitswan ingress tls remove-cert'",
+			currentTLSMode(), info.Hostname, TLSModeManual))
+	}
+	writeJSON(w, status)
+}
+
+// handleIngressTLSRemoveCert handles POST /ingress/tls/remove-cert.
+func (s *Server) handleIngressTLSRemoveCert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req IngressTLSRemoveCertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Hostname == "" {
+		writeJSONError(w, "hostname is required", http.StatusBadRequest)
+		return
+	}
+
+	removed, err := traefikapi.RemoveTLSCert(req.Hostname)
+	if err != nil {
+		writeJSONError(w, "failed to remove the certificate: "+err.Error(),
+			http.StatusInternalServerError)
+		return
+	}
+	if !removed {
+		writeJSONError(w, fmt.Sprintf("no installed certificate for %s", req.Hostname),
+			http.StatusNotFound)
+		return
+	}
+	// Delete the files too, so a later re-install cannot half-succeed against a
+	// stale key and so the private key does not outlive its use.
+	dir := filepath.Join(traefikCertsDirOnDaemon(), traefikapi.TLSCertDirSegment(req.Hostname))
+	if err := os.RemoveAll(dir); err != nil {
+		fmt.Printf("Warning: removed %s from the TLS store but could not delete %s: %v\n",
+			req.Hostname, dir, err)
+	}
+
+	status := tlsStatus()
+	if !currentTLSMode().usesACME() && len(status.InstalledCerts) == 0 {
+		status.Warnings = append(status.Warnings, fmt.Sprintf(
+			"that was the last installed certificate, and mode %s asks no CA for one: "+
+				"every https hostname on this server will now fail its handshake",
+			currentTLSMode()))
+	}
+	writeJSON(w, status)
+}
+
+// installTargetHostname turns the request into the single name to install under.
+// A domain becomes one wildcard, which is the form that covers the hostnames the
+// daemon registers for itself as well as every workspace host.
+func installTargetHostname(req IngressTLSInstallRequest) (string, error) {
+	domain := strings.TrimSpace(strings.ToLower(req.Domain))
+	hostname := strings.TrimSpace(strings.ToLower(req.Hostname))
+	switch {
+	case domain != "" && hostname != "":
+		return "", fmt.Errorf("pass either domain or hostname, not both")
+	case domain != "":
+		return "*." + strings.TrimPrefix(domain, "*."), nil
+	case hostname != "":
+		return hostname, nil
+	default:
+		return "", fmt.Errorf("domain or hostname is required")
 	}
 }
 
@@ -115,6 +226,18 @@ func tlsStatus() IngressTLSStatus {
 				"hosts fall back to per-host HTTP-01, which needs inbound :80 from the internet. "+
 				"Use %s to issue here",
 			status.Domain, strings.Join(alternativeTLSModes(mode), " or ")))
+	}
+	status.Certificates = installedCertDetails()
+	for _, cert := range status.Certificates {
+		switch {
+		case cert.Problem != "":
+			status.Warnings = append(status.Warnings,
+				fmt.Sprintf("certificate for %s: %s", cert.Hostname, cert.Problem))
+		case cert.DaysLeft < certExpiryWarnDays:
+			status.Warnings = append(status.Warnings, fmt.Sprintf(
+				"certificate for %s expires in %d days; nothing renews an installed certificate",
+				cert.Hostname, cert.DaysLeft))
+		}
 	}
 	if !mode.usesACME() && len(status.InstalledCerts) == 0 {
 		status.Warnings = append(status.Warnings,

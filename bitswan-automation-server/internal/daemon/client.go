@@ -938,6 +938,41 @@ func (c *Client) ingressTLSCall(req *http.Request) (*IngressTLSStatus, error) {
 	return &result, nil
 }
 
+// InstallIngressTLSCert installs an operator-supplied certificate. Exactly one of
+// domain (installs a wildcard covering the whole domain) or hostname is used.
+func (c *Client) InstallIngressTLSCert(domain, hostname, certsDir string) (*IngressTLSStatus, error) {
+	bodyBytes, err := json.Marshal(IngressTLSInstallRequest{
+		Domain:   domain,
+		Hostname: hostname,
+		CertsDir: certsDir,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix/ingress/tls/install-cert",
+		strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.ingressTLSCall(req)
+}
+
+// RemoveIngressTLSCert removes an installed certificate and its files.
+func (c *Client) RemoveIngressTLSCert(hostname string) (*IngressTLSStatus, error) {
+	bodyBytes, err := json.Marshal(IngressTLSRemoveCertRequest{Hostname: hostname})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix/ingress/tls/remove-cert",
+		strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.ingressTLSCall(req)
+}
+
 // ProvisionProtectedProxy asks the daemon to bring up the shared
 // bitswan-protected-proxy (oauth2-proxy) container that fronts every protected
 // endpoint. Requires a configured domain + reachable AOC; safe to call again
@@ -1407,6 +1442,11 @@ type EndpointVerifyResult struct {
 	Issuer  string `json:"issuer"`
 	Pending bool   `json:"pending"`
 	Error   string `json:"error"`
+	// Trust is "public" when the served certificate validates against the system
+	// CA roots (what a browser does) and "private" when it does not but is
+	// verifiably ours — the only outcome available to a server serving an internal
+	// CA's certificate.
+	Trust string `json:"trust"`
 }
 
 // VerifyEndpoint asks the daemon to check that this server's public URL is
