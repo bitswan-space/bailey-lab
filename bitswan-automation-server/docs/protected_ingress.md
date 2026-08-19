@@ -101,16 +101,27 @@ Resolution order for a request to endpoint `H` by user `U`:
 5. Otherwise → denied. The denied page records an access request and tells
    `U` who owns the endpoint.
 
-`bailey.<domain>` (the management surface) is never gated — its pages apply
-their own per-page authorization. It is also registered as an endpoint on
-first sign-in, which records whoever signed in first as its `owner_email`.
-That ownership carries **no privilege of any kind**: it is bookkeeping for the
-audit listing, nothing more. It used to designate a "server owner" who could
-see every workspace and endpoint on the server and trash, restore, update,
-upgrade and roll back workspaces they did not own; that identity was removed
-(#337). Server-wide auditing is the admin-gated `/bailey/api/admin/acl`, and
-the only remaining way to act on a workspace whose owner is gone is host
-access via the CLI.
+`bailey.<domain>` (the management surface) and `bailey-onboard.<domain>` (the
+public device-trust onboarding host) are never gated — their pages apply their
+own per-page authorization, and the free pass is a **host predicate**
+(`isBaileyHost`, `isServerConsoleOnboardHost`), consulting no database row.
+
+Neither is registered as an endpoint. The gate used to auto-register
+`bailey.<domain>` on first sign-in so it would have an `owner_email`, and that
+recorded owner — whoever happened to sign in first — became a "server owner"
+who could see every workspace and endpoint on the server and trash, restore,
+update, upgrade and roll back workspaces they did not own. That identity was
+removed entirely (#337), so the row has no remaining purpose and is no longer
+minted; nothing in the daemon derives privilege from who owns these hosts.
+
+The audit page (`/bailey/api/admin/acl`, admin-gated) synthesises a row for
+each of them from the configured domain, classified `public` / `all-users`, so
+an operator still sees that they are reachable by every signed-in user — and
+it reports no owner or grants for such hosts even when an upgraded server
+still holds a legacy row, because that ownership means nothing.
+
+The only remaining way to act on a workspace whose recorded owner is gone is
+host access via the CLI (`bitswan workspace remove`).
 
 ### Workspace inheritance
 
