@@ -156,7 +156,7 @@ func newRegisterCmd() *cobra.Command {
 
 			if err := client.SetAOCConfig(
 				aocUrl, serverInfo.AutomationServerId, aocClient.GetAccessToken(),
-				aocClient.GetExpiresAt(), serverInfo.Domain, proxyCfg,
+				aocClient.GetExpiresAt(), serverInfo.Domain, serverInfo.DNSManaged, proxyCfg,
 			); err != nil {
 				return fmt.Errorf("failed to save AOC configuration to the daemon: %w", err)
 			}
@@ -189,6 +189,19 @@ func newRegisterCmd() *cobra.Command {
 			// protected-ingress stack BEFORE (re)deploying workspaces, so each
 			// workspace's routes register through the auth wrap rather than as
 			// bare single-tier routes (see addRouteTraefik).
+			// A domain the AOC does not manage cannot get a wildcard from the ACME
+			// bridge: the bridge writes into the AOC's own zone. Say so here, while
+			// the operator is still at the terminal, rather than letting them meet it
+			// as a DNS 502 during the verification wait.
+			if serverInfo.Domain != "" && serverInfo.DNSManaged != nil && !*serverInfo.DNSManaged {
+				fmt.Printf("\n📛 The AOC does not manage DNS for %s, so it cannot issue this server's\n",
+					serverInfo.Domain)
+				fmt.Println("   wildcard certificate. Hosts will fall back to per-host HTTP-01, which needs")
+				fmt.Println("   inbound :80 from the internet. If that is not this server, pick a")
+				fmt.Println("   certificate mode that can issue here:")
+				fmt.Println("     bitswan ingress tls            # see the options")
+			}
+
 			if serverInfo.Domain != "" {
 				// --force-proxy exercises the reverse-proxy path on a server that
 				// actually has a public IP: the AOC points DNS at its relay and we

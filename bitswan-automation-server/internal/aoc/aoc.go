@@ -35,8 +35,15 @@ type AutomationServerInfo struct {
 	KeycloakOrgId      string `json:"keycloak_org_id"`
 	IsConnected        bool   `json:"is_connected"`
 	Domain             string `json:"domain"`
-	CreatedAt          string `json:"created_at"`
-	UpdatedAt          string `json:"updated_at"`
+	// DNSManaged says whether the AOC controls this domain's DNS — i.e. whether
+	// it can write the A records and the _acme-challenge TXT records for it. A
+	// pointer because "not reported" and "reported false" mean different things:
+	// an AOC too old to send the field must not be read as "we do not manage
+	// this", which would take every server on an AOC-managed domain off the
+	// wildcard certificate it is already using.
+	DNSManaged *bool  `json:"dns_managed"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 // WorkspacePostResponse represents the response from workspace registration

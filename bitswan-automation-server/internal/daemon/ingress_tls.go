@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/traefikapi"
@@ -14,6 +15,10 @@ type IngressTLSStatus struct {
 	Mode        string `json:"mode"`
 	Description string `json:"description"`
 	Domain      string `json:"domain,omitempty"`
+	// DNSManagedByAOC says whether the AOC controls this domain's DNS. Reported
+	// because it decides whether the default mode can issue anything at all, and
+	// because it is otherwise invisible: nothing else on the server mentions it.
+	DNSManagedByAOC bool `json:"dns_managed_by_aoc"`
 	// InstalledCerts are the hostnames that carry an operator-installed
 	// certificate. Reported in every mode, because their presence is what decides
 	// whether a mode switch leaves anything behind.
@@ -54,6 +59,19 @@ func (s *Server) setTLSMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refuse a mode that cannot issue for this server's domain. Storing it would
+	// leave the server in a state where every certificate order fails, and the
+	// operator would meet that as an ACME error minutes later rather than as an
+	// answer to what they just asked for.
+	if mode == TLSModeAOCDNS && getWildcardCertDomain() != "" && !aocManagesDNS() {
+		writeJSONError(w, fmt.Sprintf(
+			"mode %s issues through the AOC's zone, and the AOC does not manage DNS for %s — "+
+				"no challenge for it can succeed. Use %s instead",
+			mode, getWildcardCertDomain(), strings.Join(alternativeTLSModes(mode), " or ")),
+			http.StatusBadRequest)
+		return
+	}
+
 	previous := currentTLSMode()
 	if err := config.NewAutomationServerConfig().SetTLSMode(string(mode)); err != nil {
 		writeJSONError(w, "failed to persist TLS mode: "+err.Error(), http.StatusInternalServerError)
@@ -65,7 +83,7 @@ func (s *Server) setTLSMode(w http.ResponseWriter, r *http.Request) {
 	// (so it must be rewritten and the container recreated), and the live route
 	// table decides which routes ask for them. initTraefikIngress does the first
 	// and calls the reconcile for the second.
-	if _, err := initTraefikIngress(false); err != nil {
+	if _, err := initTraefikIngressFn(false); err != nil {
 		// The mode is stored; the ingress did not come up on it. Say both, so the
 		// operator knows a retry is what's needed rather than a re-set.
 		writeJSONError(w, fmt.Sprintf(
@@ -85,10 +103,18 @@ func (s *Server) setTLSMode(w http.ResponseWriter, r *http.Request) {
 func tlsStatus() IngressTLSStatus {
 	mode := currentTLSMode()
 	status := IngressTLSStatus{
-		Mode:           string(mode),
-		Description:    TLSModeDescription(mode),
-		Domain:         getWildcardCertDomain(),
-		InstalledCerts: traefikapi.InstalledCertHostnames(),
+		Mode:            string(mode),
+		Description:     TLSModeDescription(mode),
+		Domain:          getWildcardCertDomain(),
+		DNSManagedByAOC: aocManagesDNS(),
+		InstalledCerts:  traefikapi.InstalledCertHostnames(),
+	}
+	if status.Domain != "" && mode.usesACME() && !aocDNSUsable(mode) {
+		status.Warnings = append(status.Warnings, fmt.Sprintf(
+			"the AOC does not manage DNS for %s, so this mode cannot obtain a wildcard for it: "+
+				"hosts fall back to per-host HTTP-01, which needs inbound :80 from the internet. "+
+				"Use %s to issue here",
+			status.Domain, strings.Join(alternativeTLSModes(mode), " or ")))
 	}
 	if !mode.usesACME() && len(status.InstalledCerts) == 0 {
 		status.Warnings = append(status.Warnings,

@@ -30,6 +30,11 @@ const (
 	// wildcard certificates via the DNS-01 challenge.
 	dnsCertResolverName = "letsencrypt-dns"
 
+	// httpCertResolverName is the per-hostname HTTP-01 resolver. Used for hosts
+	// outside the wildcard domain, and for every host under a domain whose DNS the
+	// AOC does not manage — where the DNS-01 challenge cannot be written at all.
+	httpCertResolverName = "letsencrypt"
+
 	// acmeBridgeUsername is the basic-auth username Traefik uses against the
 	// daemon's ACME DNS-01 bridge endpoints.
 	acmeBridgeUsername = "traefik"
@@ -114,13 +119,21 @@ func certResolverForHostname(hostname string) (string, []traefikapi.TLSDomain) {
 	if strings.HasSuffix(hostname, ".localhost") {
 		return "", nil
 	}
-	if !currentTLSMode().usesACME() {
+	mode := currentTLSMode()
+	if !mode.usesACME() {
 		return "", nil
 	}
-	if domain := getWildcardCertDomain(); domain != "" && traefikapi.HostCoveredByWildcard(hostname, domain) {
-		return dnsCertResolverName, traefikapi.WildcardTLSDomains(domain)
+	// The shared wildcard is only claimable when the mode's DNS-01 backend can
+	// actually write the challenge. On a domain the AOC does not manage it cannot,
+	// so these hosts fall through to a per-host HTTP-01 certificate — which is
+	// exactly what dns_managed exists to select, and which works on a publicly
+	// reachable server.
+	if aocDNSUsable(mode) {
+		if domain := getWildcardCertDomain(); domain != "" && traefikapi.HostCoveredByWildcard(hostname, domain) {
+			return dnsCertResolverName, traefikapi.WildcardTLSDomains(domain)
+		}
 	}
-	return "letsencrypt", nil
+	return httpCertResolverName, nil
 }
 
 // acmeChallengeFQDNAllowed reports whether an ACME DNS-01 challenge FQDN is

@@ -63,7 +63,11 @@ func newTLSCmd() *cobra.Command {
 func printTLSStatus(status *daemon.IngressTLSStatus) {
 	fmt.Printf("TLS mode: %s — %s\n", status.Mode, status.Description)
 	if status.Domain != "" {
-		fmt.Printf("Domain:   %s\n", status.Domain)
+		managed := "managed by the AOC"
+		if !status.DNSManagedByAOC {
+			managed = "NOT managed by the AOC — its DNS-01 challenges cannot be written here"
+		}
+		fmt.Printf("Domain:   %s (DNS %s)\n", status.Domain, managed)
 	}
 	if len(status.InstalledCerts) > 0 {
 		fmt.Printf("Installed certificates: %s\n", strings.Join(status.InstalledCerts, ", "))

@@ -38,6 +38,23 @@ domain = "acme-prod.bswn.io"
 	}
 }
 
+// stubIngressReconfigure replaces the reconfigure step for a test. Mandatory for
+// anything that SUCCEEDS in setting a mode: the real call would `docker compose
+// up` the fixed bitswan-traefik project against the fixed `bitswan` volume, i.e.
+// recreate the ingress of whatever Bailey is installed on the machine running the
+// test. See initTraefikIngressFn.
+func stubIngressReconfigure(t *testing.T) *int {
+	t.Helper()
+	calls := 0
+	original := initTraefikIngressFn
+	initTraefikIngressFn = func(bool) (bool, error) {
+		calls++
+		return true, nil
+	}
+	t.Cleanup(func() { initTraefikIngressFn = original })
+	return &calls
+}
+
 // writeTLSModeConfigKeepingHome rewrites the config in the CURRENT temp HOME, so a
 // test can change mode without discarding the route state it already seeded.
 func writeTLSModeConfigKeepingHome(t *testing.T, mode string) {
@@ -194,6 +211,7 @@ func TestIngressTLSStatusEndpoint(t *testing.T) {
 
 func TestIngressTLSModeRejectsUnknownMode(t *testing.T) {
 	writeTLSModeConfig(t, "")
+	calls := stubIngressReconfigure(t)
 	s := &Server{}
 	rec := httptest.NewRecorder()
 	body := strings.NewReader(`{"mode":"self-signed-and-hope"}`)
@@ -201,9 +219,12 @@ func TestIngressTLSModeRejectsUnknownMode(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 (body %q)", rec.Code, rec.Body.String())
 	}
-	// And the stored mode is untouched.
+	// And the stored mode is untouched, and nothing was reconfigured.
 	if got := currentTLSMode(); got != TLSModeAOCDNS {
 		t.Errorf("mode changed to %q on a rejected request", got)
+	}
+	if *calls != 0 {
+		t.Errorf("a rejected mode reconfigured the ingress (%d calls)", *calls)
 	}
 }
 

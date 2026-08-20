@@ -1445,13 +1445,17 @@ type ProxyConfig struct {
 	PrivateAddress string
 }
 
-func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string, proxy ProxyConfig) error {
+// SetAOCConfig persists the registration. dnsManaged is the AOC's answer to
+// whether it controls the domain's DNS — nil when it did not say, which the
+// daemon treats as the historical "it does".
+func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string, dnsManaged *bool, proxy ProxyConfig) error {
 	reqBody := AOCConfigRequest{
 		AOCUrl:             aocUrl,
 		AutomationServerId: automationServerId,
 		AccessToken:        accessToken,
 		ExpiresAt:          expiresAt,
 		Domain:             domain,
+		DNSManaged:         dnsManaged,
 		Proxied:            proxy.Proxied,
 		RelayAddr:          proxy.RelayAddr,
 		RelayFingerprint:   proxy.RelayFingerprint,
