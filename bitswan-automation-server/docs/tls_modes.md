@@ -22,6 +22,28 @@ existed runs. It works on a server with no public inbound route at all: the CA
 reads a TXT record from DNS and never connects to the server, so an A record
 holding a private address is fine.
 
+It only works on a domain **the AOC's DNS controls**, though. The ACME bridge
+writes into the AOC's own hosted zone and rejects anything outside it, so on a
+bring-your-own domain every DNS-01 challenge fails — and fails as a 502 from a
+DNS endpoint, minutes into a registration, naming nothing about the cause. The
+AOC reports whether it manages a domain (`dns_managed`), and the daemon records
+that at registration:
+
+- **managed** — the shared `*.<domain>` wildcard, as always.
+- **not managed** — no wildcard is requested at all. Hosts fall back to per-host
+  HTTP-01, which is what that flag is documented to select and which works on a
+  publicly reachable server. Selecting `aoc-dns` on such a domain is refused
+  outright, `bitswan ingress tls` says so, and `register` says so at the terminal.
+- **never reported** — an older AOC, or a server registered before this was
+  recorded. Treated as managed, i.e. exactly the previous behaviour: reading it
+  as "not managed" would take every existing server off the wildcard it is
+  already using.
+
+If your domain is not AOC-managed and the server has no public inbound route,
+HTTP-01 cannot work either — that is the case `custom-dns` and `manual` exist
+for. The value is captured at registration, so a domain that later changes hands
+needs a re-register or an explicit mode.
+
 `manual` is for the case `aoc-dns` cannot cover — an internal CA, a corporate
 PKI, or DNS the operator keeps in-house on a provider that cannot be automated.
 In this mode Traefik's static configuration contains **no** ACME resolvers at

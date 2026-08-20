@@ -26,6 +26,10 @@ type AOCConfigRequest struct {
 	AccessToken        string `json:"access_token"`
 	ExpiresAt          string `json:"expires_at,omitempty"`
 	Domain             string `json:"domain,omitempty"`
+	// DNSManaged is the AOC's answer to "do you control this domain's DNS", which
+	// decides whether the ACME bridge can issue for it at all. Pointer: nil means
+	// the AOC did not say (see the config struct docs).
+	DNSManaged *bool `json:"dns_managed,omitempty"`
 	// Proxied / RelayAddr / RelayFingerprint configure the reverse-proxy relay
 	// path for a NAT'd (or --force-proxy) server; see the config struct docs.
 	Proxied          bool   `json:"proxied,omitempty"`
@@ -231,6 +235,7 @@ func (s *Server) handleAOCConfig(w http.ResponseWriter, r *http.Request) {
 		AccessToken:        req.AccessToken,
 		ExpiresAt:          req.ExpiresAt,
 		Domain:             req.Domain,
+		DNSManaged:         req.DNSManaged,
 		Proxied:            req.Proxied,
 		RelayAddr:          req.RelayAddr,
 		RelayFingerprint:   req.RelayFingerprint,

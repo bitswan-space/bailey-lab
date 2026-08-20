@@ -514,8 +514,14 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	// Traefik's environment, and no resolver in the static config.
 	tlsMode := currentTLSMode()
 	wildcardDomain := getWildcardCertDomain()
+	// The DNS-01 resolver is only configured when the challenge can actually be
+	// written: the mode has to use the AOC bridge, and the AOC has to manage the
+	// zone. Rendering it for a domain the AOC does not own gives Traefik a
+	// resolver whose every order 502s, retried forever, with the ACME bridge
+	// credentials in its environment for no reason.
+	dnsChallenge := wildcardDomain != "" && aocDNSUsable(tlsMode)
 	var traefikEnv map[string]string
-	if wildcardDomain != "" && tlsMode.usesACME() {
+	if dnsChallenge {
 		secret, err := getOrCreateACMEBridgeSecret(traefikConfig)
 		if err != nil {
 			return false, err
@@ -527,8 +533,7 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		}
 	}
 
-	traefikStaticConfig := renderTraefikStaticConfigForMode(
-		acmeEmail, wildcardDomain != "" && tlsMode.usesACME(), tlsMode)
+	traefikStaticConfig := renderTraefikStaticConfigForMode(acmeEmail, dnsChallenge, tlsMode)
 
 	hostHomeDir := os.Getenv("HOST_HOME")
 	traefikConfigForCompose := traefikConfig

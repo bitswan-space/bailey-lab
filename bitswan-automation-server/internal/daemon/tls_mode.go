@@ -99,6 +99,39 @@ func currentTLSMode() TLSMode {
 // usesACME reports whether the mode obtains certificates from a CA at all.
 func (m TLSMode) usesACME() bool { return m != TLSModeManual }
 
+// aocManagesDNS reports whether the AOC controls this server's domain — and
+// therefore whether the ACME bridge can write a challenge for it at all. The
+// bridge writes into the AOC's own hosted zone and rejects anything outside it.
+//
+// Nil (an AOC that never sent the field, or a server registered before it was
+// recorded) means "assume it does": that is the behaviour every existing server
+// already relies on, and reading it as "not managed" would take them all off the
+// wildcard certificate they are currently using. Only an explicit false changes
+// anything.
+func aocManagesDNS() bool {
+	settings, err := config.NewAutomationServerConfig().GetAutomationOperationsCenterSettings()
+	if err != nil || settings == nil || settings.DNSManaged == nil {
+		return true
+	}
+	return *settings.DNSManaged
+}
+
+// aocDNSUsable reports whether the mode's DNS-01 wildcard is actually obtainable:
+// the mode has to use the AOC bridge AND the AOC has to own the zone the
+// challenge is written into.
+//
+// The absence of this check is why a bring-your-own domain fails the way it does
+// today. The AOC has published dns_managed all along — its serializer documents
+// it as the flag for "DNS-01 wildcard (AOC-managed domain) versus per-host
+// HTTP-01 (bring-your-own)" — and nothing on this side ever read it. So a server
+// on a customer's own domain asks for the wildcard anyway, the bridge answers 502
+// from a DNS endpoint on every attempt, Traefik retries an order that can never
+// complete, and registration gives up eight minutes later having named none of
+// the cause.
+func aocDNSUsable(m TLSMode) bool {
+	return m == TLSModeAOCDNS && aocManagesDNS()
+}
+
 // reconcileTLSMode moves the LIVE route table onto the certificate backend the
 // configured mode implies, and is the answer to "what happens when an operator
 // switches mode on a server that is already serving traffic".
@@ -121,15 +154,27 @@ func reconcileTLSMode() {
 
 	resolver := ""
 	var tlsDomains []traefikapi.TLSDomain
-	if mode.usesACME() {
+	switch {
+	case aocDNSUsable(mode):
+		// One wildcard shared by every host under the domain.
 		resolver = dnsCertResolverName
 		tlsDomains = traefikapi.WildcardTLSDomains(domain)
+	case mode.usesACME():
+		// A CA-backed mode whose DNS-01 challenge cannot be written: the wildcard
+		// is unobtainable, a per-host HTTP-01 certificate is not.
+		resolver = httpCertResolverName
 	}
 
 	changed, err := traefikapi.SetWildcardCertResolver(domain, resolver, tlsDomains)
 	if err != nil {
 		fmt.Printf("Warning: could not reconcile existing routes onto TLS mode %s: %v\n", mode, err)
 		return
+	}
+	if mode.usesACME() && !aocDNSUsable(mode) {
+		fmt.Printf("Warning: TLS mode %s obtains its wildcard through the AOC's zone, but the AOC "+
+			"does not manage DNS for %s — no DNS-01 challenge for it can succeed. These hosts fall "+
+			"back to per-host HTTP-01, which needs inbound :80 from the internet. Switch to a mode "+
+			"that can issue here: %s\n", mode, domain, strings.Join(alternativeTLSModes(mode), " or "))
 	}
 	if changed > 0 {
 		if resolver == "" {
@@ -140,4 +185,18 @@ func reconcileTLSMode() {
 				mode, changed, domain, resolver)
 		}
 	}
+}
+
+// alternativeTLSModes lists the modes that could issue where the current one
+// cannot, so the diagnosis carries its own remedy instead of leaving the operator
+// to find one.
+func alternativeTLSModes(current TLSMode) []string {
+	var out []string
+	for _, m := range TLSModeNames() {
+		if TLSMode(m) == current || TLSMode(m) == TLSModeAOCDNS {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }

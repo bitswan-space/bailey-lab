@@ -73,6 +73,21 @@ type AutomationOperationsCenterSettings struct {
 	// obtain a DNS-01 wildcard certificate for *.<domain> via the AOC.
 	Domain string `toml:"domain,omitempty"`
 
+	// DNSManaged records whether the AOC controls Domain's DNS, as the AOC
+	// reported it at registration. It decides whether the ACME bridge can issue
+	// anything at all: the bridge writes into the AOC's own hosted zone, so on a
+	// domain the AOC does not manage every DNS-01 challenge fails — and fails as
+	// a 502 from a DNS endpoint, several minutes into a registration, rather than
+	// as anything that names the cause.
+	//
+	// A POINTER because three states differ. True and false are what the AOC
+	// said; nil means nothing said so — an older AOC, or a server registered
+	// before this was recorded — and must behave exactly as before, since
+	// assuming "not managed" would take every existing server off the wildcard
+	// certificate it is already using. Captured at registration; re-register (or
+	// set the TLS mode explicitly) if the domain later changes hands.
+	DNSManaged *bool `toml:"dns_managed,omitempty"`
+
 	// Proxied means this server has no public inbound route (NAT) — or was
 	// forced onto the relay path with `register --force-proxy` — so instead of
 	// the AOC pointing an A record straight at us, the AOC points our wildcard
