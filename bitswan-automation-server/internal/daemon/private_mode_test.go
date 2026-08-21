@@ -187,14 +187,31 @@ func TestValidateIngressBindAddress(t *testing.T) {
 func TestIngressInitPersistsBindAddress(t *testing.T) {
 	writePrivateModeConfig(t, "")
 
+	// Stub the reconfigure step. It must NOT run for real: it would `docker
+	// compose up` the fixed bitswan-traefik project against the fixed `bitswan`
+	// volume, i.e. recreate the ingress of whatever Bailey is installed on this
+	// machine — with this test's bind address. A temp HOME does not prevent that,
+	// because neither the project name nor the volume comes from HOME.
+	reconfigured := 0
+	original := initTraefikIngressFn
+	initTraefikIngressFn = func(bool) (bool, error) {
+		reconfigured++
+		return true, nil
+	}
+	t.Cleanup(func() { initTraefikIngressFn = original })
+
 	addr := "127.0.0.1"
 	body, _ := json.Marshal(IngressInitRequest{BindAddress: &addr})
 	s := &Server{}
 	rec := httptest.NewRecorder()
-	// initTraefikIngress will fail here (no docker in the test env); we only
-	// assert the config write, which happens first and is the contract the CLI
-	// depends on.
 	s.handleIngressInit(rec, httptest.NewRequest(http.MethodPost, "/ingress/init", strings.NewReader(string(body))))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if reconfigured != 1 {
+		t.Errorf("reconfigure ran %d times, want 1: stating a bind address has to apply it, "+
+			"not just store it", reconfigured)
+	}
 
 	if got := config.NewAutomationServerConfig().GetIngressBindAddress(); got != addr {
 		t.Errorf("stored bind address = %q, want %q", got, addr)
@@ -210,5 +227,8 @@ func TestIngressInitPersistsBindAddress(t *testing.T) {
 	}
 	if got := config.NewAutomationServerConfig().GetIngressBindAddress(); got != addr {
 		t.Errorf("stored bind address = %q after a rejected request, want it unchanged (%q)", got, addr)
+	}
+	if reconfigured != 1 {
+		t.Errorf("a rejected address reconfigured the ingress (%d calls)", reconfigured)
 	}
 }
