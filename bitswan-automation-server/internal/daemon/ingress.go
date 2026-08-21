@@ -249,7 +249,7 @@ func (s *Server) handleIngressInit(w http.ResponseWriter, r *http.Request) {
 	var newlyInitialized bool
 	var err error
 	if forceReconfigure {
-		newlyInitialized, err = initTraefikIngress(req.Verbose)
+		newlyInitialized, err = initTraefikIngressFn(req.Verbose)
 	} else {
 		newlyInitialized, err = initIngress(req.Verbose)
 	}
@@ -385,7 +385,21 @@ certificatesResolvers:
 	return cfg
 }
 
-// validateIngressBindAddress rejects anything that isn't a bare IP literal.
+// initTraefikIngressFn is the reconfigure step, indirected through a var so tests
+// can replace it — the same reason ingressProbe and ingressWaitPoll are vars.
+//
+// This is not stylistic. initTraefikIngress runs `docker compose -p
+// bitswan-traefik up -d`, and both the project name and the `bitswan` named
+// volume it mounts are fixed — so a test that reaches it does not create a
+// sandboxed Traefik, it RECREATES the one belonging to whatever Bailey is
+// installed on the machine running the test. It reads the real config files
+// (they live in that volume) but with whatever the test asked for, which for a
+// bind-address test means republishing a live server's ingress on loopback and
+// taking it off the network until someone notices. A temp HOME does not protect
+// against this: the volume and the project name are not derived from HOME.
+var initTraefikIngressFn = initTraefikIngress
+
+// validateIngressBindAddress rejects anything that isn't a bare IP literal.// validateIngressBindAddress rejects anything that isn't a bare IP literal.
 //
 // The value is interpolated into a docker-compose port mapping
 // ("<addr>:443:443"), so a hostname or a stray colon would either fail at
