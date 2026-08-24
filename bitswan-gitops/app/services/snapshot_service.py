@@ -24,9 +24,9 @@ cleared, then loaded. Code/deployments are never touched.
 
 Off-site protection comes from the automation-server daemon's nightly
 server-level backup, which captures this whole snapshots directory (plus
-every workspace's secrets and DB dumps). gitops runs no backup jobs; it
-only asks the daemon to fetch a pruned snapshot back (see
-`utils.daemon_fetch_offsite_snapshot`).
+every workspace's secrets and DB dumps). gitops runs no backup jobs and
+never reads the backup repo: recovering from a nightly capture restores
+the workspace, which brings this directory back with it.
 
 Dumps and loads are STREAMED between the service containers and the
 snapshot files — never buffered whole in Python (unlike the legacy

@@ -9,12 +9,13 @@ Error mapping follows `routes/services.py`: ValueError → 400,
 LookupError → 404, BusyError → 409, RuntimeError → 500.
 
 These are per-BP, cross-stage data snapshots stored locally on the gitops
-server. Off-site protection is the automation-server daemon's job (it backs
-up this whole directory nightly); snapshots pruned locally are listed as
-`remote_only` from the daemon and can be fetched back through it.
+server, and this router only ever reads the local store. Off-site protection
+is the automation-server daemon's job — it captures this whole directory
+nightly, so the snapshots reach the backup repo either way — but recovering
+FROM those captures is the workspace-recovery path, not a per-snapshot one
+here (see the daemon's backup/restore runbook).
 """
 
-import asyncio
 import os
 
 from fastapi import APIRouter, HTTPException
@@ -31,13 +32,11 @@ from app.snapshot_runner import (
     BusyError,
     spawn_clone_stage,
     spawn_create_snapshot,
-    spawn_fetch_snapshot,
     spawn_restore_snapshot,
 )
 from app.services.snapshot_service import get_snapshot_service
 from app.utils import (
     SERVICE_REALMS,
-    daemon_list_offsite_snapshots,
     sanitize_automation_name,
 )
 
@@ -97,9 +96,12 @@ async def list_bp_snapshots(bp: str):
     """All snapshots of one BP across stages + eligibility + disk usage +
     any in-flight tasks (so a reloaded dashboard can resume its progress UI).
 
-    Snapshots that exist only in the server's backups (local files deleted
-    or pruned) are listed too — from the daemon — with `local: false` and
-    `remote_only: true`; Fetch materializes them back."""
+    Reads the local snapshot store and nothing else. This is a page load: it
+    used to also ask the daemon, once per stage, which snapshots were still
+    recoverable from the nightly captures, and that answer costs a restic
+    round-trip per capture against a remote repo. Three 10s-capped calls is
+    exactly the 30s a request gets through the workspace router, so both this
+    tab and the DR panel's snapshot picker 502'd every time."""
     slug = _bp_slug(bp)
     service = get_snapshot_service()
     try:
@@ -111,38 +113,6 @@ async def list_bp_snapshots(bp: str):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Snapshots pruned locally may still live in the automation server's
-    # nightly backups; the daemon is the authority on what can be fetched
-    # back. Best-effort per stage — an unavailable daemon just means no
-    # remote-only rows, never a failed listing.
-    local_ids = {s["id"] for s in snapshots}
-    for s in snapshots:
-        s["local"] = True
-    for stage in sorted(SERVICE_REALMS):
-        for ref in await asyncio.to_thread(daemon_list_offsite_snapshots, slug, stage):
-            snapshot_id = ref.get("snapshot_id")
-            if not snapshot_id or snapshot_id in local_ids:
-                continue
-            local_ids.add(snapshot_id)
-            # Deliberately partial. The backup repo records an id, a stage and a
-            # timestamp for an off-site copy and nothing else — not which
-            # services it holds, not its size, not its label or kind. Inventing
-            # zeros for those would be worse than omitting them: the UI would
-            # confidently report "no services, 0 B" for a snapshot that may hold
-            # everything. The dashboard's Snapshot type marks exactly these
-            # fields optional so the compiler forces callers to handle it (they
-            # were once required, and the first remote-only snapshot took the
-            # whole Backups page down with it).
-            snapshots.append(
-                {
-                    "id": snapshot_id,
-                    "bp": slug,
-                    "stage": stage,
-                    "created_at": ref.get("backed_up_at") or "",
-                    "local": False,
-                    "remote_only": True,
-                }
-            )
     snapshots.sort(key=lambda m: m.get("created_at", ""), reverse=True)
 
     active = [t.to_dict() for t in snapshot_manager.get_active_tasks_for_bp(slug)]
@@ -153,7 +123,9 @@ async def list_bp_snapshots(bp: str):
         "disk_usage_bytes": usage,
         "active_tasks": active,
         # The automation-server daemon makes the off-site backups; its socket
-        # being mounted is what makes a workspace recoverable from them.
+        # being mounted is what makes a workspace recoverable from them. The
+        # UI uses it to say, when you delete a snapshot, that the server's
+        # backup still holds a copy under its retention policy.
         "offsite_enabled": os.path.exists(
             os.environ.get(
                 "BITSWAN_INGRESS_SOCKET", "/var/run/bitswan/automation-server.sock"
@@ -313,49 +285,6 @@ async def clone_stage(bp: str, body: SnapshotCloneRequest):
     )
 
 
-@router.post("/{bp}/{stage}/{snapshot_id}/fetch")
-async def fetch_snapshot(bp: str, stage: str, snapshot_id: str):
-    """Materialize an off-site snapshot back into the local store (202 + task).
-
-    200 `already_local` when nothing needs fetching; the restore endpoint
-    auto-fetches on its own, so this exists for explicit "bring it back"."""
-    slug = _bp_slug(bp)
-    _validate_stage(stage)
-
-    service = get_snapshot_service()
-    try:
-        service.get_snapshot(slug, stage, snapshot_id)
-        return {"status": "already_local", "bp": slug, "snapshot_id": snapshot_id}
-    except LookupError:
-        pass
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    remote = await asyncio.to_thread(daemon_list_offsite_snapshots, slug, stage)
-    if not any(r.get("snapshot_id") == snapshot_id for r in remote):
-        raise HTTPException(
-            status_code=404, detail=f"Snapshot {snapshot_id} not found off-site"
-        )
-
-    try:
-        res = await spawn_fetch_snapshot(slug, stage, snapshot_id)
-    except BusyError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    await _audit_backup(slug, "fetched", f"{snapshot_id} ({stage})", None, stage=stage)
-    return JSONResponse(
-        status_code=202,
-        content={
-            "task_id": res["task_id"],
-            "bp": slug,
-            "stage": stage,
-            "snapshot_id": snapshot_id,
-            "status": "pending",
-        },
-    )
-
-
 # Declared AFTER /restore, /clone and /provision: this parameterised
 # route would otherwise capture those words as a stage name.
 @router.post("/{bp}/{stage}")
@@ -385,7 +314,11 @@ async def create_snapshot(bp: str, stage: str, body: SnapshotCreateRequest):
 
 @router.delete("/{bp}/{stage}/{snapshot_id}")
 async def delete_snapshot(bp: str, stage: str, snapshot_id: str):
-    """Delete one snapshot (synchronous). 409 while the bp×stage is busy."""
+    """Delete one snapshot (synchronous). 409 while the bp×stage is busy.
+
+    Local only. Whatever the server's nightly capture already took stays in
+    the backup repo until its retention policy drops it, and nothing here
+    reaches in to remove that — the UI says as much before you confirm."""
     slug = _bp_slug(bp)
     _validate_stage(stage)
     if snapshot_manager.is_busy(slug, stage):
@@ -402,14 +335,9 @@ async def delete_snapshot(bp: str, stage: str, snapshot_id: str):
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
-    # Deleting local files never deletes what the server's backup already
-    # captured — that is pruned only by the server's retention policy. Tell
-    # the UI so it can say so.
-    remote = await asyncio.to_thread(daemon_list_offsite_snapshots, slug, stage)
     return {
         "status": "deleted",
         "bp": slug,
         "stage": stage,
         "snapshot_id": snapshot_id,
-        "offsite_retained": any(r.get("snapshot_id") == snapshot_id for r in remote),
     }

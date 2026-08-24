@@ -4,7 +4,6 @@ import {
   Camera,
   Cloud,
   CloudAlert,
-  CloudDownload,
   CloudUpload,
   Copy,
   Loader2,
@@ -58,11 +57,9 @@ function formatBytes(n: number): string {
 
 /** The services captured in a snapshot, e.g. "Postgres + Object storage".
  *
- * null when the snapshot does not record them, which is every `remote_only`
- * entry: those are synthesised from the server's backup repo, which knows an id,
- * a stage and a timestamp and nothing else. Callers omit the field rather than
- * print "no services", which would claim the snapshot captured nothing when the
- * truth is that we cannot tell from here. */
+ * null when the manifest does not record them. Callers omit the field rather
+ * than print "no services", which would claim the snapshot captured nothing
+ * when the truth is that we cannot tell from here. */
 function servicesLabel(s: Snapshot): string | null {
   if (!s.services) return null;
   const names: Record<string, string> = {
@@ -258,22 +255,6 @@ export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSe
     [bp.name, refresh],
   );
 
-  const runFetch = useCallback(
-    async (snapshot: Snapshot) => {
-      try {
-        const res = await api.snapshots.fetch(bp.name, snapshot.stage, snapshot.id);
-        if (res.task_id) {
-          watchTask(res.task_id);
-        } else {
-          await refresh();
-        }
-      } catch (err) {
-        toast.error(`Failed to start off-site fetch: ${String(err)}`);
-      }
-    },
-    [bp.name, refresh, watchTask],
-  );
-
   if (data === null && loadError === null) {
     return <EmptyState message="Loading snapshots…" />;
   }
@@ -361,10 +342,7 @@ export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSe
               className="flex items-center gap-3 rounded-lg border border-border bg-background px-4 py-3"
             >
               <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-                <Archive
-                  className={`size-4 ${s.local === false ? 'text-muted-foreground/40' : 'text-muted-foreground'}`}
-                  aria-hidden
-                />
+                <Archive className="size-4 text-muted-foreground" aria-hidden />
               </span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
@@ -398,35 +376,12 @@ export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSe
                       <span>{servicesLabel(s)}</span>
                     </>
                   )}
-                  {s.remote_only && (
-                    <>
-                      <span aria-hidden>·</span>
-                      <span>off-site only — Fetch to see details</span>
-                    </>
-                  )}
                 </div>
               </div>
-              {s.local === false && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={busy}
-                  title="Download this snapshot from off-site storage back onto the server"
-                  onClick={() => void runFetch(s)}
-                >
-                  <CloudDownload className="size-3.5" aria-hidden />
-                  Fetch
-                </Button>
-              )}
               <Button
                 variant="outline"
                 size="sm"
                 disabled={busy}
-                title={
-                  s.local === false
-                    ? 'Restores fetch the snapshot from off-site storage automatically'
-                    : undefined
-                }
                 onClick={() => setRestoreTarget(s)}
               >
                 <RotateCcw className="size-3.5" aria-hidden />
@@ -435,12 +390,8 @@ export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSe
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={busy || s.local === false}
-                title={
-                  s.local === false
-                    ? 'Only the off-site copy exists — it is pruned by the retention policy, not deleted here'
-                    : 'Delete snapshot'
-                }
+                disabled={busy}
+                title="Delete snapshot"
                 onClick={() => setDeleteTarget(s)}
               >
                 <Trash2 className="size-3.5 text-muted-foreground" aria-hidden />
@@ -482,7 +433,10 @@ export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSe
             <AlertDialogTitle>Delete snapshot?</AlertDialogTitle>
             <AlertDialogDescription>
               {deleteTarget
-                ? `This permanently deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}${deleteTarget.total_size_bytes !== undefined ? `, ${formatBytes(deleteTarget.total_size_bytes)}` : ''}) from this server. The stage's live data is not affected. Any copy already captured by the server's nightly backup is kept and stays restorable until its retention policy prunes it.`
+                ? `This deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}${deleteTarget.total_size_bytes !== undefined ? `, ${formatBytes(deleteTarget.total_size_bytes)}` : ''}) from this server. The stage's live data is not affected.`
+                : ''}
+              {deleteTarget && data?.offsite_enabled
+                ? " It is not erased everywhere: whatever the server's nightly backup already captured stays in the backup repo until its retention policy prunes it, and getting it back from there is a server-restore operation rather than something this page can do."
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -506,7 +460,6 @@ const OPERATION_LABEL: Record<SnapshotTask['operation'], string> = {
   create: 'Creating snapshot',
   restore: 'Restoring snapshot',
   clone: 'Cloning stage data',
-  fetch: 'Fetching snapshot from off-site',
 };
 
 function TaskProgressCard({ task }: { task: SnapshotTask }) {

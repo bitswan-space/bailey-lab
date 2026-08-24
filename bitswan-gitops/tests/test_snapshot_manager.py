@@ -431,3 +431,25 @@ def test_route_delete_busy_409(client, fresh_manager):
     fresh_manager._active["my-bp:dev"] = "held-task"
     r = client.delete("/snapshots/my-bp/dev/20250101-000000-aabbccdd")
     assert r.status_code == 409
+
+
+def test_route_list_never_touches_the_daemon(client, monkeypatch):
+    """Listing a BP's snapshots reads the local store and nothing else.
+
+    It used to also ask the automation-server daemon, once per stage, which
+    snapshots were still recoverable from the nightly captures — a restic
+    round-trip per capture against a remote repo, three 10s-capped calls
+    deep, which is exactly the 30s a request gets through the workspace
+    router. Both this listing and the DR panel's snapshot picker 502'd on it.
+    Any daemon call reintroduced here fails this test.
+    """
+    from app import utils
+
+    def _no_daemon(*args, **kwargs):
+        raise AssertionError("the snapshot listing must not call the daemon")
+
+    monkeypatch.setattr(utils, "_ingress_client_and_base", _no_daemon)
+
+    r = client.get("/snapshots/my-bp")
+    assert r.status_code == 200, r.text
+    assert r.json()["bp"] == "my-bp"

@@ -1510,13 +1510,6 @@ export const api = {
       deleteEmpty(
         `/api/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}/${encodeURIComponent(snapshotId)}`,
       ),
-    /** Materialize an off-site snapshot back into the local store.
-     *  202 + task_id, or `{status: 'already_local'}`. */
-    fetch: (bp: string, stage: SnapshotStage, snapshotId: string) =>
-      postJson<{ task_id?: string; status?: string }>(
-        `/api/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}/${encodeURIComponent(snapshotId)}/fetch`,
-        {},
-      ),
     /** Snapshot-task poll endpoint (the SSE event is a freshness bonus). */
     taskStatus: (taskId: string) =>
       getJson<SnapshotTask>(
