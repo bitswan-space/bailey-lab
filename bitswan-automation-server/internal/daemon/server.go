@@ -466,6 +466,12 @@ func (s *Server) Run() error {
 			fmt.Printf("Warning: protected gate failed to start: %v\n", err)
 		}
 		setupBaileyRoutes()
+		// Bailey's own hostnames are registered above; every other
+		// protected host this server ever created is reconciled here,
+		// so a Keycloak allowlist that drifted (a callback without its
+		// post-logout twin breaks Logout, not login) converges on boot
+		// instead of staying broken until someone re-creates the route.
+		reconcileProtectedRedirectURIs()
 	}()
 
 	// Everything that needs the AOC — or needs our own ingress to be serving
