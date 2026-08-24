@@ -454,9 +454,30 @@ type OAuthClientResponse struct {
 // already exists, the redirect_uri is added to its allowlist and the
 // existing credentials are returned — safe to call once per hostname.
 func (c *AOCClient) GetOrCreateOAuthClient(serviceName, redirectURI string) (*OAuthClientResponse, error) {
+	return c.GetOrCreateOAuthClientWithPostLogout(serviceName, redirectURI, "")
+}
+
+// GetOrCreateOAuthClientWithPostLogout is GetOrCreateOAuthClient, plus the
+// post-logout redirect URI that belongs to the same endpoint.
+//
+// Keycloak keeps two separate allowlists per client: redirectUris for the
+// login callback and post.logout.redirect.uris for where RP-initiated logout
+// may land. Since Keycloak 18 the logout target must be registered too, and
+// there is no wildcard escape — a host with a callback but no post-logout
+// entry logs IN fine and gets "Invalid redirect uri" on the way OUT. Naming
+// both in the same request is what keeps the two lists from drifting apart:
+// the caller states the pair, the AOC applies the pair.
+//
+// post_logout_redirect_uri is ignored by AOCs predating that field, which
+// derive the twin from redirect_uri themselves — so the pair still lands,
+// just without the caller's say in it.
+func (c *AOCClient) GetOrCreateOAuthClientWithPostLogout(serviceName, redirectURI, postLogoutRedirectURI string) (*OAuthClientResponse, error) {
 	payload := map[string]string{
 		"service_name": serviceName,
 		"redirect_uri": redirectURI,
+	}
+	if postLogoutRedirectURI != "" {
+		payload["post_logout_redirect_uri"] = postLogoutRedirectURI
 	}
 	jsonBytes, _ := json.Marshal(payload)
 	url := fmt.Sprintf("%s/api/automation_server/keycloak/oauth-client", c.settings.AOCUrl)
