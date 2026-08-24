@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -286,6 +287,84 @@ func baileyDBPath() string {
 	return filepath.Join(os.Getenv("HOME"), ".config", "bitswan", "bailey.db")
 }
 
+// On-disk modes for the store. bailey.db holds security-relevant state — the
+// device-cookie signing key, TOTP seeds, backup-code hashes, RBAC roles,
+// endpoint ACL grants and device-trust rows — so neither it nor the config dir
+// that encloses it has any business being world-readable, which is where the
+// process umask lands them (0644 file / 0755 dir). Defence in depth only:
+// reading these bytes already requires local access to the host or the data
+// volume; this is blast-radius reduction, not an access-control boundary.
+const (
+	baileyDBFileMode os.FileMode = 0o600
+	baileyDBDirMode  os.FileMode = 0o700
+)
+
+// tightenMode clears every permission bit of path outside want, and only
+// those: the resulting mode is perm&want, so a path that is ALREADY stricter
+// than want (say 0400) is left exactly as it is rather than loosened up to the
+// target. It no-ops when the mode already fits, which makes it idempotent —
+// this runs on every daemon start against a file that is normally already
+// tightened.
+//
+// A missing path is not an error. SQLite creates the -wal/-shm sidecars lazily
+// when WAL mode engages, so at the moment of tightening they may legitimately
+// not exist yet.
+func tightenMode(path string, want os.FileMode) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	perm := info.Mode().Perm()
+	if perm&^want == 0 {
+		return nil
+	}
+	return os.Chmod(path, perm&want)
+}
+
+// hardenBaileyDBPermissions makes the SQLite triple owner-only and the
+// enclosing ~/.config/bitswan dir owner-only-traversable (issue #286).
+//
+// Called right after the schema exec — that is the first statement to actually
+// touch the file, so by then SQLite has created bailey.db and, because the DSN
+// asks for journal_mode(WAL), its -wal/-shm sidecars too. A chmod cannot
+// precede the file's existence, so there is an unavoidable sliver of time
+// between creation and tightening on a first-ever start.
+//
+// Sidecars created LATER (SQLite drops -wal/-shm on a clean close and remakes
+// them on the next open) need no further action: SQLite gives a journal/WAL
+// file the mode of its main database file, so once bailey.db is 0600 the
+// sidecars are born 0600. Verified against modernc.org/sqlite, not assumed.
+// They are tightened explicitly here anyway, for the databases that predate
+// this change and already have 0644 sidecars on disk.
+//
+// Only the bitswan config dir is touched — never its parents (~/.config, $HOME),
+// which the daemon does not own and must not re-mode.
+//
+// Failures are logged and non-fatal: a working store that is group-readable
+// beats a daemon that refuses to start over a hardening step. Logging is the
+// point, though — a hardening step that quietly no-ops is worse than none,
+// because it manufactures confidence.
+func hardenBaileyDBPermissions() {
+	dbPath := baileyDBPath()
+	for _, target := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{filepath.Dir(dbPath), baileyDBDirMode},
+		{dbPath, baileyDBFileMode},
+		{dbPath + "-wal", baileyDBFileMode},
+		{dbPath + "-shm", baileyDBFileMode},
+	} {
+		if err := tightenMode(target.path, target.mode); err != nil {
+			log.Printf("bailey.db hardening: could not tighten %s to %#o: %v",
+				target.path, target.mode, err)
+		}
+	}
+}
+
 // openBaileyDB lazily opens (and on first call, creates) the DB.
 // Safe to call from multiple goroutines.
 //
@@ -297,7 +376,10 @@ func baileyDBPath() string {
 // for itself).
 func openBaileyDB() (*sql.DB, error) {
 	baileyDBOnce.Do(func() {
-		if err := os.MkdirAll(filepath.Dir(baileyDBPath()), 0o755); err != nil {
+		// 0700 so a first-ever start never creates the dir world-readable at
+		// all; hardenBaileyDBPermissions below tightens a dir that already
+		// exists (every restart, and every install that predates this).
+		if err := os.MkdirAll(filepath.Dir(baileyDBPath()), baileyDBDirMode); err != nil {
 			baileyDBErr = fmt.Errorf("mkdir bailey config dir: %w", err)
 			return
 		}
@@ -313,6 +395,10 @@ func openBaileyDB() (*sql.DB, error) {
 			baileyDBErr = fmt.Errorf("apply schema: %w", err)
 			return
 		}
+		// The schema exec is what materialises bailey.db (and its WAL
+		// sidecars) on disk, so this is the earliest point the modes can be
+		// tightened — before any of the migrations below write secrets into it.
+		hardenBaileyDBPermissions()
 		// Migration for databases created before parent_endpoint existed
 		// (CREATE TABLE IF NOT EXISTS doesn't touch existing tables).
 		// "duplicate column name" just means the column is already there.
