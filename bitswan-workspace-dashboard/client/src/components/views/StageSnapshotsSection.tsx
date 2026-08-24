@@ -435,9 +435,6 @@ export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSe
               {deleteTarget
                 ? `This deletes “${deleteTarget.label || deleteTarget.id}” (${STAGE_META[deleteTarget.stage].label}${deleteTarget.total_size_bytes !== undefined ? `, ${formatBytes(deleteTarget.total_size_bytes)}` : ''}) from this server. The stage's live data is not affected.`
                 : ''}
-              {deleteTarget && data?.offsite_enabled
-                ? " It is not erased everywhere: whatever the server's nightly backup already captured stays in the backup repo until its retention policy prunes it, and getting it back from there is a server-restore operation rather than something this page can do."
-                : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -445,6 +442,7 @@ export function StageSnapshotsSection({ bp, stage, reloadKey }: StageSnapshotsSe
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={() => deleteTarget && void runDelete(deleteTarget)}
             >
               Delete

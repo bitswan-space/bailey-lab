@@ -123,9 +123,7 @@ async def list_bp_snapshots(bp: str):
         "disk_usage_bytes": usage,
         "active_tasks": active,
         # The automation-server daemon makes the off-site backups; its socket
-        # being mounted is what makes a workspace recoverable from them. The
-        # UI uses it to say, when you delete a snapshot, that the server's
-        # backup still holds a copy under its retention policy.
+        # being mounted is what makes a workspace recoverable from them.
         "offsite_enabled": os.path.exists(
             os.environ.get(
                 "BITSWAN_INGRESS_SOCKET", "/var/run/bitswan/automation-server.sock"

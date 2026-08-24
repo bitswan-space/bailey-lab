@@ -105,7 +105,6 @@ export interface SnapshotListResponse {
   disk_usage_bytes: number;
   active_tasks: SnapshotTask[];
   /** Whether the server makes off-site backups this workspace can be
-   *  recovered from (AOC-connected). What makes deleting a snapshot local-only:
-   *  the nightly capture keeps its own copy under the retention policy. */
+   *  recovered from (AOC-connected). */
   offsite_enabled?: boolean;
 }
