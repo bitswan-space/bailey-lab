@@ -246,15 +246,19 @@ CREATE TABLE IF NOT EXISTS update_history (
 );
 CREATE INDEX IF NOT EXISTS update_history_target_idx ON update_history(target_kind, target_name, id);
 
--- Pending Bailey invites. An admin invites an AOC-org member by email;
--- the emailed link carries a single-use token whose SHA-256 hex digest
--- is stored here (the raw token is never at rest — a leaked/backed-up
--- bailey.db can't be replayed into working invite links). One row per
--- email: re-inviting replaces the outstanding invite. Redeeming the
--- token trusts the user's FIRST device (see the invite-redeem gate
--- API); consumed_at marks the row burned. role is applied on
--- redemption. email_sent records whether the AOC delivered the invite
--- email (0 = the admin got a copyable link instead).
+-- Pending Bailey invites. An admin invites an AOC-org member and copies
+-- the resulting link out-of-band; that link carries a single-use token
+-- whose SHA-256 hex digest is stored here (the raw token is never at
+-- rest — a leaked/backed-up bailey.db can't be replayed into working
+-- invite links). One row per email: re-inviting replaces the
+-- outstanding invite. Redeeming the token trusts the user's FIRST
+-- device (see the invite-redeem gate API); consumed_at marks the row
+-- burned. role is applied on redemption.
+--
+-- Databases created before bailey-lab#369 also carry an email_sent
+-- column from the removed AOC-emailed-invite path. It is left in place
+-- (NOT NULL DEFAULT 0, never read or written) rather than dropped:
+-- SQLite column drops are disruptive and the stale column is inert.
 CREATE TABLE IF NOT EXISTS invites (
   email       TEXT PRIMARY KEY COLLATE NOCASE,
   token_hash  TEXT NOT NULL UNIQUE,
@@ -262,8 +266,7 @@ CREATE TABLE IF NOT EXISTS invites (
   created_by  TEXT NOT NULL COLLATE NOCASE,
   created_at  TEXT NOT NULL,
   expires_at  TEXT NOT NULL,
-  consumed_at TEXT,
-  email_sent  INTEGER NOT NULL DEFAULT 0
+  consumed_at TEXT
 );
 
 -- Published public endpoints (issue #220). An auditor/admin publishes a

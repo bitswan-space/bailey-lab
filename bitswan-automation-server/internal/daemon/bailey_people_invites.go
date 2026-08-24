@@ -13,12 +13,16 @@ import (
 //
 // An admin invites a member of this server's AOC organization from the
 // People view. The daemon stores a single-use, 48h invite (token hashed
-// at rest — see bailey_store_invites.go) and asks the AOC to email the
-// invite link using the SMTP service configured there; if delivery
-// fails the admin gets the link back to share manually. The link points
-// at the PUBLIC onboarding host (bailey-onboard.<domain>) so the token
-// survives the OAuth round-trip without the console host's device-trust
-// redirect dance.
+// at rest — see bailey_store_invites.go) and hands the link back to the
+// ADMIN, who copies it and delivers it over a channel they judge
+// appropriate. The platform never delivers it itself: redeeming the
+// link trusts a device (below), so an automated mail path would make
+// possession of a mailbox — or a forwarded message, or a mail-server
+// log — sufficient to earn device trust. Device trust must stay a
+// deliberate human act (bailey-lab#369). The link points at the PUBLIC
+// onboarding host (bailey-onboard.<domain>) so the token survives the
+// OAuth round-trip without the console host's device-trust redirect
+// dance.
 //
 // Redeeming the token (the gate API at the bottom) trusts the invitee's
 // FIRST device automatically — that is the entire point of the invite.
@@ -30,7 +34,7 @@ import (
 //   POST /bailey/api/people/invite          — create (or replace) an invite
 //   GET  /bailey/api/people/invites         — outstanding invites
 //   POST /bailey/api/people/invites/revoke  — delete an outstanding invite
-//   POST /bailey/api/people/invites/resend  — fresh token + expiry, re-email
+//   POST /bailey/api/people/invites/resend  — fresh token + expiry, new link
 // Gate route (untrusted devices; dispatched from handleGateAPI):
 //   POST /bailey/api/invite/redeem          — burn token, trust THIS device
 
@@ -39,7 +43,6 @@ import (
 // AOC without a network; production resolves to *aoc.AOCClient.
 type aocInviteClient interface {
 	ListOrgUsers() ([]aoc.OrgUser, error)
-	SendInviteEmail(req aoc.InviteEmailRequest) error
 }
 
 var newAOCInviteClient = func() (aocInviteClient, error) {
@@ -62,7 +65,6 @@ type inviteDTO struct {
 	CreatedBy string `json:"created_by"`
 	CreatedAt string `json:"created_at"`
 	ExpiresAt string `json:"expires_at"`
-	EmailSent bool   `json:"email_sent"`
 	Expired   bool   `json:"expired"`
 }
 
@@ -73,7 +75,6 @@ func inviteToDTO(inv *inviteRecord, now time.Time) inviteDTO {
 		CreatedBy: inv.CreatedBy,
 		CreatedAt: inv.CreatedAt.UTC().Format(time.RFC3339),
 		ExpiresAt: inv.ExpiresAt.UTC().Format(time.RFC3339),
-		EmailSent: inv.EmailSent,
 		Expired:   inv.expired(now),
 	}
 }
@@ -86,13 +87,10 @@ func inviteToDTO(inv *inviteRecord, now time.Time) inviteDTO {
 // the console host.
 //
 // The host uses protectedHostnameDomain() because that is where the SPA
-// is actually served. On deployments that set the protected_domain
-// override (serving on a zone different from the AOC-assigned domain),
-// the AOC's send-invite-email host check — which knows the domain and
-// bailey_url — will reject this link, so the email won't auto-send and
-// the admin uses the copyable-link fallback (the link itself is valid
-// and works). Auto-send on override deployments needs the AOC to learn
-// the override host (a follow-up).
+// is actually served — including on deployments that set the
+// protected_domain override (serving on a zone different from the
+// AOC-assigned domain). Nothing outside the daemon validates the host
+// any more: the link goes straight to the admin who asked for it.
 func buildInviteLink(token string) (string, error) {
 	domain := protectedHostnameDomain()
 	if domain == "" {
@@ -185,34 +183,15 @@ func handleBaileyOrgUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-// sendInviteEmailViaAOC asks the AOC to deliver the invite email and
-// records the outcome on the row. Returns (emailSent, userFacingError).
-// A delivery failure is NOT a handler failure — the invite stands and
-// the admin gets the link to share manually (the mandated fallback).
-func sendInviteEmailViaAOC(client aocInviteClient, inv *inviteRecord, link, actor string) (bool, string) {
-	err := client.SendInviteEmail(aoc.InviteEmailRequest{
-		Email:     inv.Email,
-		InviteURL: link,
-		InvitedBy: actor,
-		Role:      inv.Role,
-		ExpiresAt: inv.ExpiresAt.UTC().Format(time.RFC3339),
-	})
-	if err == nil {
-		_ = dbSetInviteEmailSent(inv.Email, true)
-		return true, ""
-	}
-	_ = dbSetInviteEmailSent(inv.Email, false)
-	return false, err.Error()
-}
-
 // --- POST /bailey/api/people/invite ---
 //
 // Create (or replace — one outstanding invite per email) an invite for
-// an AOC-org member. Org membership is verified here against the AOC
-// BEFORE anything is stored (fail closed: AOC unreachable → 502, no
-// invite), and the AOC re-verifies server-side before mailing — the
-// daemon check is policy, the AOC check is the backstop a compromised
-// daemon can't skip.
+// an AOC-org member and return the link for the admin to copy. Org
+// membership is verified here against the AOC BEFORE anything is
+// stored (fail closed: AOC unreachable → 502, no invite).
+//
+// The link is a credential: it is returned to the admin who created it
+// and to nobody else, and it is never logged.
 func handleBaileyPeopleInvite(w http.ResponseWriter, r *http.Request, actor string) {
 	var req struct {
 		Email string `json:"email"`
@@ -288,20 +267,13 @@ func handleBaileyPeopleInvite(w http.ResponseWriter, r *http.Request, actor stri
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	emailSent, emailErr := sendInviteEmailViaAOC(client, inv, link, actor)
-	inv.EmailSent = emailSent
 	_ = recordEvent(actor, auditInviteCreate, canonical)
 
-	resp := map[string]any{
+	writeJSON(w, map[string]any{
 		"ok":          true,
-		"email_sent":  emailSent,
 		"invite_link": link,
 		"invite":      inviteToDTO(inv, now),
-	}
-	if emailErr != "" {
-		resp["email_error"] = emailErr
-	}
-	writeJSON(w, resp)
+	})
 }
 
 // --- GET /bailey/api/people/invites ---
@@ -344,9 +316,10 @@ func handleBaileyInviteRevoke(w http.ResponseWriter, r *http.Request, actor stri
 
 // --- POST /bailey/api/people/invites/resend ---
 //
-// Re-mints the invite: fresh token, fresh 48h expiry — the previously
-// emailed link stops working (single live token per invite). Role and
-// original inviter are preserved.
+// Re-mints the invite: fresh token, fresh 48h expiry — any link handed
+// out earlier stops working (single live token per invite). Role and
+// original inviter are preserved. The route name is historical; it
+// hands the admin a NEW link to copy rather than sending anything.
 func handleBaileyInviteResend(w http.ResponseWriter, r *http.Request, actor string) {
 	var req struct {
 		Email string `json:"email"`
@@ -365,8 +338,8 @@ func handleBaileyInviteResend(w http.ResponseWriter, r *http.Request, actor stri
 		return
 	}
 	// Same guard as create: if the invitee has since gained a trusted
-	// device (e.g. joined via the normal pending-pair flow), re-sending
-	// would email a link that can only ever answer 409 already_trusted.
+	// device (e.g. joined via the normal pending-pair flow), a fresh
+	// link could only ever answer 409 already_trusted.
 	if devs, err := dbListDevices(inv.Email); err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -375,11 +348,6 @@ func handleBaileyInviteResend(w http.ResponseWriter, r *http.Request, actor stri
 		return
 	}
 
-	client, err := newAOCInviteClient()
-	if err != nil {
-		writeJSONError(w, "AOC not configured: "+err.Error(), http.StatusBadGateway)
-		return
-	}
 	token, hash, err := generateInviteToken()
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
@@ -394,25 +362,17 @@ func handleBaileyInviteResend(w http.ResponseWriter, r *http.Request, actor stri
 	inv.TokenHash = hash
 	inv.CreatedAt = now
 	inv.ExpiresAt = now.Add(inviteTTL)
-	inv.EmailSent = false
 	if err := dbUpsertInvite(inv); err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	emailSent, emailErr := sendInviteEmailViaAOC(client, inv, link, actor)
-	inv.EmailSent = emailSent
 	_ = recordEvent(actor, auditInviteResend, inv.Email)
 
-	resp := map[string]any{
+	writeJSON(w, map[string]any{
 		"ok":          true,
-		"email_sent":  emailSent,
 		"invite_link": link,
 		"invite":      inviteToDTO(inv, now),
-	}
-	if emailErr != "" {
-		resp["email_error"] = emailErr
-	}
-	writeJSON(w, resp)
+	})
 }
 
 // --- POST /bailey/api/invite/redeem (gate API — untrusted devices) ---
@@ -421,7 +381,8 @@ func handleBaileyInviteResend(w http.ResponseWriter, r *http.Request, actor stri
 // FIRST device. Reachable pre-device-trust by design (the invitee has
 // no trusted device yet); the security model matches recover/self-trust:
 // the action requires a secret only the legitimate user holds (the
-// emailed high-entropy single-use token), bound to the OAuth identity
+// high-entropy single-use token an admin handed them out-of-band),
+// bound to the OAuth identity
 // (EqualFold email match) and to the zero-devices precondition. The
 // consume is a single guarded UPDATE, so two racing redeems can't both
 // mint a device.
@@ -455,7 +416,7 @@ func handleGateInviteRedeem(w http.ResponseWriter, r *http.Request, email string
 		return
 	}
 	if inv.expired(now) {
-		writeJSONCodeError(w, "that invite has expired — ask an admin to send a new one", "expired", http.StatusGone)
+		writeJSONCodeError(w, "that invite has expired — ask an admin for a new link", "expired", http.StatusGone)
 		return
 	}
 	// Bound to the invitee: whoever holds the link must sign in as the

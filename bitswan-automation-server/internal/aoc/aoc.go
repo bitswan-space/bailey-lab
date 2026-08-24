@@ -514,63 +514,6 @@ func (c *AOCClient) ListOrgUsers() ([]OrgUser, error) {
 	return response.Users, nil
 }
 
-// InviteEmailRequest is the payload for SendInviteEmail. InviteURL is
-// the full invite link (the AOC validates its host against this
-// server's registered domain before mailing it); InvitedBy, Role and
-// ExpiresAt only shape the email copy.
-type InviteEmailRequest struct {
-	Email     string `json:"email"`
-	InviteURL string `json:"invite_url"`
-	InvitedBy string `json:"invited_by"`
-	Role      string `json:"role,omitempty"`
-	ExpiresAt string `json:"expires_at,omitempty"`
-}
-
-// InviteEmailError is a structured failure from the AOC's
-// send-invite-email endpoint. Code carries the AOC's machine-readable
-// reason (e.g. "smtp_not_configured", "send_failed", "not_in_org") so
-// callers can branch — the daemon keeps the invite and hands the admin
-// a copyable link when only delivery failed.
-type InviteEmailError struct {
-	StatusCode int
-	Code       string
-	Message    string
-}
-
-func (e *InviteEmailError) Error() string {
-	if e.Code != "" {
-		return fmt.Sprintf("AOC invite email failed (%d %s): %s", e.StatusCode, e.Code, e.Message)
-	}
-	return fmt.Sprintf("AOC invite email failed (%d): %s", e.StatusCode, e.Message)
-}
-
-// SendInviteEmail asks the AOC to email an invite link to an org
-// member using the SMTP service configured there. Returns nil on
-// success; a *InviteEmailError when the AOC rejected or couldn't
-// deliver; any other error means the AOC wasn't reachable at all.
-func (c *AOCClient) SendInviteEmail(req InviteEmailRequest) error {
-	jsonBytes, _ := json.Marshal(req)
-	url := fmt.Sprintf("%s/api/automation_server/send-invite-email", c.settings.AOCUrl)
-	resp, err := c.sendRequest("POST", url, jsonBytes)
-	if err != nil {
-		return fmt.Errorf("error sending request to %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusOK {
-		return nil
-	}
-	var aocErr struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
-	}
-	if err := json.Unmarshal(body, &aocErr); err == nil && (aocErr.Code != "" || aocErr.Error != "") {
-		return &InviteEmailError{StatusCode: resp.StatusCode, Code: aocErr.Code, Message: aocErr.Error}
-	}
-	return &InviteEmailError{StatusCode: resp.StatusCode, Message: fmt.Sprintf("%s - %s", resp.Status, string(body))}
-}
-
 // GetWorkspaceIdentityEnv is the AOC-derived env a workspace's containers
 // receive: the worker identity contract, and nothing else.
 //

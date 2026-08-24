@@ -477,7 +477,7 @@ function RecoveryScene({ onRecovered, goConsole, gateState }) {
 }
 
 // ─── 4. INVITE REDEMPTION ───────────────────────────────────────────────────
-// The user arrived through an emailed invite link (?invite=<token>, stashed by
+// The user arrived through an invite link (?invite=<token>, stashed by
 // console-app before the query was stripped). POST /bailey/api/invite/redeem
 // trusts THIS browser when the token is valid, unconsumed, unexpired, matches
 // the signed-in account, and this is the user's FIRST device. Every failure
@@ -516,7 +516,7 @@ function InviteScene({ token, gateState, clearToken, onFallback }) {
   const FAILS = {
     expired: {
       icon: 'clock', title: 'This invite has expired',
-      text: 'Invite links are valid for 48 hours. Ask an admin to re-send it — or continue below and have your device approved the standard way.',
+      text: 'Invite links are valid for 48 hours. Ask an admin for a new link — or continue below and have your device approved the standard way.',
     },
     consumed: {
       icon: 'mail-x', title: 'This invite was already used',
@@ -529,8 +529,8 @@ function InviteScene({ token, gateState, clearToken, onFallback }) {
     wrong_account: {
       icon: 'user-x', title: 'This invite was sent to a different account',
       text: email
-        ? `You’re signed in as ${email}. Sign out and sign back in with the account the invite was emailed to.`
-        : 'Sign out and sign back in with the account the invite was emailed to.',
+        ? `You’re signed in as ${email}. Sign out and sign back in with the account the invite was issued for.`
+        : 'Sign out and sign back in with the account the invite was issued for.',
     },
     unclaimed: {
       icon: 'clock', title: 'This server isn’t set up yet',

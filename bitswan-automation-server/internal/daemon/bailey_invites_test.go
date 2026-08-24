@@ -13,17 +13,18 @@ import (
 )
 
 // Tests for the invite lifecycle (bailey_people_invites.go +
-// bailey_store_invites.go): admin create/list/revoke/resend, the
+// bailey_store_invites.go): admin create/list/revoke/re-mint, the
 // untrusted-device redeem gate API, and the store's atomic consume.
-// The AOC is faked at the newAOCInviteClient seam — no network.
+// The AOC is faked at the newAOCInviteClient seam — no network. Since
+// bailey-lab#369 the daemon never asks anyone to deliver the link: the
+// only way out of the create/re-mint handlers is invite_link in the
+// response body, for the admin to copy.
 
 // --- test doubles --------------------------------------------------------
 
 type fakeAOCClient struct {
 	users   []aoc.OrgUser
 	listErr error
-	sendErr error
-	sent    []aoc.InviteEmailRequest
 }
 
 func (f *fakeAOCClient) ListOrgUsers() ([]aoc.OrgUser, error) {
@@ -31,11 +32,6 @@ func (f *fakeAOCClient) ListOrgUsers() ([]aoc.OrgUser, error) {
 		return nil, f.listErr
 	}
 	return f.users, nil
-}
-
-func (f *fakeAOCClient) SendInviteEmail(req aoc.InviteEmailRequest) error {
-	f.sent = append(f.sent, req)
-	return f.sendErr
 }
 
 func stubAOC(t *testing.T, f *fakeAOCClient) *fakeAOCClient {
@@ -170,13 +166,6 @@ func TestInviteStore_CRUDAndAtomicConsume(t *testing.T) {
 	if got == nil || got.consumed() || got.TokenHash != hash2 || got.Role != roleAdmin {
 		t.Errorf("upsert did not replace: %+v", got)
 	}
-	if err := dbSetInviteEmailSent(email, true); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := dbLoadInviteByEmail(email); got == nil || !got.EmailSent {
-		t.Error("email_sent not persisted")
-	}
-
 	if deleted, _ := dbDeleteInvite(email); !deleted {
 		t.Error("delete reported no row")
 	}
@@ -201,15 +190,15 @@ func TestInvite_CreateHappyPath(t *testing.T) {
 	invitee := "invitee-happy@example.com"
 	// AOC knows the address with different casing — the daemon must adopt
 	// the AOC's canonical form.
-	f := stubAOC(t, &fakeAOCClient{users: []aoc.OrgUser{{Email: "Invitee-Happy@example.com", Username: "grace", Verified: true}}})
+	stubAOC(t, &fakeAOCClient{users: []aoc.OrgUser{{Email: "Invitee-Happy@example.com", Username: "grace", Verified: true}}})
 
 	w := apiInvite(t, invitee, roleMember)
 	if w.Code != http.StatusOK {
 		t.Fatalf("invite = %d\n%s", w.Code, w.Body.String())
 	}
 	resp := decodeBody(t, w)
-	if resp["email_sent"] != true {
-		t.Errorf("email_sent = %v, want true", resp["email_sent"])
+	if _, ok := resp["email_sent"]; ok {
+		t.Error("response still carries email_sent; the invite email path is gone")
 	}
 	link, _ := resp["invite_link"].(string)
 	wantPrefix := "https://bailey-onboard." + domain + "/?invite="
@@ -228,14 +217,11 @@ func TestInvite_CreateHappyPath(t *testing.T) {
 	if inv.TokenHash != hashInviteToken(token) {
 		t.Error("stored hash doesn't match the token in the link")
 	}
-	if !inv.EmailSent || inv.Role != roleMember {
+	if inv.Role != roleMember {
 		t.Errorf("row = %+v", inv)
 	}
 	if until := time.Until(inv.ExpiresAt); until < inviteTTL-time.Minute || until > inviteTTL {
 		t.Errorf("expiry %v from now, want ~%v", until, inviteTTL)
-	}
-	if len(f.sent) != 1 || f.sent[0].InviteURL != link || f.sent[0].InvitedBy != "boss@example.com" {
-		t.Errorf("AOC email request = %+v", f.sent)
 	}
 }
 
@@ -300,30 +286,32 @@ func TestInvite_CreateValidation(t *testing.T) {
 	}
 }
 
-func TestInvite_EmailFailureStillReturnsLink(t *testing.T) {
+// The link never leaves through anything but the response body: no
+// delivery channel exists any more, so create must hand back a
+// copyable link and say nothing about email (bailey-lab#369).
+func TestInvite_CreateReturnsCopyableLinkAndNoEmailFields(t *testing.T) {
 	writeTestConfig(t)
 	markServerClaimed(t)
-	invitee := "invitee-smtpless@example.com"
-	stubAOC(t, &fakeAOCClient{
-		users:   []aoc.OrgUser{{Email: invitee}},
-		sendErr: &aoc.InviteEmailError{StatusCode: 409, Code: "smtp_not_configured", Message: "SMTP is not configured"},
-	})
+	invitee := "invitee-copylink@example.com"
+	stubAOC(t, &fakeAOCClient{users: []aoc.OrgUser{{Email: invitee}}})
 	w := apiInvite(t, invitee, roleMember)
 	if w.Code != http.StatusOK {
 		t.Fatalf("invite = %d\n%s", w.Code, w.Body.String())
 	}
 	resp := decodeBody(t, w)
-	if resp["email_sent"] != false {
-		t.Error("email_sent should be false when the AOC couldn't deliver")
-	}
 	if link, _ := resp["invite_link"].(string); link == "" {
-		t.Error("no copyable invite_link on email failure — the mandated fallback")
+		t.Error("no invite_link in the response — the admin has no way to invite anyone")
 	}
-	if errText, _ := resp["email_error"].(string); !strings.Contains(errText, "smtp_not_configured") {
-		t.Errorf("email_error = %q, want the AOC failure surfaced", errText)
+	for _, gone := range []string{"email_sent", "email_error"} {
+		if _, ok := resp[gone]; ok {
+			t.Errorf("response still carries %q", gone)
+		}
 	}
-	if inv, _ := dbLoadInviteByEmail(invitee); inv == nil || inv.EmailSent {
-		t.Error("row should exist with email_sent=false")
+	// The invites list is the admin's other view of the same rows; it
+	// must not advertise a delivery state either.
+	lw := dispatch(baileyReq(http.MethodGet, "/bailey/api/people/invites", "boss@example.com", adminGrp))
+	if strings.Contains(lw.Body.String(), "email_sent") {
+		t.Errorf("invites list still reports email_sent: %s", lw.Body.String())
 	}
 }
 
@@ -343,14 +331,18 @@ func TestInvite_ListResendRevoke(t *testing.T) {
 		t.Fatalf("list = %d\n%s", w.Code, w.Body.String())
 	}
 
-	// Resend re-mints the token and keeps the role; the old link dies.
+	// Re-minting rotates the token and keeps the role; the old link dies
+	// and the admin gets a fresh one to copy.
 	w = dispatch(adminJSON("/bailey/api/people/invites/resend", fmt.Sprintf(`{"email":%q}`, invitee)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("resend = %d\n%s", w.Code, w.Body.String())
 	}
+	if link, _ := decodeBody(t, w)["invite_link"].(string); link == "" {
+		t.Error("re-mint returned no invite_link")
+	}
 	after, _ := dbLoadInviteByEmail(invitee)
 	if after == nil || after.TokenHash == before.TokenHash {
-		t.Error("resend must rotate the token")
+		t.Error("re-mint must rotate the token")
 	}
 	if after.Role != roleAdmin || after.CreatedBy != before.CreatedBy {
 		t.Errorf("resend changed role/creator: %+v", after)

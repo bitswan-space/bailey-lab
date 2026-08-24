@@ -333,16 +333,17 @@ export const Api = {
   // with an AOC (or the AOC is unreachable).
   orgUsers: () => getJSON('/bailey/api/people/org-users'),
   // Invite an org user: creates a 48h single-use invite on the daemon and
-  // asks the AOC to email the link. The response ALWAYS carries invite_link
-  // so the admin can share it manually when email delivery fails
-  // (email_sent:false + email_error).
+  // returns invite_link for the ADMIN to copy and deliver. Nothing on the
+  // platform sends it — redeeming the link trusts a device, so an emailed
+  // link would make a mailbox enough to earn device trust (#369).
   invite: (email, role) => postJSON('/bailey/api/people/invite', { email, role }),
   // Outstanding (unconsumed) invites, expired ones included (flagged).
   invites: () => getJSON('/bailey/api/people/invites'),
   revokeInvite: (email) => postJSON('/bailey/api/people/invites/revoke', { email }),
-  // Re-sending regenerates the token + expiry (the old link stops working).
+  // Re-mints the token + expiry and returns the fresh invite_link (the
+  // previous one stops working). Route name is historical — it sends nothing.
   resendInvite: (email) => postJSON('/bailey/api/people/invites/resend', { email }),
-  // Redeem an emailed invite token — a GATE api, callable from an untrusted
+  // Redeem an invite token — a GATE api, callable from an untrusted
   // device. Success trusts THIS browser (sets the device cookie) and returns
   // a redirect_path; failures carry a code (invalid|expired|consumed|
   // wrong_account|already_trusted|unclaimed) the invite scene branches on.
