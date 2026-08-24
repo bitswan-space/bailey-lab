@@ -85,10 +85,12 @@ function AccessibleAppTile({ app, onOpen }) {
       </span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <span style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{app.name}</span>
+          {/* title attr: the tiles are narrow and ellipsize, so the full name
+              must stay recoverable on hover (#319). */}
+          <span title={app.name} style={{ fontSize: 13.5, fontWeight: 600, color: WC.fg, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{app.name}</span>
           {app.stage && app.stage !== 'production' && <WPill tone="outline" size="xs">{app.stage}</WPill>}
         </div>
-        <div style={{ fontSize: 11.5, color: WC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.host}</div>
+        <div title={app.host} style={{ fontSize: 11.5, color: WC.muted, fontFamily: 'Geist Mono, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{app.host}</div>
       </div>
       <WIcon name="external-link" size={14} color={WC.mutedFg} />
     </button>
@@ -521,10 +523,18 @@ function WorkspacesView({ ctx }) {
       .catch(() => { if (alive) setAppsRaw([]); });
     return () => { alive = false; };
   }, []);
+  // Title preference (#319): the business process's human-readable name when
+  // the backend resolved one, else the endpoint's own display name, else the
+  // hostname (exactly the old behaviour). bpLabel carries the same name for
+  // the BP cluster headings.
   const accessibleApps = (appsRaw || []).map(e => ({
-    id: e.hostname, name: e.display_name || e.hostname, host: e.hostname,
+    id: e.hostname,
+    name: e.business_process_display_name || e.display_name || e.hostname,
+    host: e.hostname,
     url: 'https://' + e.hostname, stage: e.stage,
-    workspace: e.workspace || '', bp: e.business_process || '', parent: e.parent_endpoint || '',
+    workspace: e.workspace || '', bp: e.business_process || '',
+    bpLabel: e.business_process_display_name || e.business_process || '',
+    parent: e.parent_endpoint || '',
   }));
   // Group the accessible apps by the workspace they belong to (#280) so a
   // person granted many endpoints sees them organised, not as one flat wall.
@@ -547,10 +557,12 @@ function WorkspacesView({ ctx }) {
   const bpClusters = (apps) => {
     const map = new Map();
     for (const a of apps) {
-      if (!map.has(a.bp)) map.set(a.bp, { bp: a.bp, apps: [] });
+      // label: the BP's human-readable name when the backend resolved one,
+      // falling back to the slug (#319). Cluster identity stays the slug.
+      if (!map.has(a.bp)) map.set(a.bp, { bp: a.bp, label: a.bpLabel || a.bp, apps: [] });
       map.get(a.bp).apps.push(a);
     }
-    return [...map.values()].sort((x, y) => (x.bp === '' ? 1 : y.bp === '' ? -1 : x.bp.localeCompare(y.bp)));
+    return [...map.values()].sort((x, y) => (x.bp === '' ? 1 : y.bp === '' ? -1 : x.label.localeCompare(y.label)));
   };
   const noTotp = !data.recovery.totpActive;
   const trashedCount = data.workspaces.filter(w => w.isTrashed).length;
@@ -767,7 +779,7 @@ function WorkspacesView({ ctx }) {
                     {bpClusters(g.apps).map(c => (
                       <div key={c.bp || '(none)'}>
                         {c.bp && (
-                          <div style={{ fontSize: 10.5, fontWeight: 600, color: WC.mutedFg, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 8 }}>{c.bp}</div>
+                          <div title={c.label} style={{ fontSize: 10.5, fontWeight: 600, color: WC.mutedFg, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 8 }}>{c.label}</div>
                         )}
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
                           {c.apps.map(a => <AccessibleAppTile key={a.id} app={a} onOpen={() => openUrl(a.url, a.name)} />)}

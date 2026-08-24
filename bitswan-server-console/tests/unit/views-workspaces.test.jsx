@@ -530,4 +530,38 @@ describe('WorkspacesView', () => {
     fireEvent.click(screen.getByText('Fio external'));
     expect(s.openUrl).toHaveBeenCalledWith('https://tom-fio-external.d', 'Fio external');
   });
+
+  it('titles app tiles with the BP display name, hostname fallback (#319)', async () => {
+    const s = spies();
+    installFetch({ '/bailey/api/endpoints': { json: { endpoints: [
+      // Gitops route with a resolved BP name: title is the human-readable
+      // name, NOT the subdomain-ish display_name/hostname.
+      { hostname: 'tom-fio-frontend-9409-live-dev.d', display_name: 'tom-fio-frontend-9409-live-dev.d', kind: 'frontend', stage: 'live-dev', caller_role: 'access',
+        parent_endpoint: 'tom-dashboard.d', workspace: 'tom', business_process: 'fio-frontend-9409', business_process_display_name: 'Fio Invoicing' },
+      // No BP name resolved: falls back to the endpoint display_name.
+      { hostname: 'tom-legacy.d', display_name: 'Legacy app', kind: 'frontend', stage: 'production', caller_role: 'access',
+        parent_endpoint: 'tom-dashboard.d', workspace: 'tom', business_process: 'legacy' },
+      // Neither: falls back to the hostname (old behaviour).
+      { hostname: 'tom-bare.d', display_name: '', kind: 'frontend', stage: '', caller_role: 'access',
+        parent_endpoint: 'tom-dashboard.d', workspace: 'tom' },
+    ] } } });
+    render(<Host View={WorkspacesView} data={makeData()} extra={s} />);
+    await waitFor(() => expect(screen.getByText('Apps you can access')).toBeTruthy());
+    // Human-readable BP name appears twice: the BP cluster heading (a div,
+    // uppercased via CSS) and the tile title (a span, recoverable on hover).
+    const named = screen.getAllByText('Fio Invoicing');
+    expect(named.length).toBe(2);
+    const tileTitle = named.find(el => el.tagName === 'SPAN');
+    expect(tileTitle.getAttribute('title')).toBe('Fio Invoicing');
+    // The hostname stays as the mono subtitle; the slug no longer shows.
+    expect(screen.getByText('tom-fio-frontend-9409-live-dev.d')).toBeTruthy();
+    expect(screen.queryByText('fio-frontend-9409')).toBeNull();
+    // Fallback chain: endpoint display_name, then hostname (which then shows
+    // as both the title and the mono subtitle — today's behaviour).
+    expect(screen.getByText('Legacy app')).toBeTruthy();
+    expect(screen.getAllByText('tom-bare.d').length).toBe(2);
+    // Launch passes the human-readable label through.
+    fireEvent.click(tileTitle);
+    expect(s.openUrl).toHaveBeenCalledWith('https://tom-fio-frontend-9409-live-dev.d', 'Fio Invoicing');
+  });
 });

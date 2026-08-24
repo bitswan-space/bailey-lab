@@ -62,6 +62,15 @@ def _validated_display_name(raw: str) -> str:
     return name
 
 
+@router.get("/")
+async def list_processes() -> dict:
+    """Flat list of every known BP — same entries the `processes` SSE event
+    broadcasts (id, name/slug, display_name, in_main, copies). REST so
+    request/response consumers get it too: the automation-server daemon reads
+    it to label a BP's endpoints with the human-readable name (#319)."""
+    return {"processes": process_service.get_all_processes()}
+
+
 class DeleteProcessRequest(BaseModel):
     # Injected by the dashboard proxy from the validated token — attribution
     # for the "Delete business process" commit + the queue task.

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -36,11 +37,16 @@ type endpointListEntry struct {
 	// belongs to (resolved from the parent dashboard host, or the endpoint's
 	// own host for kind=workspace rows); BusinessProcess is the bitswan.yaml
 	// business process a gitops-deployed route was reconciled from.
-	ParentEndpoint  string          `json:"parent_endpoint,omitempty"`
-	Workspace       string          `json:"workspace,omitempty"`
-	BusinessProcess string          `json:"business_process,omitempty"`
-	CallerRole      string          `json:"caller_role"`      // owner | access | viewer (server owner) | none
-	Grants          []endpointGrant `json:"grants,omitempty"` // populated for owner/server-owner views
+	ParentEndpoint  string `json:"parent_endpoint,omitempty"`
+	Workspace       string `json:"workspace,omitempty"`
+	BusinessProcess string `json:"business_process,omitempty"`
+	// BusinessProcessDisplayName is the BP's human-readable name (#319),
+	// resolved live from the workspace's gitops (process.toml `name`).
+	// Empty when the endpoint has no BP, the BP was never renamed, or
+	// gitops couldn't be reached — clients fall back to the hostname.
+	BusinessProcessDisplayName string          `json:"business_process_display_name,omitempty"`
+	CallerRole                 string          `json:"caller_role"`      // owner | access | viewer (server owner) | none
+	Grants                     []endpointGrant `json:"grants,omitempty"` // populated for owner/server-owner views
 }
 
 type endpointListing struct {
@@ -151,6 +157,13 @@ func buildEndpointListing(callerEmail string, callerGroups []string, r *http.Req
 		}
 		out.Endpoints = append(out.Endpoints, entry)
 	}
+	// Label gitops-deployed endpoints with their BP's human-readable name
+	// (#319). Best-effort and cached — see bp_display_names.go.
+	ctx := context.Background()
+	if r != nil {
+		ctx = r.Context()
+	}
+	annotateBPDisplayNames(ctx, out.Endpoints)
 	return out, nil
 }
 
