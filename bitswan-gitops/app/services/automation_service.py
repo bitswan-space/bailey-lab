@@ -3303,7 +3303,7 @@ class AutomationService:
         return result
 
     # ── Supply chain (SBOM + CVEs) ───────────────────────────────────────────
-    def read_supply_chain(self, bp: str, stage: str) -> dict:
+    def read_supply_chain(self, bp: str, stage: str, force: bool = False) -> dict:
         """SBOM + CVE rollup for the image(s) deployed to a BP stage, with the
         out-of-scope markings. Packages and CVEs are merged (deduped) across the
         stage's member images. Out-of-scope markings are a CODE property — they
@@ -3335,8 +3335,13 @@ class AutomationService:
             # A recorded FAILURE used to be treated as a final answer here, so an
             # image scanned during a bad window (vuln DB not downloaded yet, the
             # driver restarting) stayed "unavailable" forever even after the host
-            # recovered. should_rescan retries it on a cooldown instead.
-            if supply_chain_service.should_rescan(scan):
+            # recovered. should_rescan retries it on a cooldown instead — and an
+            # explicit Retry (`force`) skips that cooldown entirely, because the
+            # operator pressing it has usually just repaired the host.
+            if force:
+                supply_chain_service.clear_failure(iid)
+                supply_chain_service.spawn_scan(ref, iid, force_cve=True)
+            elif supply_chain_service.should_rescan(scan):
                 supply_chain_service.spawn_scan(ref, iid)
         return self._supply_chain_report(
             bp, realm, image_ids, cve_waivers.waiver_list(bp, None)
@@ -3442,7 +3447,9 @@ class AutomationService:
             source_dir, dirs_to_merge, base_image, auto_conf.mount_path, checksum
         )
 
-    async def preview_supply_chain(self, bp: str, copy: str | None = None) -> dict:
+    async def preview_supply_chain(
+        self, bp: str, copy: str | None = None, force: bool = False
+    ) -> dict:
         """SBOM + CVE preview for the image(s) a deploy of `bp` WOULD build from
         the current source (the Sync & Deploy → Checks tab). Bakes each member
         automation's image — content-addressed, so it's the exact artifact a
@@ -3462,8 +3469,12 @@ class AutomationService:
             image, image_id = await self._bake_source_for_scan(s["relative_path"])
             if image and image_id:
                 # Same retry rule as the deployed rollup: a cached failure is
-                # retried on a cooldown rather than re-run on every single view.
-                if supply_chain_service.should_rescan(
+                # retried on a cooldown rather than re-run on every single view,
+                # and an explicit Retry (`force`) bypasses the cooldown.
+                if force:
+                    supply_chain_service.clear_failure(image_id)
+                    supply_chain_service.spawn_scan(image, image_id, force_cve=True)
+                elif supply_chain_service.should_rescan(
                     supply_chain_service.read_image_scan(image_id)
                 ):
                     supply_chain_service.spawn_scan(image, image_id)

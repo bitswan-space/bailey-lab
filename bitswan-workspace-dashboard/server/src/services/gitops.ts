@@ -1170,9 +1170,10 @@ export class GitopsClient {
   async supplyChain(
     bp: string,
     stage: string,
+    force = false,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
-      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}${force ? '&force=true' : ''}`,
       { headers: { ...this.authHeaders() } },
     );
     let body: unknown = null;
@@ -1189,8 +1190,12 @@ export class GitopsClient {
   async supplyChainPreview(
     bp: string,
     copy: string | null,
+    force = false,
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const q = copy ? `?copy=${encodeURIComponent(copy)}` : '';
+    const params = new URLSearchParams();
+    if (copy) params.set('copy', copy);
+    if (force) params.set('force', 'true');
+    const q = params.size ? `?${params}` : '';
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${q}`,
       { headers: { ...this.authHeaders() } },

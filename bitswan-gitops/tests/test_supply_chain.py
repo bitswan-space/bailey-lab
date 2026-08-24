@@ -419,6 +419,53 @@ def test_recorded_failures_are_retried_after_the_cooldown():
     assert scs.should_rescan({"status": "unavailable"}) is True
 
 
+def test_retry_forces_a_rescan_through_the_cooldown(tmp_path, monkeypatch):
+    """The panel's Retry must actually rescan. The cooldown paces AUTOMATIC
+    refetches, but an operator pressing Retry has usually just fixed the host —
+    serving them the identical cached error for 10 minutes makes the button a
+    lie (PR #377 review)."""
+    svc, d = _svc(tmp_path, monkeypatch)
+    cve_path = scs._cve_path(d, scs._key("sha256:fe"))
+    scs._write_failure(cve_path, scs.FAIL_DB_UNREADABLE, "permission denied")
+
+    # Freshly recorded, so the automatic path deliberately declines to rescan.
+    assert scs.should_rescan(scs.read_image_scan("sha256:fe")) is False
+
+    spawned = []
+    monkeypatch.setattr(
+        scs, "spawn_scan", lambda ref, iid, **kw: spawned.append((iid, kw))
+    )
+
+    # A normal view leaves the cached failure alone...
+    svc.read_supply_chain("shop", "dev")
+    assert spawned == []
+    assert os.path.exists(cve_path)
+
+    # ...but Retry discards it and rescans now.
+    out = svc.read_supply_chain("shop", "dev", force=True)
+    assert ("sha256:fe", {"force_cve": True}) in spawned
+    assert not os.path.exists(cve_path), "the stale failure survived a forced retry"
+    # With the failure gone and a scan in flight, the panel shows the honest
+    # "scanning" state rather than repeating the error it was just asked to clear.
+    assert out["status"] == "pending"
+
+
+def test_clear_failure_never_discards_a_good_scan(tmp_path, monkeypatch):
+    """Retry may throw away an error; it must never throw away real results."""
+    d = str(tmp_path / "sc")
+    monkeypatch.setattr(scs, "supply_chain_dir", lambda: d)
+    _write_scan(
+        d,
+        "sha256:ok",
+        artifacts=[{"name": "openssl", "version": "3.0.11", "type": "deb"}],
+        matches=[("CVE-2023-5678", "High", "openssl", "3.0.11")],
+    )
+    assert scs.clear_failure("sha256:ok") is False
+    assert scs.read_image_scan("sha256:ok")["status"] == "ok"
+    # Nothing cached at all is not a failure to clear either.
+    assert scs.clear_failure("sha256:nothing-here") is False
+
+
 def test_partial_scan_failure_never_reads_as_a_clean_image(tmp_path, monkeypatch):
     """One member image scanning fine while another fails used to report `ok` —
     a partial scan rendered as a complete, clean bill of health."""

@@ -1222,17 +1222,24 @@ export const api = {
   /** Firewall: download URL for a host's stored DPA PDF (open in a new tab). */
   firewallDpaUrl: (bp: string, host: string) =>
     `/api/automations/business-processes/${encodeURIComponent(bp)}/firewall/dpa?host=${encodeURIComponent(host)}`,
-  /** Supply chain: SBOM packages + CVEs + waiver log for a stage's image(s). */
-  supplyChain: (bp: string, stage: string) =>
+  /** Supply chain: SBOM packages + CVEs + waiver log for a stage's image(s).
+   *  `force` is the panel's Retry — discard a cached failure and rescan NOW,
+   *  instead of waiting out the cooldown that paces automatic refetches. */
+  supplyChain: (bp: string, stage: string, force = false) =>
     getJson<SupplyChainReport>(
-      `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}`,
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain?stage=${encodeURIComponent(stage)}${force ? '&force=true' : ''}`,
     ),
   /** Supply chain: CVEs for the image a deploy of this BP would build from the
-   *  current copy's source (Deploy → Supply Chain Security). Builds + scans on demand. */
-  supplyChainPreview: (bp: string, copy: string | null) =>
-    getJson<SupplyChainReport>(
-      `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${copy ? `?copy=${encodeURIComponent(copy)}` : ''}`,
-    ),
+   *  current copy's source (Deploy → Supply Chain Security). Builds + scans on
+   *  demand; `force` as above. */
+  supplyChainPreview: (bp: string, copy: string | null, force = false) => {
+    const q = new URLSearchParams();
+    if (copy) q.set('copy', copy);
+    if (force) q.set('force', 'true');
+    return getJson<SupplyChainReport>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/supply-chain/preview${q.size ? `?${q}` : ''}`,
+    );
+  },
   /** Supply chain: mark a CVE out of scope. Stored in the copy's source tree
    *  (cve-waivers.yaml, committed) — authored from the Supply Chain Security tab, so it carries
    *  to main with the code. Returns the refreshed Supply Chain Security preview. */

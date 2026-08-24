@@ -395,24 +395,29 @@ class SupplyChainWaiverRequest(BaseModel):
 async def get_bp_supply_chain(
     bp: ValidBp,
     stage: str = Query("dev"),
+    force: bool = Query(False),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """SBOM packages + CVEs (syft/grype) for the image(s) deployed to a BP stage,
-    plus the out-of-scope waiver log."""
-    return automation_service.read_supply_chain(bp, stage)
+    plus the out-of-scope waiver log. `force` backs the panel's Retry: it discards
+    a cached failure and rescans now, skipping the cooldown that paces automatic
+    refetches."""
+    return automation_service.read_supply_chain(bp, stage, force=force)
 
 
 @router.get("/business-processes/{bp}/supply-chain/preview")
 async def get_bp_supply_chain_preview(
     bp: ValidBp,
     copy: str | None = Query(None),
+    force: bool = Query(False),
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """Pre-deploy SBOM + CVEs for the image(s) a deploy of this BP WOULD build
     from the current source (Sync & Deploy → Checks). Builds the content-
     addressed image (cache hit when unchanged) and scans it; same response
-    shape as the deployed supply-chain rollup."""
-    return await automation_service.preview_supply_chain(bp, copy)
+    shape as the deployed supply-chain rollup. `force` backs the panel's Retry
+    (see the deployed rollup above)."""
+    return await automation_service.preview_supply_chain(bp, copy, force=force)
 
 
 @router.post("/business-processes/{bp}/supply-chain/waivers")

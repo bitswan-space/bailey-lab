@@ -95,8 +95,9 @@ export function SupplyChainPanel({
    *  Required for editing; the read-only Supply chain tab omits it. */
   copy?: string | null;
   /** Override how the report is loaded (defaults to the deployed-image scan).
-   *  The Supply Chain Security tab passes a preview fetch of the about-to-be-built image. */
-  fetcher?: () => Promise<SupplyChainReport>;
+   *  The Supply Chain Security tab passes a preview fetch of the about-to-be-built image.
+   *  `force` is threaded through so Retry can demand a real rescan, not a refetch. */
+  fetcher?: (opts?: { force?: boolean }) => Promise<SupplyChainReport>;
   /** Message shown when there's nothing to scan (status not-deployed). */
   emptyHint?: string;
   /** Override the intro line above the rollup (e.g. the Supply Chain Security tab explains
@@ -118,8 +119,11 @@ export function SupplyChainPanel({
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
 
+  // `force` is an argument rather than state so runFetch's identity — and the
+  // effects keyed on it — never change just because a Retry was pressed.
   const fetchReport = useCallback(
-    () => (fetcher ? fetcher() : api.supplyChain(bp, stage)),
+    (force: boolean) =>
+      fetcher ? fetcher({ force }) : api.supplyChain(bp, stage, force),
     [bp, stage, fetcher],
   );
 
@@ -144,7 +148,7 @@ export function SupplyChainPanel({
   // never missed. Event-driven; the bake is serialized server-side so repeats
   // are safe cache hits.
   const runFetch = useCallback(
-    (showLoading: boolean) => {
+    (showLoading: boolean, force = false) => {
       if (fetchingRef.current) {
         queuedRef.current = true;
         return;
@@ -153,7 +157,7 @@ export function SupplyChainPanel({
       queuedRef.current = false;
       if (showLoading) setLoading(true);
       setError(null);
-      fetchReport()
+      fetchReport(force)
         .then((r) => {
           if (!mountedRef.current) return;
           statusRef.current = r?.status;
@@ -266,7 +270,7 @@ export function SupplyChainPanel({
         </pre>
         <button
           type="button"
-          onClick={() => runFetch(true)}
+          onClick={() => runFetch(true, true)}
           className="rounded border border-border px-3 py-1 text-xs font-medium hover:bg-accent"
         >
           Retry
@@ -311,7 +315,7 @@ export function SupplyChainPanel({
         )}
         <button
           type="button"
-          onClick={() => runFetch(true)}
+          onClick={() => runFetch(true, true)}
           className="rounded border border-border px-3 py-1 text-xs font-medium hover:bg-accent"
         >
           Retry
@@ -348,7 +352,7 @@ export function SupplyChainPanel({
           <div>
             <button
               type="button"
-              onClick={() => runFetch(true)}
+              onClick={() => runFetch(true, true)}
               className="mt-0.5 rounded border border-amber-300 bg-background px-2.5 py-1 text-[11px] font-medium text-amber-900 hover:bg-amber-100"
             >
               Retry

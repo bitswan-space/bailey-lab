@@ -148,6 +148,27 @@ def should_rescan(scan: dict) -> bool:
     return at is None or datetime.now(timezone.utc) - at >= FAILED_SCAN_RETRY_AFTER
 
 
+def clear_failure(image_id: str) -> bool:
+    """Drop a recorded FAILURE for an image so the next read reports `pending`
+    and a freshly-started scan is unmistakably in flight.
+
+    This backs the panel's explicit Retry. The cooldown in should_rescan exists
+    to stop *automatic* refetches hammering a broken host — but a human pressing
+    Retry has almost always just fixed the thing that was broken, and serving
+    them the identical cached error for up to FAILED_SCAN_RETRY_AFTER makes the
+    button a lie. Never removes a successful scan: this only discards a result
+    that is already an error."""
+    path = _cve_path(supply_chain_dir(), _key(image_id))
+    doc = _read_json(path)
+    if not doc or doc.get("status") != "unavailable":
+        return False
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+    return True
+
+
 # `command not found`, the shell convention. A missing scanner binary is its own
 # diagnosis ("this gitops image has no grype"), so it must not arrive as a
 # generic exception indistinguishable from grype crashing.
