@@ -1356,7 +1356,7 @@ function entryTone(e: BpHistoryEntry, isCurrent: boolean) {
 
 // ── Inspect modal (per deployment) ──────────────────────────────────────────
 type InspectPanel = 'scale' | 'files' | 'diff' | 'secrets' | 'image';
-const INSPECT_PANELS: InspectPanel[] = ['scale', 'files', 'diff', 'secrets', 'image'];
+const INSPECT_PANELS: InspectPanel[] = ['diff', 'files', 'scale', 'secrets', 'image'];
 function InspectModal({
   bp,
   stage,
@@ -1381,10 +1381,12 @@ function InspectModal({
   const bpLabel = useBpLabel();
   const label = bpLabel(bp);
   const isCurrent = !!current && entry.commit === current.commit;
+  // The current entry diffs against itself, so land it on the source tree
+  // instead of an empty diff.
   const [panel, setPanel] = useUrlEnum(
     'panel',
     INSPECT_PANELS,
-    isCurrent ? 'scale' : 'diff',
+    isCurrent ? 'files' : 'diff',
   );
   const [diff, setDiff] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
@@ -1499,9 +1501,9 @@ function InspectModal({
   }, [bp, stage, replicas, onScaled]);
 
   const tabs: { id: InspectPanel; icon: LucideIcon; label: string }[] = [
-    ...(isCurrent ? [{ id: 'scale' as const, icon: Scaling, label: 'Scale' }] : []),
-    { id: 'files', icon: FileText, label: 'Files' },
     { id: 'diff', icon: GitCompare, label: 'Diff vs current' },
+    { id: 'files', icon: FileText, label: 'Files' },
+    ...(isCurrent ? [{ id: 'scale' as const, icon: Scaling, label: 'Scale' }] : []),
     { id: 'secrets', icon: KeyRound, label: 'Secrets snapshot' },
     { id: 'image', icon: Download, label: 'Download image' },
   ];
@@ -1907,17 +1909,12 @@ function DeploymentCard({
             <span className="text-[11px] text-muted-foreground">Already running</span>
           ) : isCurrent ? (
             // The newest entry is the current state — you are already here, so
-            // there is nothing to roll back TO. Manage the running deployment.
-            <>
-              <Button variant="outline" size="sm" onClick={onInspect}>
-                <Scaling className="size-3.5" aria-hidden />
-                Scale
-              </Button>
-              <Button variant="default" size="sm" onClick={onInspect}>
-                <Search className="size-3.5" aria-hidden />
-                Inspect
-              </Button>
-            </>
+            // there is nothing to roll back TO. Inspect is the way in; scaling
+            // lives inside it, as one tab among the rest.
+            <Button variant="default" size="sm" onClick={onInspect}>
+              <Search className="size-3.5" aria-hidden />
+              Inspect
+            </Button>
           ) : isBackup ? (
             // Backup-domain audit record — read-only here (swaps/restores are
             // driven from the Backups + Disaster Recovery panels).

@@ -2795,7 +2795,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await clickSection(/Deployment history/i);
     await capture(dashPage, 'history');
     // Each deploy-history entry card shows its actions: a CURRENT entry has
-    // Scale + Inspect; a NON-current (prior) entry has Roll back + Inspect. To
+    // only Inspect; a NON-current (prior) entry has Roll back + Inspect. To
     // get a real diff we must Inspect a NON-current entry — locate the card that
     // carries a "Roll back" action and click the Inspect WITHIN that same card.
     // Filter to the "Deployed" chip: secret audit records (the dev-secrets
