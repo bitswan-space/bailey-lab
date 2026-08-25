@@ -278,6 +278,16 @@ export function TaskQueuePanel() {
     [items],
   );
 
+  // Failures that happened while the panel was COLLAPSED. Every action reports
+  // its failure here, in the server's own words — but a red row inside a panel
+  // nobody has opened is not a report, and "it doesn't seem to have done
+  // anything" is what that looks like from the outside. So the collapsed
+  // button says so, and says it in the colour of the thing it is about.
+  const failedCount = useMemo(
+    () => items.filter((i) => i.status === 'failed').length,
+    [items],
+  );
+
   // Newest is at the bottom — keep it in view as activity streams in (and when
   // the panel is first expanded). Guarded for the collapsed state (no list).
   const lastKey = items.length ? (items[items.length - 1]?.key ?? '') : '';
@@ -300,19 +310,34 @@ export function TaskQueuePanel() {
         type="button"
         onClick={toggle}
         aria-expanded={false}
-        aria-label="Show activity"
-        title="Show activity"
+        aria-label={failedCount > 0 ? `Show activity — ${failedCount} failed` : 'Show activity'}
+        title={
+          failedCount > 0
+            ? `${failedCount} action(s) failed — open to read why`
+            : 'Show activity'
+        }
         className="pointer-events-auto fixed bottom-4 right-4 z-50 flex size-11 items-center justify-center rounded-full border border-border bg-background text-foreground shadow-lg hover:bg-accent"
       >
         {anyRunning ? (
           <Loader2 className="size-5 animate-spin text-blue-500" />
         ) : (
-          <ListTodo className="size-5 text-muted-foreground" />
+          <ListTodo
+            className={cn(
+              'size-5',
+              failedCount > 0 ? 'text-destructive' : 'text-muted-foreground',
+            )}
+          />
         )}
-        {activeCount > 0 && (
+        {activeCount > 0 ? (
           <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-blue-500 px-1 text-[10px] font-semibold leading-4 text-white">
             {activeCount}
           </span>
+        ) : (
+          failedCount > 0 && (
+            <span className="absolute -right-1 -top-1 flex min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold leading-4 text-white">
+              {failedCount}
+            </span>
+          )
         )}
       </button>
     );

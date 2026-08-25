@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useCopies, useDeployDone } from '@/components/workspace/WorkspaceProvider';
+import {
+  useCopies,
+  useCopyRefsMoved,
+  useDeployDone,
+} from '@/components/workspace/WorkspaceProvider';
 import {
   api,
   EdgeUnavailableError,
@@ -40,6 +44,10 @@ export interface BpDivergenceReading {
   /** True once we have either a reading or an error — i.e. we are no longer
    *  guessing. Screens wait on this before evicting a user from a step. */
   resolved: boolean;
+  /** The reading is about the world BEFORE an action this user just took, and
+   *  a fresh one is on its way. Screens may keep OFFERING routes from it; they
+   *  may not ASSERT anything from it. */
+  stale: boolean;
   /** Re-read now (coalesced). */
   recheck: () => void;
 }
@@ -101,6 +109,12 @@ export function useBpDivergence(
 
   const { copies: copiesSnapshot } = useCopies();
   const deployDone = useDeployDone();
+  // Our OWN ref-moving actions, whoever ran them: a pull, a merge-back, a
+  // version taken wholesale, a dev revert. The `copies` snapshot says the same
+  // thing eventually, and "eventually" is exactly the bug — a hotpatch taken
+  // from the Deployments tab left this screen reporting 0 ahead over a copy
+  // that was one commit ahead on the server.
+  const { copyRefsMoved } = useCopyRefsMoved();
 
   // One string, so the pair is a single dependency AND a single "is this
   // answer still about what I asked?" comparison. A space can occur in neither
@@ -134,6 +148,7 @@ export function useBpDivergence(
           // five numbers; when they are the same, nothing happened.
           setDivergence((prev) => (sameDivergence(prev, d) ? prev : d));
           setError(null);
+          setStale(false);
         })
         .catch((err: unknown) => {
           if (targetRef.current !== k) return;
@@ -161,6 +176,7 @@ export function useBpDivergence(
           }
           setDivergence(null);
           setError(errorMessage(err));
+          setStale(false);
         })
         .finally(() => {
           const next = againRef.current ? targetRef.current : '';
@@ -193,14 +209,37 @@ export function useBpDivergence(
 
   useEffect(() => () => window.clearTimeout(edgeRetryRef.current), []);
 
+  // One of OUR OWN actions moving the refs makes what we hold an answer about
+  // the world BEFORE it. That is marked STALE rather than thrown away, and the
+  // difference matters in both directions:
+  //
+  //   * a screen that ASSERTS something from it must not — "up to date" over
+  //     the commit a hotpatch just made is the bug this exists for;
+  //   * a screen that OFFERS A ROUTE from it still should. The Sync step is the
+  //     only way to pull, and blanking the count made it vanish the instant a
+  //     pull was requested — before anything had confirmed the pull worked. A
+  //     step that disappears because we stopped knowing is worse than one that
+  //     lingers for a second after it is done.
+  //
+  // Deliberately not marked stale by the `copies` snapshot: that changes on
+  // every git event anywhere in the workspace, and treating all of them as
+  // invalidating would leave the Deploy screen permanently mid-check.
+  const [stale, setStale] = useState(false);
+  const refsMovedAtMount = useRef(copyRefsMoved);
+  useEffect(() => {
+    if (copyRefsMoved === refsMovedAtMount.current) return;
+    setStale(true);
+  }, [copyRefsMoved]);
+
   useEffect(() => {
     recheck();
-  }, [recheck, key, copiesSnapshot, deployDone, nonce]);
+  }, [recheck, key, copiesSnapshot, deployDone, copyRefsMoved, nonce]);
 
   return {
     divergence,
     error,
     resolved: key === '' || divergence !== null || error !== null,
+    stale,
     recheck,
   };
 }

@@ -12,7 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { experimentNameFromTitle } from './copies.ts';
+import { experimentNameFromTitle } from './copies.js';
 
 const LONG_TITLE = 'Check vendor VAT-IDs against ARES';
 

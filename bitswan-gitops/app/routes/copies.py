@@ -68,11 +68,13 @@ itself. Please keep new state out of the listing and behind an endpoint.
 """
 
 import asyncio
+import contextlib
 import datetime
 import json
 import logging
 import os
 import re
+import time
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -93,6 +95,7 @@ from app.services.bp_git import (
     ff_branch_to_ref,
     ff_main_to_ref,
     list_bp_clones,
+    publish_main_from_clone,
     refresh_main_bp_checkout,
 )
 from app.services.git_server import (
@@ -316,6 +319,36 @@ def assert_copy_can_hold_bp(
         )
 
 
+def create_copy_meta_if_absent(copy_path: str, meta: dict) -> bool:
+    """Write a copy's `.copy.json` ONLY if it does not already have one.
+    Returns whether this call is the one that wrote it.
+
+    Create-only and atomic, via a uniquely-named temp file and `os.link` — a
+    hard link fails if the destination exists, so two callers racing to record
+    the same owner cannot both win, and neither can clobber a sidecar somebody
+    else wrote in between (an experiment's, say). `write_copy_meta`'s
+    rename-over semantics are wrong here for exactly that reason.
+    """
+    path = _copy_meta_path(copy_path)
+    if os.path.exists(path):
+        return False
+    tmp = f"{path}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+    return True
+
+
 def write_copy_meta(copy_path: str, meta: dict) -> None:
     """Write a copy's `.copy.json` atomically (temp file + rename), so a reader
     never sees a half-written sidecar."""
@@ -395,6 +428,48 @@ def _validate_new_copy_name(name: str) -> None:
             detail=(
                 f"Invalid copy name: at most {budget} characters (longer names "
                 "collide once truncated into per-copy database names)."
+            ),
+        )
+
+
+def _require_copy_owner(name: str, meta: dict | None, action: str) -> None:
+    """Guard for the operations that REPLACE the contents of somebody's copy.
+
+    Fails closed, and says WHICH of the three reasons it is, because they need
+    different things from the user. "No recorded owner" in particular is not
+    the user's fault: copies created before the metadata sidecar existed have
+    none, and a bare 403 sent people looking for a permissions problem that was
+    not there. Signing in records it (see ``ensure_copy_owner``), so the message
+    says so.
+    """
+    from app.task_queue import current_requester
+
+    requester = (current_requester.get() or "").strip()
+    owner = ((meta or {}).get("owner") or "").strip()
+    if not requester:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Could not tell who is asking, so {action} was refused. "
+                "Reload the page and sign in again."
+            ),
+        )
+    if not owner:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Copy '{name}' has no recorded owner, so {action} was refused "
+                "— this copy was created before copies recorded who they belong "
+                "to. Its owner signing in to this workspace records it, after "
+                "which this works normally."
+            ),
+        )
+    if owner != requester:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Copy '{name}' belongs to {owner}, so only they can {action}. "
+                "Switch to your own copy and do it there."
             ),
         )
 
@@ -544,6 +619,93 @@ async def get_copy_name_budget():
     `null` means nothing constrains it yet (no business processes).
     """
     return {"max_length": copy_name_budget()}
+
+
+class EnsureCopyOwnerRequest(BaseModel):
+    """The email the caller claims to be. It must MATCH the gate-verified
+    identity — it is here so the mismatch can be refused explicitly rather than
+    a caller being able to record somebody else as an owner."""
+
+    owner: str
+
+
+@router.post("/{name}/ensure-owner")
+async def ensure_copy_owner(name: str, body: EnsureCopyOwnerRequest):
+    """Record who a personal copy belongs to, when nothing recorded it before.
+
+    Copies created before the `.copy.json` sidecar existed have no owner, and
+    every operation that REPLACES a copy's contents fails closed without one.
+    That is the right default and the wrong outcome for a real person's own
+    copy: on deployed workspaces essentially every personal copy predates the
+    sidecar, so "Edit main's version without merging my changes" answered 403
+    for all of them.
+
+    So the dashboard calls this for the signed-in user's OWN copy, and it
+    records the gate-verified identity. Nothing is inferred: the owner written
+    is the email the gate proved, and the only copy it may be written to is the
+    one the caller is claiming as theirs.
+
+    Deliberately narrow:
+
+    * it never touches a copy that already has a sidecar — an existing record
+      is the truth, including one that says the copy is somebody else's;
+    * it refuses when the claimed owner is not the gate-verified requester;
+    * it refuses `main`, which belongs to nobody and must keep failing closed;
+    * it is create-only and atomic, so concurrent first logins cannot fight.
+
+    A legacy copy whose owner never signs in again therefore stays unowned, and
+    the guards keep refusing it — with a message that says that is why.
+    """
+    from app.task_queue import current_requester
+
+    _validate_copy_name(name)
+    claimed = (body.owner or "").strip()
+    requester = (current_requester.get() or "").strip()
+    if not requester:
+        raise HTTPException(
+            status_code=403,
+            detail="Could not tell who is asking; nothing was recorded.",
+        )
+    if not claimed or claimed.lower() != requester.lower():
+        raise HTTPException(
+            status_code=403,
+            detail=("A copy's owner can only be recorded by that person themselves."),
+        )
+    if name == "main":
+        raise HTTPException(
+            status_code=400,
+            detail="The main code area belongs to the workspace, not to a person.",
+        )
+    copy_path = _resolve_copy_path(name)
+    if not os.path.isdir(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+
+    existing = read_copy_meta(copy_path)
+    if existing is not None:
+        return {
+            "status": "unchanged",
+            "name": name,
+            "owner": (existing.get("owner") or "") or None,
+        }
+
+    wrote = create_copy_meta_if_absent(
+        copy_path,
+        {
+            "version": COPY_META_VERSION,
+            "kind": COPY_KIND_USER,
+            "owner": requester,
+            "parent": None,
+            "title": name,
+        },
+    )
+    if wrote:
+        logger.info("recorded owner %s for legacy copy %s", requester, name)
+        await refresh_one_copy(name)
+    return {
+        "status": "recorded" if wrote else "unchanged",
+        "name": name,
+        "owner": requester,
+    }
 
 
 @router.post("/create")
@@ -1997,6 +2159,1097 @@ async def merge_copy_to_parent(name: str, body: SyncCopyRequest | None = None):
         bp_results=wire,
         redeployed_bps=redeployed,
         deploy_task_ids=task_ids,
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  TAKING A VERSION WHOLESALE, INSTEAD OF MERGING IT
+#
+#  Merging is how work normally travels here, and it is not always what a
+#  person means. Sometimes the answer is "that version is the right one — use
+#  it, and put mine aside": an experiment that turned out better than the copy
+#  it branched from, main when your own attempt was a dead end, or the version
+#  that was running yesterday, before this morning's deploy broke it.
+#
+#  Those are all ONE primitive with different sources — PARK, then ADOPT:
+#
+#    park   whatever my copy holds that NOTHING ELSE does is saved as an
+#           experiment of its own first, so none of this can lose work. It is
+#           skipped — and said to have been skipped — when there is genuinely
+#           nothing to lose, because an empty experiment is clutter and a
+#           message claiming to have saved something that did not exist is a
+#           lie.
+#    adopt  my copy's branch for that ONE business process comes to hold the
+#           source's content, ON TOP OF MAIN.
+#
+#  THE INVARIANT everything below preserves: a copy is "main plus my own
+#  changes" — never behind main. Moving a branch backwards onto an old version
+#  would leave a hotpatch unpublishable until the user had synced first, which
+#  is the very detour the hotpatch exists to avoid. So when the source is not a
+#  descendant of main, the copy gets ONE RESTORE COMMIT on top of main whose
+#  TREE is the source's, byte for byte: the content you asked for, with main's
+#  ancestry, and the next Deploy is a plain fast-forward.
+# ════════════════════════════════════════════════════════════════════════════
+
+
+async def _bp_tip(clone_or_bare: str, ref: str = "HEAD", bare: bool = False) -> str:
+    args = (
+        ["git", "-C", clone_or_bare, "rev-parse", ref]
+        if bare
+        else ["git", "rev-parse", ref]
+    )
+    out, err, rc = await call_git_command_with_output(
+        *args, **({} if bare else {"cwd": clone_or_bare})
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=500, detail=f"cannot resolve {ref}: {(err or out).strip()}"
+        )
+    return out.strip()
+
+
+# The stages a version can have been deployed to. Ordered most-authoritative
+# first so a commit deployed to several is described by the highest one.
+DEPLOY_STAGES = ("production", "staging", "dev")
+
+# Timeline entries that are records ABOUT a business process rather than a
+# version OF it. A firewall approval is a rollback point, but it is not
+# something you can put in your copy and edit.
+_NOT_A_DEPLOYMENT = ("firewall", "backup", "secret")
+
+
+async def _deployed_versions(bp: str, stages: tuple[str, ...]) -> dict[str, dict]:
+    """``{source commit → the record that deployed it}`` for `bp`.
+
+    Read from the same per-business-process audit history the Deployments tab
+    renders — the git log of that BP's OWN ``bitswan.yaml`` — so it is scoped to
+    this business process by construction, and no argument from the client can
+    widen it.
+    """
+    from app.dependencies import get_automation_service
+
+    service = get_automation_service()
+    found: dict[str, dict] = {}
+    for stage in stages:
+        try:
+            hist = await service.bp_history(bp, stage)
+        except Exception as e:
+            # A stage this business process has never had is not an error here;
+            # it simply contributes no deployed versions.
+            logger.info("no %s deployment history for '%s': %s", stage, bp, e)
+            continue
+        for entry in hist.get("history") or []:  # newest first
+            src = entry.get("source_commit")
+            if src and entry.get("source") not in _NOT_A_DEPLOYMENT:
+                found.setdefault(src, {**entry, "stage": stage})
+    return found
+
+
+async def _resolve_deployed_commit(
+    bp: str, sha: str, stages: tuple[str, ...] = DEPLOY_STAGES
+) -> tuple[str, dict]:
+    """The full sha of a commit this workspace ACTUALLY DEPLOYED for `bp`, plus
+    the record that says so.
+
+    Hard-validated on purpose. Its callers move a branch onto whatever they are
+    handed, so "any sha the client sends" would make them a
+    move-anything-anywhere primitive — onto another business process's history,
+    onto an unreviewed commit somebody pushed, onto a blob. The only shas
+    accepted are the ones the deployment records name for THIS business process
+    (and, where the caller narrows `stages`, for that stage).
+    """
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", sha or ""):
+        raise HTTPException(status_code=400, detail=f"'{sha}' is not a commit id")
+
+    deployed = await _deployed_versions(bp, stages)
+    where = " or ".join(stages)
+    match = [c for c in deployed if c.lower().startswith(sha.lower())]
+    if not match:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"'{sha}' is not a version this workspace deployed to {where} "
+                f"for '{bp}'. Only deployed versions can be used here — pick one "
+                "from the Deployments history."
+            ),
+        )
+    if len(match) > 1:
+        raise HTTPException(
+            status_code=400, detail=f"'{sha}' matches more than one deployed version"
+        )
+    full = match[0]
+    # …and it must be a COMMIT that still exists in THIS business process's
+    # repo. The records are per BP already; this is the belt to that braces, and
+    # it also rules out a record pointing at an object the repo has since lost.
+    _, _, rc = await call_git_command_with_output(
+        "git", "-C", bp_bare_repo_path(bp), "cat-file", "-e", f"{full}^{{commit}}"
+    )
+    if rc != 0:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"The deployed version '{full[:7]}' is no longer in '{bp}'s "
+                "repository."
+            ),
+        )
+    return full, deployed[full]
+
+
+async def _restore_tree_commit(
+    clone: str,
+    base_tip: str,
+    target_tip: str,
+    deployer: str | None,
+    subject: str,
+    what: str,
+) -> tuple[str, bool]:
+    """Put `target_tip`'s TREE on top of `base_tip` as AT MOST ONE commit in
+    `clone`. Returns ``(new tip, did it commit)``.
+
+    Forward-only: nothing is rewritten and nothing is moved backwards, so this
+    is safe to run on a branch other people have. When `base_tip` already holds
+    exactly `target_tip`'s tree it commits NOTHING — an empty commit claiming to
+    have restored something is worse than no commit — which is also what makes
+    running it twice a no-op.
+
+    The result is PROVEN before it is committed: the working tree is diffed
+    against `target_tip` and a mismatch is a loud 500. "Your files are exactly
+    that version" is a promise nobody could check by looking, so it is checked
+    here.
+    """
+    # Already done. Not "the base already has it" — THIS CLONE already has it,
+    # on top of that base, which is what a second press of the same button
+    # finds. Without this check the second press stacks a restore commit that
+    # restores nothing on top of the first one.
+    head = await _bp_tip(clone)
+    _, _, desc_rc = await call_git_command_with_output(
+        "git", "merge-base", "--is-ancestor", base_tip, head, cwd=clone
+    )
+    _, _, tree_rc = await call_git_command_with_output(
+        "git", "diff", "--quiet", target_tip, head, cwd=clone
+    )
+    if desc_rc == 0 and tree_rc == 0:
+        return head, False
+
+    for cmd in (
+        ["git", "reset", "--hard", base_tip],
+        # `read-tree -u --reset` writes the target's files AND removes the ones
+        # it does not have; checking out paths alone would leave those behind.
+        ["git", "read-tree", "-u", "--reset", target_tip],
+    ):
+        c_out, c_err, c_rc = await call_git_command_with_output(*cmd, cwd=clone)
+        if c_rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to restore {what}: {(c_err or c_out).strip()}",
+            )
+    await call_git_command("git", "clean", "-fd", cwd=clone)
+
+    _, _, same_rc = await call_git_command_with_output(
+        "git", "diff", "--quiet", target_tip, cwd=clone
+    )
+    if same_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Restoring {what} did not reproduce it exactly — refusing to "
+                "commit a version that is not the one you asked for."
+            ),
+        )
+    _, _, changed_rc = await call_git_command_with_output(
+        "git", "diff", "--cached", "--quiet", "HEAD", cwd=clone
+    )
+    if changed_rc == 0:
+        return base_tip, False
+
+    c_out, c_err, c_rc = await call_git_command_with_output(
+        "git", *_ident_args(deployer), "commit", "-m", subject, cwd=clone
+    )
+    if c_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to commit the restore: {(c_err or c_out).strip()}",
+        )
+    return await _bp_tip(clone), True
+
+
+async def _hard_reset(clone: str, tip: str, what: str, name: str) -> None:
+    r_out, r_err, r_rc = await call_git_command_with_output(
+        "git", "reset", "--hard", tip, cwd=clone
+    )
+    if r_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to check out {what} in '{name}': {(r_err or r_out).strip()}",
+        )
+    await call_git_command("git", "clean", "-fd", cwd=clone)
+
+
+async def _move_copy_branch(
+    clone: str, bare: str, name: str, new_tip: str, what: str
+) -> None:
+    """Point a copy's branch in the bare at `new_tip`, whatever the ancestry.
+
+    Adopting rewrites a copy branch on purpose — that is what "take this version
+    instead" means — so the fast-forward-only pre-receive hook would reject a
+    plain push. The OBJECTS travel by push to a brand-new temp ref (creation is
+    allowed), and the branch itself is then moved with a server-side
+    ``update-ref``, which does not run the hook. Pushing first is not optional:
+    a restore commit is made in the clone, so without it the bare is asked to
+    point a ref at an object it has never seen.
+    """
+    tmp = f"refs/adopt-tmp/{name}"
+    p_out, p_err, p_rc = await call_git_command_with_output(
+        "git", "push", "--force", bare, f"{new_tip}:{tmp}", cwd=clone
+    )
+    if p_rc != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to publish {what} for '{name}': {(p_err or p_out).strip()}",
+        )
+    try:
+        u_out, u_err, u_rc = await call_git_command_with_output(
+            "git", "-C", bare, "update-ref", f"refs/heads/{name}", new_tip
+        )
+        if u_rc != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to point '{name}' at {what}: {(u_err or u_out).strip()}",
+            )
+    finally:
+        await call_git_command_with_output("git", "-C", bare, "update-ref", "-d", tmp)
+
+
+async def _commit_rows(ref_range: str, cwd: str, limit: int = 50) -> list[dict]:
+    """``{sha, subject, author, date}`` for a revision range — what a confirm
+    dialog needs to name whose work is at stake."""
+    out, _, rc = await call_git_command_with_output(
+        "git",
+        "log",
+        f"-{limit}",
+        "--format=%H%x1f%s%x1f%an%x1f%ae%x1f%aI",
+        ref_range,
+        cwd=cwd,
+    )
+    if rc != 0:
+        return []
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) != 5:
+            continue
+        rows.append(
+            {
+                "sha": parts[0],
+                "subject": parts[1],
+                "author": parts[3] or parts[2],
+                "author_name": parts[2],
+                "date": parts[4],
+            }
+        )
+    return rows
+
+
+class AdoptRequest(BaseModel):
+    """Take a version wholesale, instead of merging it."""
+
+    # The ONE business process this swaps. Everything here is per business
+    # process, because each one is its own repository.
+    bp: str
+    # Where the new state comes from: this BP repo's ``main``, one of MY
+    # experiments on this BP (which is CONSUMED — it became my copy), or a
+    # commit this workspace actually DEPLOYED (the hotpatch case: start from
+    # what is running, or from what was running before it broke).
+    source: str  # "main" | "experiment" | "commit"
+    experiment: str | None = None  # required when source == "experiment"
+    commit: str | None = None  # required when source == "commit"
+    # The copy name and title for the experiment my CURRENT work is parked as.
+    # Generated by the caller so the one slug generator in the dashboard stays
+    # the only thing that invents copy names (it also knows the business
+    # process's DISPLAY NAME to put in the title, which gitops does not).
+    park_name: str | None = None
+    park_title: str | None = None
+    # The business process's DISPLAY NAME, for every message a person reads.
+    # gitops stores directory slugs and has no idea what the process is called;
+    # sending back "'test33' in your copy is now …" put the slug in a toast.
+    bp_label: str | None = None
+    deployer: str | None = None
+
+
+ADOPT_SOURCES = ("main", "experiment", "commit")
+
+
+class AdoptResponse(BaseModel):
+    # What my previous work was saved as, or None when there was nothing to
+    # save. Never invented: an empty experiment is clutter, and a message that
+    # claims to have parked nothing is a lie.
+    parked: dict | None = None
+    adopted: str  # "main" | "experiment" | "commit"
+    # How the copy got there:
+    #   "fast-forward" — the source already contained main, so its own commits
+    #                    survive and the branch simply moved to it.
+    #   "restore"      — the histories diverged, so ONE commit on top of main
+    #                    carries the source's tree.
+    #   "already-main" — the copy ended exactly at main's tip; nothing to commit.
+    #   "unchanged"    — the copy ALREADY held exactly this version on top of
+    #                    main (the second press of the same button).
+    method: str
+    bp: str
+    message: str
+    # Teardown of the consumed experiment (source == "experiment"), on the git
+    # task queue like every other copy delete.
+    teardown_task_id: str | None = None
+    redeployed_bps: list[str] = []
+    deploy_task_ids: list[str] = []
+
+
+@router.post("/{name}/adopt")
+async def adopt_version(name: str, body: AdoptRequest):
+    """Take a version WHOLESALE into copy `name`, for ONE business process,
+    without merging — and without losing what was there.
+
+    Three entry points, one primitive:
+
+    * from an EXPERIMENT — "use this version without merging". The experiment
+      becomes my copy's state and is then consumed, because it *is* my copy now.
+    * from MAIN — "edit the main version without merging my changes". Main's tip
+      becomes my copy's state; main itself is untouched.
+    * from a DEPLOYED COMMIT — "edit this version", the hotpatch: start from
+      what is running (or from what was running before it broke) rather than
+      from the tip. Only commits this workspace actually deployed for this
+      business process are accepted (see :func:`_resolve_deployed_commit`).
+
+    It is always PARK, then ADOPT:
+
+    1. **Park.** My copy's work on this business process — uncommitted edits
+       committed first — is saved as a new experiment off my copy, unless
+       everything of mine is already in the source or already on main, in which
+       case nothing is created and ``parked`` is None. What is "at risk" is my
+       OWN unpublished work: a commit that is on main is not at risk, because
+       main is where it went.
+    2. **Adopt.** My copy's branch for this business process comes to hold the
+       source's content, ON TOP OF MAIN — a fast-forward when the source already
+       contains main (its own commits survive), otherwise one restore commit
+       carrying its tree. Only this process's clone is touched; the rest of the
+       copy is not part of the question.
+
+    If the adopt fails after parking, the parked experiment still exists and the
+    error says so by name. The one thing this must never do is leave the user
+    with neither version.
+    """
+    from app.dependencies import get_automation_service
+    from app.services import bp_delete
+    from app.task_queue import current_requester, task_queue
+
+    _validate_copy_name(name)
+    _validate_bp_dir(body.bp)
+    bp = body.bp
+    if body.source not in ADOPT_SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid source '{body.source}': expected one of "
+                f"{', '.join(ADOPT_SOURCES)}"
+            ),
+        )
+
+    copy_path = _resolve_copy_path(name)
+    if not os.path.isdir(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+    meta = read_copy_meta(copy_path)
+    if meta and meta.get("kind") == COPY_KIND_EXPERIMENT:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{name}' is an experiment. A version is adopted INTO a "
+                "person's copy — switch to yours and adopt from there."
+            ),
+        )
+    # Fails closed on ownership: this REPLACES the contents of somebody's copy,
+    # so it is only ever the owner's to do, and an unattributable copy is not
+    # something we will overwrite on a stranger's say-so.
+    _require_copy_owner(name, meta, "adopting a version into it")
+    requester = (current_requester.get() or "").strip()
+    owner = ((meta or {}).get("owner") or "").strip()
+
+    deployer = (body.deployer or "").strip() or requester
+    label = (body.bp_label or "").strip() or bp
+    bare = bp_bare_repo_path(bp)
+
+    # ── where the new state comes from ───────────────────────────────────────
+    exp_path = None
+    if body.source == "experiment":
+        exp_name = (body.experiment or "").strip()
+        if not exp_name:
+            raise HTTPException(
+                status_code=400, detail="source 'experiment' needs an experiment name"
+            )
+        _validate_copy_name(exp_name)
+        exp_path = _resolve_copy_path(exp_name)
+        if not os.path.isdir(exp_path):
+            raise HTTPException(
+                status_code=404, detail=f"Experiment '{exp_name}' not found"
+            )
+        exp_meta = _require_experiment_owner(
+            exp_name, exp_path, f"'{exp_name}' is not an experiment"
+        )
+        if (exp_meta.get("parent") or "") != name:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"'{exp_name}' branched off '{exp_meta.get('parent')}', not "
+                    f"'{name}' — a version is adopted into the copy it came from."
+                ),
+            )
+        own = experiment_bp(exp_meta)
+        if own and own != bp:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{exp_meta.get('title') or exp_name}' is an experiment on "
+                    f"'{own}', not on '{bp}'."
+                ),
+            )
+        exp_clone = os.path.join(exp_path, bp)
+        if not os.path.isdir(os.path.join(exp_clone, ".git")):
+            raise HTTPException(
+                status_code=404,
+                detail=f"'{bp}' is not checked out in '{exp_name}'",
+            )
+        # Adopt what the user SEES in the experiment, uncommitted edits and
+        # all — and publish it, so the tip exists in the bare where my copy can
+        # fetch it. (Fetching a bare sha is refused unless the server allows
+        # any-SHA1 wants; a branch is what a clone may ask for.)
+        await _wip_commit(
+            exp_clone,
+            deployer,
+            ["-A"],
+            bp,
+            f"Commit work in progress before adopting {bp}",
+        )
+        await _publish_copy_bp_tip(exp_path, exp_name, bp, deployer)
+        source_tip = await _bp_tip(exp_clone)
+        source_ref = exp_name
+        source_label = exp_meta.get("title") or exp_name
+    elif body.source == "commit":
+        source_tip, _ = await _resolve_deployed_commit(bp, (body.commit or "").strip())
+        # Reachable by sha alone: it was deployed FROM this repo's main, so a
+        # plain branch fetch of main brings it along.
+        source_ref = "main"
+        source_label = f"the deployed version {source_tip[:7]}"
+    else:
+        if not await bp_main_has_content(bp):
+            raise HTTPException(
+                status_code=404, detail=f"'{bp}' has no content on main to adopt"
+            )
+        source_tip = await _bp_tip(bare, "refs/heads/main", bare=True)
+        source_ref = "main"
+        source_label = "main"
+
+    # ── the copy has to carry this business process at all ───────────────────
+    clone = os.path.join(copy_path, bp)
+    if not os.path.isdir(os.path.join(clone, ".git")):
+        if not await _clone_bp_into_copy(copy_path, name, bp, "main"):
+            raise HTTPException(
+                status_code=500, detail=f"Failed to materialize '{bp}' in '{name}'"
+            )
+
+    # ── park: what would this overwrite? ─────────────────────────────────────
+    await _wip_commit(
+        clone,
+        deployer,
+        ["-A"],
+        bp,
+        f"Commit work in progress before adopting {source_label} ({bp})",
+    )
+    old_tip = await _bp_tip(clone)
+    # Both sides have to be REACHABLE in my clone before anything can be
+    # counted: they live in the bare (main, or the experiment's branch) and my
+    # clone may never have seen them. Without this the count below fails, reads
+    # as zero, and the answer becomes "nothing to lose" for work that is about
+    # to be overwritten.
+    await fetch_main(clone, bp)
+    if source_ref != "main" and not await call_git_command(
+        "git", "fetch", "--no-tags", bare, source_ref, cwd=clone
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Could not read {source_label}'s '{bp}' into your copy, so "
+                "there is no way to tell what adopting it would overwrite. "
+                "Nothing was changed."
+            ),
+        )
+    main_tip = await _bp_tip(clone, MAIN_REF)
+
+    # WHAT IS AT RISK, and it is asked in two steps because the honest answer
+    # is about CONTENT, not about commit counts:
+    #
+    #  1. Nothing at all is at risk when adopting cannot change what your files
+    #     ARE — your tree is already, byte for byte, the version being adopted.
+    #     (This is what a second press of the same button finds.)
+    #  2. Otherwise it is your OWN unpublished work: commits in your copy that
+    #     the source does not have AND that are not on main either. A commit
+    #     that is on main is not at risk — main is where it went, and it stays
+    #     there, with the restore commit on top of it. Counting main's commits
+    #     as mine parked an experiment full of other people's published work
+    #     every time somebody adopted after a Sync.
+    _, _, same_rc = await call_git_command_with_output(
+        "git", "diff", "--quiet", source_tip, old_tip, cwd=clone
+    )
+    if same_rc == 0:
+        losing = 0
+    else:
+        cnt, cnt_err, cnt_rc = await call_git_command_with_output(
+            "git",
+            "rev-list",
+            "--count",
+            old_tip,
+            "--not",
+            source_tip,
+            MAIN_REF,
+            cwd=clone,
+        )
+        if cnt_rc != 0 or not cnt.strip().isdigit():
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Could not work out what adopting {source_label} would "
+                    f"overwrite in '{bp}': {(cnt_err or cnt).strip()}. Nothing "
+                    "was changed."
+                ),
+            )
+        losing = int(cnt.strip())
+    parked = None
+    if losing:
+        park_name = (body.park_name or "").strip()
+        park_title = (body.park_title or "").strip()
+        if not park_name or not park_title:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"'{name}' has {losing} commit(s) on {label} that "
+                    f"{source_label} does not, so they must be parked as an "
+                    "experiment — park_name and park_title are required."
+                ),
+            )
+        # The ordinary create path: it publishes my current tip and branches the
+        # experiment from exactly that, which is what parking IS.
+        await create_copy(
+            CreateCopyRequest(
+                branch_name=park_name,
+                kind=COPY_KIND_EXPERIMENT,
+                parent=name,
+                owner=owner,
+                title=park_title,
+                bps=[bp],
+            )
+        )
+        parked = {"name": park_name, "title": park_title}
+
+    # ── adopt: land ON TOP OF MAIN, never behind it ──────────────────────────
+    method = "restore"
+    try:
+        if source_tip == main_tip:
+            # Nothing to carry: the version asked for IS main's tip.
+            method = "already-main"
+            new_tip = main_tip
+            await _hard_reset(clone, main_tip, source_label, name)
+        else:
+            _, _, ff_rc = await call_git_command_with_output(
+                "git", "merge-base", "--is-ancestor", main_tip, source_tip, cwd=clone
+            )
+            if ff_rc == 0:
+                # The source is a descendant of main: taking it wholesale is
+                # already a fast-forward of main, so keep its own commits.
+                method = "fast-forward"
+                new_tip = source_tip
+                await _hard_reset(clone, source_tip, source_label, name)
+            else:
+                new_tip, committed = await _restore_tree_commit(
+                    clone,
+                    main_tip,
+                    source_tip,
+                    deployer,
+                    f"Restore {label} to {source_label}",
+                    f"{source_label} in '{name}'",
+                )
+                if committed:
+                    method = "restore"
+                else:
+                    method = "already-main" if new_tip == main_tip else "unchanged"
+        await _move_copy_branch(clone, bare, name, new_tip, source_label)
+    except HTTPException as e:
+        # Put the checkout back where it was. The branch ref is moved LAST, so a
+        # failure before that leaves the bare untouched — but the working tree
+        # has already been rewritten, and leaving the user looking at a version
+        # their branch does not point at is a state nothing else in the product
+        # can make sense of.
+        await call_git_command_with_output("git", "reset", "--hard", old_tip, cwd=clone)
+        await call_git_command("git", "clean", "-fd", cwd=clone)
+        # Parked but not adopted. The user still HAS their work — say where,
+        # loudly, rather than letting them think it went with the failure.
+        if parked:
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=(
+                    f"{e.detail} — your previous work on {label} is safe: it was "
+                    f"saved as the experiment '{parked['title']}'. Nothing was "
+                    "adopted; open it under Advanced and try again."
+                ),
+            ) from e
+        raise
+
+    # ── the consumed experiment, and the live-dev that now runs other code ───
+    teardown_task_id = None
+    if body.source == "experiment" and exp_path is not None:
+        service = get_automation_service()
+        exp_name = body.experiment or ""
+
+        async def _run() -> dict:
+            return await bp_delete.delete_copy(exp_name, deployer, service)
+
+        teardown_task_id = task_queue.submit(
+            "delete-copy", _run, requester_email=deployer, label=exp_name
+        )
+
+    changed_paths: list[str] = []
+    if old_tip != new_tip:
+        diff_out, _, _ = await call_git_command_with_output(
+            "git", "diff", "--name-only", f"{old_tip}..{new_tip}", cwd=clone
+        )
+        changed_paths = [f"{bp}/{p}" for p in diff_out.splitlines() if p.strip()]
+    redeployed, task_ids = await _redeploy_changed_live_dev(
+        name, changed_paths, deployer
+    )
+    await refresh_one_copy(name)
+
+    how = {
+        "fast-forward": " Its own commits came with it.",
+        "restore": (
+            " A restore commit carries it on top of main, so Deploy will "
+            "publish it without a Sync first."
+        ),
+        "already-main": (
+            " That is exactly what main holds, so nothing was committed and "
+            "your copy is level with main."
+        ),
+        "unchanged": " Your copy already held exactly that, so nothing changed.",
+    }[method]
+    if parked:
+        msg = (
+            f"Your copy of {label} is now {source_label}. Your previous work on "
+            f"it is saved as the experiment '{parked['title']}'.{how}"
+        )
+    else:
+        msg = (
+            f"Your copy of {label} is now {source_label}. Nothing needed saving "
+            f"— your copy had no work of its own that it lacks.{how}"
+        )
+    return AdoptResponse(
+        parked=parked,
+        adopted=body.source,
+        method=method,
+        bp=bp,
+        message=msg,
+        teardown_task_id=teardown_task_id,
+        redeployed_bps=redeployed,
+        deploy_task_ids=task_ids,
+    )
+
+
+# ── reverting the dev stage ─────────────────────────────────────────────────
+
+
+class RevertDevRequest(BaseModel):
+    # The deployed version to go back to. Must be one the DEV stage actually
+    # ran: staging and production go back by promote/rollback, which is a
+    # different, gated flow.
+    commit: str
+    deployer: str | None = None
+    # The business process's DISPLAY NAME, for the commit subject everyone will
+    # read in their Sync. gitops stores slugs; the dashboard knows the name.
+    bp_label: str | None = None
+
+
+class RevertDevResponse(BaseModel):
+    status: str
+    method: str  # "restore" | "already-main"
+    bp: str
+    commit: str
+    subject: str | None = None
+    message: str
+    deploy_task_id: str | None = None
+
+
+@router.post("/main/bp/{bp}/revert-dev")
+async def revert_dev_to_version(bp: str, body: RevertDevRequest):
+    """Put the DEV stage back to a version it ran before, by moving MAIN
+    FORWARD.
+
+    Dev deploys from main, so "revert dev" is a change to main, and it is done
+    the only way main ever changes: ONE NEW COMMIT ON TOP. Nothing is rewritten
+    and nothing is thrown away — the version that broke stays in the history,
+    reachable and re-adoptable.
+
+    THE CONSEQUENCE IS INTENDED AND MUST BE SAID OUT LOUD IN THE UI: main is
+    what every copy measures itself against, so after this everybody's copy is
+    one commit behind on this business process, and their next Sync carries the
+    revert into it — with their own unpublished commits replayed on top. That is
+    the point: dev is shared, and one person's fix to it is everybody's.
+
+    Dev only. Staging and production have promote and rollback, which are gated
+    differently and must not be reachable through this door.
+    """
+    from app.task_queue import current_requester
+
+    _validate_bp_dir(bp)
+    target, record = await _resolve_deployed_commit(bp, body.commit, stages=("dev",))
+    deployer = (body.deployer or "").strip() or (current_requester.get() or "").strip()
+    label = (body.bp_label or "").strip() or bp
+
+    # Dev deploys from main, and ``copies/main/<bp>`` is main's checkout — the
+    # same clone every other main-scope commit is made in.
+    await refresh_main_bp_checkout(bp)
+    main_dir = os.path.join(_copies_dir(), "main", bp)
+    if not os.path.isdir(os.path.join(main_dir, ".git")):
+        raise HTTPException(
+            status_code=404,
+            detail=f"'{bp}' has no main checkout to revert — has it ever been synced?",
+        )
+    main_tip = await _bp_tip(bp_bare_repo_path(bp), "refs/heads/main", bare=True)
+
+    when = (record.get("deployed_at") or "")[:10]
+    subject = (
+        f"Revert {label} to the version deployed to dev on {when} ({target[:7]})"
+        if when
+        else f"Revert {label} to the deployed version {target[:7]}"
+    )
+    try:
+        new_tip, committed = await _restore_tree_commit(
+            main_dir,
+            main_tip,
+            target,
+            deployer,
+            subject,
+            f"the version {target[:7]} of '{bp}'",
+        )
+    except HTTPException:
+        await call_git_command_with_output(
+            "git", "reset", "--hard", main_tip, cwd=main_dir
+        )
+        await call_git_command("git", "clean", "-fd", cwd=main_dir)
+        raise
+
+    if not committed:
+        # Dev already runs exactly this. Pressing it again must not pile up
+        # commits that revert nothing.
+        return RevertDevResponse(
+            status="success",
+            method="already-main",
+            bp=bp,
+            commit=target,
+            message=(
+                f"'{label}' on main is already exactly the version {target[:7]} "
+                "— nothing was changed."
+            ),
+        )
+
+    await publish_main_from_clone(main_dir, bp)
+    await _tag_deploy(bp, deployer)
+    task_id = await _spawn_dev_deploy(bp, deployer)
+    await refresh_copies()
+    return RevertDevResponse(
+        status="success",
+        method="restore",
+        bp=bp,
+        commit=target,
+        subject=subject,
+        message=(
+            f"Dev is going back to the version {target[:7]} of '{label}'. "
+            f"Everyone's copy is now one commit behind on '{label}'; their next "
+            "Sync brings the revert in, with their own changes on top."
+        ),
+        deploy_task_id=task_id,
+    )
+
+
+# ── publishing over main ────────────────────────────────────────────────────
+
+
+class DeployOverMainRequest(BaseModel):
+    bp: str
+    deployer: str | None = None
+    # Main's tip as the confirm dialog described it. The dialog names the
+    # commits that will be superseded and who wrote them; if main moved since
+    # then, that list was about a different main and the user has not consented
+    # to this one.
+    expected_main: str | None = None
+    # The business process's DISPLAY NAME, for the messages and the commit
+    # subject. gitops only knows the directory slug.
+    bp_label: str | None = None
+
+
+class DeployOverMainResponse(BaseModel):
+    status: str  # "success" | "needs_rebase"
+    # "replay"           — my commits replayed onto main, tree already exactly
+    #                      mine afterwards.
+    # "replay+reconcile" — the same, plus the one commit that drops what main
+    #                      had added and I do not.
+    # "fast-forward" | "noop" — main had not actually moved; an ordinary Deploy.
+    method: str | None
+    bp: str
+    message: str
+    # Main commits that were not in my copy — whose work this went over.
+    superseded: list[dict] = []
+    # My commits as they now sit on main. Individually: a rebase is not a
+    # squash, and needlessly discarding history is not something to do quietly.
+    replayed: list[dict] = []
+    deploy_task_id: str | None = None
+
+
+async def _blocked_deploy_facts(name: str, bp: str) -> tuple[str, str, str, list[dict]]:
+    """``(clone, my tip, main tip, the main commits I do not have)``."""
+    copy_path = _resolve_copy_path(name)
+    clone = os.path.join(copy_path, bp)
+    if not os.path.isdir(os.path.join(clone, ".git")):
+        raise HTTPException(
+            status_code=404, detail=f"'{bp}' is not checked out in copy '{name}'"
+        )
+    await fetch_main(clone, bp)
+    mine = await _bp_tip(clone)
+    main_tip = await _bp_tip(clone, MAIN_REF)
+    superseded = await _commit_rows(f"{mine}..{MAIN_REF}", clone)
+    return clone, mine, main_tip, superseded
+
+
+@router.get("/{name}/deploy-over-main-preview")
+async def get_deploy_over_main_preview(name: str, bp: str = Query(...)):
+    """Exactly whose work "Deploy this version, overwriting main" would go over.
+
+    The confirm dialog names them — short sha, subject and AUTHOR — because they
+    are colleagues, and "overwrite main" with no names attached is a button
+    nobody can give informed consent to.
+    """
+    _validate_copy_name(name)
+    _validate_bp_dir(bp)
+    clone, mine, main_tip, superseded = await _blocked_deploy_facts(name, bp)
+    return {
+        "bp": bp,
+        "main": main_tip,
+        "blocked": bool(superseded),
+        "superseded": superseded,
+        "mine": await _commit_rows(f"{MAIN_REF}..{mine}", clone),
+    }
+
+
+@router.post("/{name}/deploy-over-main")
+async def deploy_over_main(name: str, body: DeployOverMainRequest):
+    """Publish this copy's version of ONE business process even though main has
+    moved on — the second way out of a blocked Deploy, the first being Sync.
+
+    ONE outcome, always: **main ends up holding exactly what my copy holds.**
+    There is no mode, no merge rule for the user to pick, and no per-hunk
+    semantics to reason about — "overwriting main" means what it says, down to
+    dropping files main had that I do not.
+
+    History is a separate question from content, and it is preserved:
+
+    1. My commits are REPLAYED onto main's tip (``rebase -X theirs``), so they
+       survive individually rather than being flattened into one snapshot, and
+       main's own commits stay reachable underneath. Nothing is force-pushed
+       and nothing moves backwards.
+    2. The replay alone does not give the promised content — anything main
+       added that I never touched would survive it — so when the resulting tree
+       still differs from my copy's, ONE reconciling commit puts my tree on
+       top. That commit is what drops main's additions, visibly, in the log.
+    3. The final tree is then asserted byte-identical to my copy's. A promise
+       nobody could check by looking is checked here, and a mismatch is a loud
+       500 rather than a quietly wrong main.
+
+    Conflicts a merge strategy cannot decide (a file one side deleted and the
+    other edited) ABORT the replay: nothing is changed anywhere, and the answer
+    is ``needs_rebase`` — the same handoff to the coding agent an ordinary
+    blocked Sync gets, because resolving that needs a person's judgement.
+    """
+    from app.task_queue import current_requester
+
+    _validate_copy_name(name)
+    _validate_bp_dir(body.bp)
+    bp = body.bp
+    if name == "main":
+        raise HTTPException(
+            status_code=400, detail="the main copy cannot be published over itself"
+        )
+    copy_path = _resolve_copy_path(name)
+    if not os.path.isdir(copy_path):
+        raise HTTPException(status_code=404, detail=f"Copy '{name}' not found")
+    meta = read_copy_meta(copy_path)
+    if meta and meta.get("kind") == COPY_KIND_EXPERIMENT:
+        raise HTTPException(
+            status_code=400,
+            detail="Experiments merge back into their parent copy, never over main",
+        )
+    _require_copy_owner(name, meta, "publishing it over main")
+    requester = (current_requester.get() or "").strip()
+    deployer = (body.deployer or "").strip() or requester
+    label = (body.bp_label or "").strip() or bp
+    bare = bp_bare_repo_path(bp)
+
+    clone = os.path.join(copy_path, bp)
+    if not os.path.isdir(os.path.join(clone, ".git")):
+        raise HTTPException(
+            status_code=404, detail=f"'{bp}' is not checked out in copy '{name}'"
+        )
+    await _wip_commit(
+        clone,
+        deployer,
+        ["-A"],
+        bp,
+        f"Commit work in progress before publishing {bp} over main",
+    )
+    _, mine, main_tip, superseded = await _blocked_deploy_facts(name, bp)
+
+    if body.expected_main and body.expected_main != main_tip:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Main moved while you were deciding, so the changes you were "
+                "shown are not the ones this would go over. Nothing was "
+                "changed — look again."
+            ),
+        )
+
+    if not superseded:
+        # Not blocked at all (any more): this is an ordinary Deploy, and doing
+        # it as one keeps the deploy path single.
+        result = await _sync_one_bp(name, copy_path, bp, deployer)
+        return DeployOverMainResponse(
+            status=result["status"],
+            method=result["method"],
+            bp=bp,
+            message=result["message"],
+            deploy_task_id=result["deploy_task_id"],
+            replayed=await _commit_rows(f"{main_tip}..{mine}", clone),
+        )
+
+    # ── 1. replay my commits onto main's tip ────────────────────────────────
+    # -X theirs, and the direction is the opposite of the intuition: a rebase
+    # checks out the UPSTREAM and replays your commits onto it, so "ours" is
+    # main (the side being replayed onto) and "theirs" is the commit being
+    # replayed — MINE. `test_publishing_over_main_resolves_conflicts_in_my_
+    # favour_not_mains` pins this down with real git, because getting it
+    # backwards would silently publish main's version of every conflicting line
+    # under a button that promised the opposite.
+    #
+    # This step is about HISTORY: it is what keeps my commits individual and
+    # main's reachable. It is NOT what makes the content mine — step 2 is.
+    _, rb_err, rb_rc = await call_git_command_with_output(
+        "git", *_ident_args(deployer), "rebase", "-X", "theirs", MAIN_REF, cwd=clone
+    )
+    if rb_rc != 0:
+        conflicted = any(
+            os.path.isdir(os.path.join(clone, ".git", d))
+            for d in ("rebase-merge", "rebase-apply")
+        )
+        if conflicted:
+            await call_git_command("git", "rebase", "--abort", cwd=clone)
+        await call_git_command_with_output("git", "reset", "--hard", mine, cwd=clone)
+        await call_git_command("git", "clean", "-fd", cwd=clone)
+        if conflicted:
+            return DeployOverMainResponse(
+                status="needs_rebase",
+                method=None,
+                bp=bp,
+                message=(
+                    f"{label} cannot be replayed onto main automatically — a "
+                    "file was changed on one side and deleted on the other, "
+                    "which no rule can decide. NOTHING was changed. Hand off "
+                    "to the coding agent to resolve it."
+                ),
+                superseded=superseded,
+            )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Replaying '{bp}' onto main failed before the rebase "
+                f"started (nothing was changed): "
+                f"{rb_err.strip() or f'git rebase exited {rb_rc}'}"
+            ),
+        )
+    new_tip = await _bp_tip(clone)
+
+    # ── 2. make the CONTENT exactly mine ────────────────────────────────────
+    # The replay keeps whatever main added and I never touched; the promise on
+    # the button is that main ends up holding exactly my version, so when the
+    # replayed tree still differs from mine, one commit reconciles it. When it
+    # does not differ, nothing is committed — an empty commit claiming to have
+    # dropped something is worse than no commit.
+    try:
+        new_tip, reconciled = await _restore_tree_commit(
+            clone,
+            new_tip,
+            mine,
+            deployer,
+            f"Make main's {label} exactly the version from '{name}'",
+            f"your version of '{bp}'",
+        )
+    except HTTPException:
+        await call_git_command_with_output("git", "reset", "--hard", mine, cwd=clone)
+        await call_git_command("git", "clean", "-fd", cwd=clone)
+        raise
+
+    # ── 3. prove it ─────────────────────────────────────────────────────────
+    # "Main will hold exactly your version" is the whole contract of this
+    # button. Check it against my copy's original tip before anything is
+    # published, and put the clone back if it does not hold.
+    _, _, exact_rc = await call_git_command_with_output(
+        "git", "diff", "--quiet", mine, new_tip, cwd=clone
+    )
+    if exact_rc != 0:
+        await call_git_command_with_output("git", "reset", "--hard", mine, cwd=clone)
+        await call_git_command("git", "clean", "-fd", cwd=clone)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Publishing {label} over main did not reproduce your version "
+                "exactly — refusing to publish a version that is not yours. "
+                "Nothing was changed."
+            ),
+        )
+    method = "replay+reconcile" if reconciled else "replay"
+
+    try:
+        await _move_copy_branch(clone, bare, name, new_tip, "the version you published")
+        await ff_main_to_ref(bp, new_tip)
+    except HTTPException:
+        await call_git_command_with_output("git", "reset", "--hard", mine, cwd=clone)
+        await call_git_command("git", "clean", "-fd", cwd=clone)
+        await _move_copy_branch(clone, bare, name, mine, "your copy")
+        raise
+
+    await _tag_deploy(bp, deployer)
+    await refresh_main_bp_checkout(bp)
+    task_id = await _spawn_dev_deploy(bp, deployer)
+    await refresh_one_copy(name)
+    replayed = await _commit_rows(f"{main_tip}..{new_tip}", clone)
+    dropped = (
+        " What main had added and you did not have has been dropped."
+        if reconciled
+        else ""
+    )
+    return DeployOverMainResponse(
+        status="success",
+        method=method,
+        bp=bp,
+        message=(
+            f"Published your version of {label} over main, superseding "
+            f"{len(superseded)} commit(s) from other people. Main now holds "
+            f"exactly your version of {label}.{dropped}"
+        ),
+        superseded=superseded,
+        replayed=replayed,
+        deploy_task_id=task_id,
     )
 
 

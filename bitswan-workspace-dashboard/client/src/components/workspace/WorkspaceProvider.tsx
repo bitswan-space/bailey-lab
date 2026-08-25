@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useState,
@@ -58,6 +59,20 @@ interface WorkspaceContextValue {
    *  single-automation deploys, whose `deploymentId` still names the BP. */
   // eslint-disable-next-line no-restricted-syntax -- null until a deploy finishes
   deployDone: { seq: number; bp: string | null; deploymentId: string } | null;
+  /** Bumped whenever an action of OURS has moved a copy's git refs — a pull, a
+   *  merge-back, a version taken wholesale, a dev revert. The `copies` SSE
+   *  snapshot eventually says the same thing, but "eventually" is the bug: a
+   *  user who takes a version and immediately opens Deploy was told their copy
+   *  was up to date, because the divergence on screen was the one read before
+   *  the action. Any component that moves refs bumps this on completion, and
+   *  every reading derived from refs watches it.
+   *
+   *  It is shared state rather than a prop because the sites that move refs are
+   *  not all in the shell — the hotpatch and the dev revert live inside the
+   *  Deployments tab's inspect modal, which has no channel back to it. */
+  copyRefsMoved: number;
+  /** Say that one just happened. */
+  notifyCopyRefsMoved: () => void;
   /** Deploys currently in flight (upserted per `deploy_progress` event,
    *  dropped on the terminal one) — lets views render a live "deploying"
    *  placeholder for work started outside them. */
@@ -115,6 +130,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     { seq: number; bp: string | null; deploymentId: string } | null
   >(null);
   const [activeDeploys, setActiveDeploys] = useState<ActiveDeploy[]>([]);
+  const [copyRefsMoved, setCopyRefsMoved] = useState(0);
+  const notifyCopyRefsMoved = useCallback(() => setCopyRefsMoved((n) => n + 1), []);
   const [status, setStatus] = useState<StreamStatus>('connecting');
 
   // Initial git-task-queue snapshot on mount. The server replays the latest
@@ -355,6 +372,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         tasks,
         supplyChainTick,
         deployDone,
+        copyRefsMoved,
+        notifyCopyRefsMoved,
         activeDeploys,
         status,
       }}
@@ -364,6 +383,22 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 }
 /* eslint-enable no-restricted-syntax */
+
+/**
+ * The counter that says "one of our own actions just moved a copy's refs", and
+ * the function that bumps it. Everything derived from refs — how a business
+ * process stands against main, what is uncommitted in a copy — re-reads on it,
+ * so an action's result is on screen when the user looks rather than whenever
+ * the next git event happens to arrive.
+ */
+export function useCopyRefsMoved(): {
+  copyRefsMoved: number;
+  notifyCopyRefsMoved: () => void;
+} {
+  const v = useContext(WorkspaceContext);
+  if (!v) throw new Error('useCopyRefsMoved must be used inside <WorkspaceProvider>');
+  return { copyRefsMoved: v.copyRefsMoved, notifyCopyRefsMoved: v.notifyCopyRefsMoved };
+}
 
 /** Read the shared automations snapshot. Must be used inside `<WorkspaceProvider>`. */
 export function useAutomations(): {

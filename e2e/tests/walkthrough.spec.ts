@@ -18,10 +18,13 @@
  * "See a colleague's version" (their copy — or, expanded, one of their
  * experiments — under an amber "You are viewing …" banner with one click back)
  * and "Experiments on <business process>" — throwaway branches OFF YOUR OWN
- * copy. In your own experiment a green banner says so and carries THREE ways
+ * copy. In your own experiment a green banner says so and carries FOUR ways
  * out: "Back to my copy" steps out and LEAVES IT RUNNING (it is waiting under
- * Advanced when you want it again), while merging back and discarding both END
- * it — merging AUTO-DISCARDS the experiment and lands you on your own copy.
+ * Advanced when you want it again), while the other three END it — merging back
+ * AUTO-DISCARDS the experiment and lands you on your own copy, discarding is a
+ * real delete, and "Use this version without merging" makes your copy BECOME
+ * the experiment (your own work parked as a dated experiment of its own, the
+ * source consumed).
  *
  * A COPY AND AN EXPERIMENT ARE DIFFERENT SHAPES. A copy is a person's
  * WORKSPACE-WIDE environment; an experiment belongs to exactly ONE business
@@ -1588,8 +1591,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // The other half of the copy tree. An experiment is a copy whose PARENT is
   // your copy: creating it COMMITS + publishes your copy's current tip (so the
   // automation.toml edit above rides into it) and branches from there. It offers
-  // exactly two ways out — "Merge back into my copy" or "Discard experiment" —
-  // and it can never reach main: the Deploy tab is not even rendered inside one.
+  // four ways out — leave it running ("Back to my copy"), "Merge back into my
+  // copy", "Discard experiment", or "Use this version without merging" (your
+  // copy becomes it) — and it can never reach main: the Deploy tab is not even
+  // rendered inside one.
   // We start one for real and shoot the state it puts the operator in (the green
   // banner naming the experiment by its TITLE — the copy name itself is an
   // opaque slug the user never sees).
@@ -1686,6 +1691,48 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       'the experiment banner offers no way out that keeps the experiment — only merging and discarding, both of which end it',
     ).toBeVisible({ timeout: SLA });
     await capture(dashPage, 'experiment');
+  });
+
+  // ---- The FOURTH way out: take this version, don't merge it ---------------
+  // Merging asks "combine these two versions". Often the honest answer is "no,
+  // use that one" — and until this existed the only route to it was a conflict
+  // fought by hand. The dialog is the interesting part, because the promise it
+  // makes is what makes the button safe to press: whatever your copy holds for
+  // this business process is PARKED as an experiment of its own first.
+  //
+  // We open it and cancel: actually taking the version would consume this
+  // experiment, and the chapters below need it. What is asserted is that the
+  // way out exists and that it says what happens to the work being replaced.
+  await chapter('experiment-adopt', async () => {
+    const takeBtn = d
+      .getByRole('button', { name: /^Use this version without merging$/i })
+      .first();
+    await expect(
+      takeBtn,
+      'the experiment banner offers no way to TAKE this version — only to merge it, which is a different question',
+    ).toBeVisible({ timeout: SLA });
+    await takeBtn.click({ timeout: NAV });
+    const dlg = d.getByRole('alertdialog').first();
+    await expect(
+      dlg,
+      'pressing "Use this version without merging" opened no confirmation',
+    ).toBeVisible({ timeout: SLA });
+    // The promise, in the dialog's own words. A button that replaces the
+    // contents of a copy has to say where the previous contents went.
+    await expect(
+      dlg,
+      'the dialog does not promise that the work being replaced is saved first',
+    ).toContainText(/saved first as a new experiment/i, { timeout: SLA });
+    await expect(
+      dlg,
+      'the dialog does not name the business process it is about',
+    ).toContainText(BP.title, { timeout: SLA });
+    await capture(dashPage, 'experiment-adopt');
+    await dlg.getByRole('button', { name: /^Cancel$/ }).first().click({ timeout: NAV });
+    await expect(
+      dlg,
+      'cancelling the take-this-version dialog did not close it',
+    ).toBeHidden({ timeout: SLA });
   });
 
   // ---- The experiment's whole point: do work in it, then merge it back ------
@@ -2009,7 +2056,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
-      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
       const none = d.getByText(/Not deployed yet/i).first();
       await Promise.race([
         ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
@@ -2150,7 +2197,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // to main on a successful deploy) and report Healthy. (An empty BP merges
     // instantly — nothing to build — which is why this only bites a real
     // scaffolded BP.)
-    const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+    const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
     const devStage = d.getByRole('button', { name: /Development/i }).first();
     // Ride the deploy the way an operator does: keep waiting AS LONG AS the screen
     // shows progress, with NO flat cap. Deploy builds the dev image
@@ -2359,7 +2406,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
-      const ok = d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
       const none = d.getByText(/Not deployed yet/i).first();
       await Promise.race([
         ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),

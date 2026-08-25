@@ -33,6 +33,9 @@ interface WorkspaceViewProps {
   onTab: (t: FlowTab) => void;
   /** An editor save landed in the current copy (dirtiness changed). */
   onCopyEdited?: () => void;
+  /** How many editor saves have landed. The Deploy screen re-reads the copy's
+   *  uncommitted work off this, since a save moves no git ref. */
+  editNonce: number;
   /** Open the "new business process" flow (the dialog lives in TopNav). */
   onNewBp: () => void;
   /** The copy in view is the signed-in user's own — the only copy that syncs
@@ -46,6 +49,10 @@ interface WorkspaceViewProps {
    *  Deploy screens can never disagree about how this process stands. */
   // eslint-disable-next-line no-restricted-syntax -- null = not known
   divergence: BpDivergence | null;
+  /** The reading describes the copy BEFORE an action this user just took. The
+   *  Deploy screen must not assert from it; the Sync step may still offer a
+   *  pull from it. */
+  divergenceStale: boolean;
   /** Why that reading failed. null = it is trustworthy. */
   // eslint-disable-next-line no-restricted-syntax -- null = no error
   divergenceError: string | null;
@@ -54,6 +61,10 @@ interface WorkspaceViewProps {
   /** Merge the experiment in view back into its parent copy — the same action
    *  the experiment banner carries. */
   onMergeBack: () => void;
+  /** Take MAIN wholesale into the copy for the business process on screen, as
+   *  the alternative to pulling it. Absent unless this is the user's own copy
+   *  (main only ever flows into a person's own copy). */
+  onTakeMain?: () => void;
 }
 
 /**
@@ -69,13 +80,16 @@ export function WorkspaceView({
   tab,
   onTab,
   onCopyEdited,
+  editNonce,
   onNewBp,
   isMyCopy,
   isMyExperiment,
   divergence,
   divergenceError,
+  divergenceStale,
   onPullBp,
   onMergeBack,
+  onTakeMain,
 }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
 
@@ -164,6 +178,7 @@ export function WorkspaceView({
             divergenceError={divergenceError}
             onPull={onPullBp}
             onNothingToPull={() => onTab('description')}
+            {...(onTakeMain ? { onTakeMain } : {})}
           />
         ) : (
           <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="sync with main" />
@@ -176,9 +191,11 @@ export function WorkspaceView({
             wt={wt}
             divergence={divergence}
             divergenceError={divergenceError}
+            divergenceStale={divergenceStale}
+            editNonce={editNonce}
             onDeployed={() => onTab('deployments')}
             onManageDeployments={() => onTab('deployments')}
-            {...(isMyCopy ? { onGoToSync: () => onTab('sync') } : {})}
+            {...(isMyCopy ? { onGoToSync: () => onTab('sync'), isMyCopy: true } : {})}
           />
         ) : (
           <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="deploy" />

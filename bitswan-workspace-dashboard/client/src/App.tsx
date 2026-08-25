@@ -6,6 +6,7 @@ import {
   WorkspaceProvider,
   useProcesses,
   useCopies,
+  useCopyRefsMoved,
   useDeployDone,
 } from '@/components/workspace/WorkspaceProvider';
 import { SessionProvider, useSessions } from '@/components/agents/SessionProvider';
@@ -15,6 +16,10 @@ import { BusyOverlay } from '@/components/workspace/BusyOverlay';
 import { ExperimentBanner } from '@/components/workspace/ExperimentBanner';
 import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { ViewingBanner } from '@/components/workspace/ViewingBanner';
+import {
+  TakeVersionDialog,
+  type TakeVersionSource,
+} from '@/components/workspace/TakeVersionDialog';
 import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { watchDeployTask } from '@/lib/deployBp';
@@ -220,13 +225,33 @@ function Shell() {
   const [discardTarget, setDiscardTarget] = useState<Copy | null>(null);
   // A merge-back is in flight (the experiment banner's button is busy).
   const [merging, setMerging] = useState(false);
+  // The "take this version wholesale" confirmation, and what it is about.
+  // null = closed. `source` is what the copy would become; `experiment` names
+  // it when the version comes from one.
+  const [takeVersion, setTakeVersion] = useState<{
+    source: TakeVersionSource;
+    bp: string;
+    bpLabel: string;
+    sourceLabel: string;
+    experiment?: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = dialog closed
+  } | null>(null);
+  const [taking, setTaking] = useState(false);
+  // Why the last take failed, in the server's own words. It is rendered INSIDE
+  // the dialog: a failure that only reaches the activity history leaves the
+  // user looking at an unchanged dialog, which reads as "nothing happened" —
+  // and that is precisely how a 403 from this action was reported to us.
+  const [takeError, setTakeError] = useState('');
   // Bumped on every editor save so copy-dirtiness consumers refetch (the
   // SSE snapshot only refreshes on git events, not file writes).
   const [copyEditNonce, setCopyEditNonce] = useState(0);
-  // Bumped when one of the user's OWN git actions finishes (pull, merge-back)
-  // so the behind-main check re-reads immediately instead of waiting for the
-  // next event — that's what makes the Sync step disappear right after a pull.
-  const [syncCheckNonce, setSyncCheckNonce] = useState(0);
+  // One of the user's OWN git actions finishing (pull, merge-back, taking a
+  // version) re-reads the behind-main check immediately instead of waiting for
+  // the next event — that's what makes the Sync step disappear right after a
+  // pull. It lives in the workspace provider rather than here because the
+  // Deployments tab's inspect modal moves refs too (the hotpatch, the dev
+  // revert) and has no channel back to this component.
+  const { notifyCopyRefsMoved } = useCopyRefsMoved();
   // The copy transition currently locking the interface. null = the app is
   // live. See `Busy` and `BusyOverlay`.
   // eslint-disable-next-line no-restricted-syntax -- null = not locked
@@ -510,10 +535,10 @@ function Shell() {
         // divergence now so the Sync step goes away without waiting for the
         // next SSE event. Also correct on failure: the pull may have got
         // part-way.
-        setSyncCheckNonce((n) => n + 1);
+        notifyCopyRefsMoved();
       }
     },
-    [handleTab, sendPrompt],
+    [handleTab, sendPrompt, notifyCopyRefsMoved],
   );
 
   const bp = useMemo(
@@ -623,8 +648,9 @@ function Shell() {
     divergence: bpDivergence,
     error: divergenceError,
     resolved: divergenceResolved,
+    stale: divergenceStale,
     recheck: recheckDivergence,
-  } = useBpDivergence(copy, bpId, syncCheckNonce + copyEditNonce);
+  } = useBpDivergence(copy, bpId, copyEditNonce);
   const behindBp = bpDivergence?.behind_bp ?? null;
 
   // OPENING one of the two screens that live off this reading re-takes it.
@@ -799,7 +825,7 @@ function Shell() {
       setMerging(false);
       // The parent copy (the user's own) has just taken the experiment's
       // commits — re-read its behind-main count.
-      setSyncCheckNonce((n) => n + 1);
+      notifyCopyRefsMoved();
     }
   }, [
     wt,
@@ -811,6 +837,94 @@ function Shell() {
     lock,
     lockSettling,
     unlock,
+    notifyCopyRefsMoved,
+  ]);
+
+  // ── take a version wholesale ──────────────────────────────────────────────
+  // The fourth thing that can happen to an experiment (merge it, discard it,
+  // leave it running — or take it), and the escape hatch from the Sync step
+  // ("edit the main version without merging my changes"). Both are the same
+  // gitops primitive: park what my copy has for this ONE business process as
+  // an experiment of its own, then make my copy the chosen version.
+  //
+  // Taking an EXPERIMENT is a copy transition — the experiment is consumed and
+  // the user lands back on their own copy — so it locks the interface like
+  // every other one. Taking MAIN happens where the user already is, so it does
+  // not.
+  const runTakeVersion = useCallback(async () => {
+    const req = takeVersion;
+    if (!req || !myCopy || taking) return;
+    const { source, bp: bpDir, bpLabel: label, sourceLabel, experiment } = req;
+    const id = `take-version-${bpDir}`;
+    const moving = source === 'experiment';
+    setTaking(true);
+    setTakeError('');
+    if (moving) {
+      lock(`Taking “${sourceLabel}” into your copy…`, BUSY_TIMEOUT_CREATE_MS, myCopy);
+    }
+    toast.loading(
+      moving
+        ? `Taking “${sourceLabel}” into your copy…`
+        : `Taking the main version of ${label}…`,
+      { id, duration: Infinity },
+    );
+    try {
+      const res = await api.copyFiles.adopt(myCopy, {
+        bp: bpDir,
+        source,
+        bpLabel: label,
+        ...(experiment ? { experiment } : {}),
+      });
+      setTakeVersion(null);
+      if (moving) {
+        // Land on the copy first — the work is there now — and only then
+        // tombstone the consumed experiment so the selection cannot drift back
+        // onto a copy that is mid-teardown while the feed still lists it.
+        setCopy(myCopy);
+        lockSettling();
+        if (experiment) handleCopyDeleted(experiment);
+      }
+      toast.success(res.message, { id, duration: 8000 });
+      // Parking is silent by design when there was nothing to park; when there
+      // WAS, the user needs to know where it went, by the name they will see.
+      if (res.parked) {
+        toast.info(`Your previous work is saved as “${res.parked.title}”`, {
+          description: 'Open it again under Advanced → Experiments.',
+          duration: 10000,
+        });
+      }
+      (res.deploy_task_ids ?? []).forEach((tid, i) => {
+        void watchDeployTask(tid, `${id}-deploy-${i}`, {
+          loading: `Redeploying your copy's live-dev…`,
+          success: `Your copy's live-dev updated`,
+          failurePrefix: `Live-dev redeploy failed`,
+        });
+      });
+    } catch (err) {
+      // Nothing moved, or the parked work is named in the error itself — take
+      // the sheet down and let the message speak.
+      if (moving) unlock();
+      if (err instanceof SessionExpiredError) {
+        toast.dismiss?.(id);
+        setTakeError('Your session expired. Sign in again and try once more.');
+        return;
+      }
+      const why = errorMessage(err);
+      setTakeError(why);
+      toast.error(`Couldn't take that version: ${why}`, { id, duration: 12000 });
+    } finally {
+      setTaking(false);
+      notifyCopyRefsMoved();
+    }
+  }, [
+    takeVersion,
+    myCopy,
+    taking,
+    lock,
+    lockSettling,
+    unlock,
+    handleCopyDeleted,
+    notifyCopyRefsMoved,
   ]);
 
   // Discarding an experiment is a real delete (branch, checkout, live-dev
@@ -965,6 +1079,16 @@ function Shell() {
           refreshKey={copyEditNonce}
           onMergeBack={() => void handleMergeBack()}
           onDiscard={handleDiscardExperiment}
+          onUseThisVersion={() =>
+            wt.bp &&
+            setTakeVersion({
+              source: 'experiment',
+              bp: wt.bp,
+              bpLabel: experimentBpLabel || wt.bp,
+              sourceLabel: wt.title ?? wt.name,
+              experiment: wt.name,
+            })
+          }
         />
       )}
       {isLoading ? (
@@ -980,15 +1104,46 @@ function Shell() {
           tab={tab}
           onTab={handleTab}
           onCopyEdited={() => setCopyEditNonce((n) => n + 1)}
+          editNonce={copyEditNonce}
           onNewBp={() => setNewBpOpen(true)}
           isMyCopy={isMyCopy}
           isMyExperiment={isMyExperiment}
           divergence={bpDivergence}
           divergenceError={divergenceError}
+          divergenceStale={divergenceStale}
           onPullBp={handlePullBp}
           onMergeBack={() => void handleMergeBack()}
+          {...(isMyCopy && bp
+            ? {
+                // "Edit the main version without merging my changes" — the
+                // other way past a Sync step, offered where the Sync step is.
+                onTakeMain: () =>
+                  setTakeVersion({
+                    source: 'main',
+                    bp: bp.name,
+                    bpLabel: bp.displayName,
+                    sourceLabel: 'main',
+                  }),
+              }
+            : {})}
         />
       )}
+      {/* Taking a version wholesale, from an experiment or from main. The
+          dialog's whole job is the promise that what you have is kept. */}
+      <TakeVersionDialog
+        open={takeVersion !== null}
+        source={takeVersion?.source ?? 'main'}
+        bpLabel={takeVersion?.bpLabel ?? ''}
+        {...(takeVersion?.sourceLabel ? { sourceLabel: takeVersion.sourceLabel } : {})}
+        busy={taking}
+        {...(takeError ? { error: takeError } : {})}
+        onConfirm={() => void runTakeVersion()}
+        onCancel={() => {
+          if (taking) return;
+          setTakeVersion(null);
+          setTakeError('');
+        }}
+      />
       {/* Discarding an experiment: the same warn+confirm delete dialog every
           copy delete goes through — it names the unmerged and uncommitted work
           the discard would destroy. */}

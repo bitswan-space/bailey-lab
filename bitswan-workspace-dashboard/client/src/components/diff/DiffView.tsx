@@ -62,13 +62,24 @@ export function DiffView({ path, diff, loading }: Props) {
     );
   }
 
+  // EVERYTHING BELOW IS QUOTED GIT OUTPUT, not our own words: the header is a
+  // repository path or a commit's own subject, and the body is a patch
+  // verbatim. Marked as such for the same reason the Sync screen's commit
+  // subjects are (`data-git-text`): commit messages gitops writes name a
+  // business process by its DIRECTORY ("edit README.md (test33)"), so a check
+  // that our screens speak in display names has to be able to tell our prose
+  // from a quotation, and rewriting somebody's commit message to match a
+  // display name would be a lie about history.
   return (
     <div className="flex h-full flex-col">
-      <div className="shrink-0 truncate border-b border-border px-4 py-2 font-mono text-[12px] text-muted-foreground">
+      <div
+        data-git-text="path"
+        className="shrink-0 truncate border-b border-border px-4 py-2 font-mono text-[12px] text-muted-foreground"
+      >
         {path}
       </div>
       <div className="flex-1 overflow-auto bg-background">
-        <pre className="m-0 font-mono text-[12px] leading-5">
+        <pre data-git-text="patch" className="m-0 font-mono text-[12px] leading-5">
           {lines.map((l, i) => (
             // eslint-disable-next-line react/no-array-index-key -- stable, lines don't reorder
             <div key={i} className={`whitespace-pre px-4 ${STYLES[l.kind]}`}>

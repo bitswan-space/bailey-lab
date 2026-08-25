@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { ArrowDownToLine, GitCommitHorizontal, Loader2 } from 'lucide-react';
+import { ArrowDownToLine, GitCommitHorizontal, Loader2, Replace } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DiffFileList } from '@/components/diff/DiffFileList';
 import { DiffView } from '@/components/diff/DiffView';
@@ -27,6 +27,10 @@ interface SyncTabProps {
   /** Live data says there is nothing to pull for this process. The step only
    *  exists because main has something it lacks, so the shell leaves. */
   onNothingToPull: () => void;
+  /** Take MAIN wholesale instead of pulling it: my copy of this process
+   *  becomes main's version, and what I had is parked as an experiment.
+   *  Absent when this is not the user's own copy. */
+  onTakeMain?: () => void;
 }
 
 /**
@@ -59,6 +63,7 @@ export function SyncTab({
   divergenceError,
   onPull,
   onNothingToPull,
+  onTakeMain,
 }: SyncTabProps) {
   const [pulling, setPulling] = useState(false);
   const label = bp.displayName || bp.name;
@@ -121,16 +126,36 @@ export function SyncTab({
           )}
         </div>
         {!upToDate && (
-          <Button
-            size="lg"
-            className="shrink-0"
-            disabled={pulling}
-            title={`Pull main's new changes into ${label}`}
-            onClick={handlePull}
-          >
-            <ArrowDownToLine className="size-4" aria-hidden />
-            {pulling ? 'Pulling…' : `Pull main into ${label}`}
-          </Button>
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            <Button
+              size="lg"
+              disabled={pulling}
+              title={`Pull main's new changes into ${label}`}
+              onClick={handlePull}
+            >
+              <ArrowDownToLine className="size-4" aria-hidden />
+              {pulling ? 'Pulling…' : `Pull main into ${label}`}
+            </Button>
+            {/* The other answer, and there is no way to reach it by pulling:
+                sometimes your attempt was the dead end and main is simply the
+                version you want to carry on from. Pulling would replay your
+                work on top of main and hand you the conflict; this takes main
+                as it stands and puts your work safely to one side. Quiet and
+                second, because it is the rarer intent. */}
+            {onTakeMain && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground"
+                disabled={pulling}
+                title={`Your copy of ${label} becomes main's version. What you have now is saved as an experiment first.`}
+                onClick={onTakeMain}
+              >
+                <Replace className="size-3.5" aria-hidden />
+                Edit main&apos;s version without merging my changes
+              </Button>
+            )}
+          </div>
         )}
       </div>
 

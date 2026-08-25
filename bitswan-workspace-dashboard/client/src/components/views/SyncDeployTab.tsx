@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   SlidersHorizontal,
   Terminal,
+  TriangleAlert,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
@@ -15,8 +16,10 @@ import { cn } from '@/lib/utils';
 import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
 import { api, errorMessage, type BpDivergence } from '@/lib/api';
+import { deployReadiness } from '@/lib/deployReadiness';
 import { watchDeployTask } from '@/lib/deployBp';
 import { useUrlEnum } from '@/lib/urlState';
+import { PublishOverMainDialog } from '@/components/workspace/PublishOverMainDialog';
 
 interface SyncDeployTabProps {
   bp: BusinessProcess;
@@ -31,6 +34,14 @@ interface SyncDeployTabProps {
   /** Why that reading failed. null = it is trustworthy. */
   // eslint-disable-next-line no-restricted-syntax -- null = no error
   divergenceError: string | null;
+  /** The reading is about the copy BEFORE an action this user just took, and a
+   *  fresh one is on its way. This screen ASSERTS from the reading ("up to
+   *  date", "sync first"), so it must treat stale as not-yet-known. */
+  divergenceStale: boolean;
+  /** Bumped by the shell on every editor save. An editor save moves no git
+   *  ref, so nothing else on this screen would notice that the copy now holds
+   *  unpublished work. */
+  editNonce: number;
   /** Called once the dev deploy finishes successfully — used to jump to the
    *  Deployments tab (Development stage) so the user sees the result. */
   onDeployed: () => void;
@@ -41,6 +52,9 @@ interface SyncDeployTabProps {
    *  the copy in view (the user's own copy) — on a colleague's copy the
    *  "behind main" note stands on its own. */
   onGoToSync?: () => void;
+  /** True when the copy in view is the signed-in user's own — the only case in
+   *  which publishing over main is even offered (it publishes YOUR version). */
+  isMyCopy?: boolean;
 }
 
 /**
@@ -70,12 +84,30 @@ export function SyncDeployTab({
   wt,
   divergence,
   divergenceError,
+  divergenceStale,
+  editNonce,
   onDeployed,
   onManageDeployments,
   onGoToSync,
+  isMyCopy,
 }: SyncDeployTabProps) {
-  const { changed } = useCopyStatus(wt.name);
+  // `editNonce` is bumped by the shell on every editor save, because a save
+  // is not a git event: without it this list would still be the one read when
+  // the screen mounted, and a copy with unsaved-then-saved work would keep
+  // reading as clean. See `useCopyStatus`.
+  const {
+    changed,
+    loading: changedLoading,
+    error: changedError,
+  } = useCopyStatus(wt.name, editNonce);
   const [busy, setBusy] = useState(false);
+  // The Advanced way out of a blocked Deploy: publish this copy's version even
+  // though main moved on. Confirmation lives in its own dialog, which reads
+  // live whose commits it would supersede.
+  const [publishOverOpen, setPublishOverOpen] = useState(false);
+  const [publishingOver, setPublishingOver] = useState(false);
+  // Why the last publish attempt failed, shown IN the confirm dialog.
+  const [publishOverError, setPublishOverError] = useState('');
   // Append-only build log for the in-flight (or just-finished) deploy: every
   // line gitops emits — image build steps, build.sh output (vite/go build),
   // per-member "Prepared N/M" — not just the latest line the toast shows.
@@ -98,13 +130,21 @@ export function SyncDeployTab({
   );
 
   // Scope the change summary to this BP — only its changes get synced/deployed,
-  // so the counts here match the BP-scoped diff below.
-  const bpChanged = changed.filter(
-    (c) => c.path === bp.name || c.path.startsWith(`${bp.name}/`),
-  );
+  // so the counts here match the BP-scoped diff below. The decision itself
+  // lives in `deployReadiness` so the rule it encodes ("never say up to date
+  // from a reading you have not taken") is unit-tested rather than buried in
+  // a render.
+  const readiness = deployReadiness({
+    divergence: divergenceStale ? null : divergence,
+    changed,
+    changedUnknown: changedLoading || !!changedError,
+    bpDir: bp.name,
+  });
+  const bpChanged = readiness.bpChanged as typeof changed;
   const adds = bpChanged.reduce((a, c) => a + c.adds, 0);
   const dels = bpChanged.reduce((a, c) => a + c.dels, 0);
-  const dirty = bpChanged.length > 0;
+  const dirty = readiness.dirty;
+  const dirtyKnown = !changedLoading && !changedError;
 
   // The copy as a whole can be far ahead/behind main purely from work on OTHER
   // business processes, while THIS one is identical to main — so the reading
@@ -117,7 +157,7 @@ export function SyncDeployTab({
   // `divergenceKnown`, so a pending or failed read cannot masquerade as a clean
   // copy (the silent default this screen used to have: `?? 0` turned both into
   // "All deployed and up to date").
-  const divergenceKnown = divergence !== null;
+  const divergenceKnown = divergence !== null && !divergenceStale;
   const aheadBp = divergence?.ahead_bp ?? 0;
   const behindBp = divergence?.behind_bp ?? 0;
   const aheadOther = divergence?.ahead_other ?? 0;
@@ -127,11 +167,11 @@ export function SyncDeployTab({
   // divergence. Other BPs' divergence does NOT count — they deploy from their
   // own Deploy screen. Uncommitted work is still actionable (Deploy
   // auto-commits it).
-  const bpUpToDate = divergenceKnown && aheadBp === 0 && behindBp === 0 && !dirty;
-  const actionable = !bpUpToDate;
+  const bpUpToDate = readiness.upToDate;
+  const actionable = readiness.actionable;
   // Deploying is fast-forward only. Anything main has that this copy lacks is
   // pulled in on the Sync tab first — never repaired from here.
-  const blockedByBehind = behindBp > 0;
+  const blockedByBehind = readiness.blockedByBehind;
 
   const runSyncDeploy = useCallback(async () => {
     setBusy(true);
@@ -184,6 +224,54 @@ export function SyncDeployTab({
     }
   }, [wt.name, bp.name, onDeployed]);
 
+  // Publishing over main. `expectedMain` is the tip the dialog described: if
+  // main moved in between, gitops 409s rather than superseding commits the
+  // user was never shown. A conflict no rule can decide changes NOTHING and
+  // comes back as `needs_rebase` — the coding-agent handoff, same as Sync.
+  const runPublishOver = useCallback(
+    async (expectedMain: string) => {
+      setPublishingOver(true);
+      setPublishOverError('');
+      const id = `publish-over-main-${bp.name}`;
+      toast.loading(`Publishing your version of ${bp.displayName} over main…`, {
+        id,
+        duration: Infinity,
+      });
+      try {
+        const res = await api.copyFiles.deployOverMain(wt.name, {
+          bp: bp.name,
+          expectedMain,
+          bpLabel: bp.displayName,
+        });
+        if (res.status === 'needs_rebase') {
+          toast.error(res.message, { id, duration: 14000 });
+          return;
+        }
+        setPublishOverOpen(false);
+        toast.success(res.message, { id, duration: 10000 });
+        if (res.deploy_task_id) {
+          const outcome = await watchDeployTask(res.deploy_task_id, `${id}-deploy`, {
+            loading: `Deploying ${bp.displayName} to dev…`,
+            success: `${bp.displayName} published and deployed to dev`,
+            failurePrefix: `Published into main, but deploy to dev failed for ${bp.displayName}`,
+            onLog: setDeployLog,
+          });
+          if (outcome === 'completed') onDeployed();
+        }
+      } catch (err) {
+        // Into the dialog, not only into the activity history: the dialog is
+        // where the user is looking, and one that simply stays open reads as
+        // "nothing happened".
+        const why = errorMessage(err);
+        setPublishOverError(why);
+        toast.error(`Publishing over main failed: ${why}`, { id, duration: 14000 });
+      } finally {
+        setPublishingOver(false);
+      }
+    },
+    [wt.name, bp.name, bp.displayName, onDeployed],
+  );
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-background">
       {/* Explainer header + the one primary action. */}
@@ -211,15 +299,19 @@ export function SyncDeployTab({
               <span className="w-44 shrink-0 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 This business process
               </span>
-              {!divergenceKnown ? (
+              {!divergenceKnown || !dirtyKnown ? (
                 // Say WHICH it is. Rendering this state as "up to date" is the
-                // silent default that made a stale screen look authoritative.
-                divergenceError !== null ? (
+                // silent default that made a stale screen look authoritative —
+                // and it applied just as much to the uncommitted-work list as
+                // to the divergence, so both are named here.
+                divergenceError !== null || changedError ? (
                   <span
                     className="font-medium text-destructive"
-                    title={divergenceError}
+                    title={divergenceError ?? changedError}
                   >
-                    {`Couldn't check this against main — ${divergenceError}`}
+                    {divergenceError !== null
+                      ? `Couldn't check this against main — ${divergenceError}`
+                      : `Couldn't read this copy's unsaved work — ${changedError}`}
                   </span>
                 ) : (
                   <span className="text-muted-foreground">
@@ -284,6 +376,24 @@ export function SyncDeployTab({
                 Go to Sync
               </Button>
             )}
+            {/* The other way out, and it is deliberately not a peer of the
+                first: syncing is how work normally travels, and this takes the
+                decision away from whoever made the changes on main. It is
+                offered because the alternative — a user who genuinely means
+                "mine is the right one" having no move at all — is what sends
+                people to force-push behind the product's back. */}
+            {isMyCopy && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-muted-foreground"
+                title={`Publish your version of ${bp.displayName} over main, superseding what other people changed`}
+                onClick={() => setPublishOverOpen(true)}
+              >
+                <TriangleAlert className="size-3.5" aria-hidden />
+                Deploy this version, overwriting main…
+              </Button>
+            )}
           </div>
         ) : actionable ? (
           <Button
@@ -318,6 +428,21 @@ export function SyncDeployTab({
           </div>
         )}
       </div>
+
+      <PublishOverMainDialog
+        open={publishOverOpen}
+        copy={wt.name}
+        bp={bp.name}
+        bpLabel={bp.displayName}
+        busy={publishingOver}
+        {...(publishOverError ? { failure: publishOverError } : {})}
+        onConfirm={(expectedMain) => void runPublishOver(expectedMain)}
+        onCancel={() => {
+          if (publishingOver) return;
+          setPublishOverOpen(false);
+          setPublishOverError('');
+        }}
+      />
 
       {/* Live build log — every line gitops emits during the deploy, appended
           (not overwritten like the toast), so the image build steps and

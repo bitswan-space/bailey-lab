@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -b && vite build",
+    "test": "node --import tsx --test src/lib/*.test.ts",
     "dev": "vite",
     "preview": "vite preview"
   },

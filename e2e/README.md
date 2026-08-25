@@ -10,7 +10,8 @@ The suite drives the genuine operator journey with Playwright:
 > OIDC sign-in → **claim the server** (device trust) → create the **Meridian
 > Foods** workspace through the Server Console UI → create the `invoice-processing`
 > business process → describe it → build it with the **Coding Agent** → try a
-> change in an **experiment** off your own copy and **merge it back** →
+> change in an **experiment** off your own copy — merge it back, or take it
+> wholesale without merging →
 > **Deploy** (with the pre-deploy CVE **Checks**) → promote dev → staging →
 > **production** (blue-green) → snapshot → **rehearse recovery into DR** → walk
 > People & roles, Endpoint access, devices.
@@ -19,10 +20,26 @@ Everyone works in their **own copy**, created for them on first visit — the to
 bar carries no copy picker and no copy name, and the suite **asserts that
 absence**. The rest of the copy tree lives behind the top bar's **Advanced**
 menu: a colleague's version (amber "you are viewing" banner), and **experiments**
-— throwaway branches off your own copy that you either merge back (which
-auto-discards them) or discard. `Deploy` publishes your copy into main
-**fast-forward-only**; the conditional `Sync` step is what pulls main in first,
-and it exists only while your own copy is behind.
+— side branches off your own copy, each belonging to exactly one business
+process. There are **four** ways out of one: leave it running and step back to
+your copy, **merge it back** (which auto-discards it), **discard** it, or
+**take it wholesale** ("Use this version without merging") — which makes your
+copy become it and parks what you had as a dated experiment of its own.
+
+`Deploy` publishes your copy into main **fast-forward-only**; the conditional
+`Sync` step is what pulls main in first, and it exists only while your own copy
+is behind on **that** business process. When main has moved on there are two
+honest ways forward, and the product offers both: **Sync** (replay your work on
+top of theirs — the answer almost every time), or **Deploy this version,
+overwriting main…**, which has one outcome — main ends up holding *exactly*
+your version, including dropping what main added that you do not have — behind
+a dialog that names whose commits it supersedes and a typed confirmation.
+
+The same take-a-version primitive reaches backwards, too: **Edit this version**
+on any deployment's Inspect makes your copy that deployed version *on top of
+main* (one ahead, none behind, so Deploy needs no Sync first), and **Revert dev
+to this version** puts the shared dev stage back with one forward commit on
+main — which everyone else then picks up through their ordinary Sync.
 
 Each beat is screenshotted into `manual/build/shots/<slot>.png`; the generator
 assembles them into `manual/build/handbook.html` + `handbook.pdf`. The manual
