@@ -41,6 +41,42 @@ function advisoryLinks(id: string): { label: string; href: string }[] {
   return links;
 }
 
+/** The scan is a chain of four independently-breakable things — syft on the
+ *  infra-driver, grype in gitops, the daemon-owned vulnerability DB, and the
+ *  scan itself. This maps the failure `code` gitops records onto a state a human
+ *  can act on. Collapsing them into one "scan unavailable" sentence (issues
+ *  #370 / #271) told nobody which of the four to go look at. */
+const SCAN_FAILURES: Record<string, { title: string; hint: string }> = {
+  'db-missing': {
+    title: 'Waiting for the shared vulnerability database',
+    hint: "The automation server downloads grype's vulnerability database once per host and shares it read-only with every workspace. It isn't on this host yet — on a fresh or briefly-offline host the first download can fail, and it retries in the background. Scans pick it up automatically once it lands.",
+  },
+  'db-unreadable': {
+    title: 'The shared vulnerability database isn’t readable',
+    hint: 'The database is on this host, but this workspace isn’t permitted to read it. The automation server owns that shared volume and has to leave it readable by the workspaces — this does not resolve on its own, so an operator needs to look at the server.',
+  },
+  'scanner-missing': {
+    title: 'The vulnerability scanner is missing from this workspace',
+    hint: "grype isn't installed in this workspace's gitops container, which usually means the workspace is running an old gitops image. Updating the workspace restores scanning.",
+  },
+  'sbom-failed': {
+    title: 'Couldn’t read the image’s package list',
+    hint: 'syft runs on the infra-driver (the container that owns Docker) and produces the package list this scan needs. It failed or returned nothing for this image.',
+  },
+  'scan-failed': {
+    title: 'The vulnerability scan failed',
+    hint: 'grype ran against the image’s package list and exited with an error.',
+  },
+};
+const GENERIC_FAILURE = {
+  title: 'The vulnerability scan didn’t complete',
+  hint: 'The scan produced no usable result for this image.',
+};
+
+function describeFailure(report: SupplyChainReport) {
+  return SCAN_FAILURES[report.code ?? ''] ?? GENERIC_FAILURE;
+}
+
 export function SupplyChainPanel({
   bp,
   stage,
@@ -59,8 +95,9 @@ export function SupplyChainPanel({
    *  Required for editing; the read-only Supply chain tab omits it. */
   copy?: string | null;
   /** Override how the report is loaded (defaults to the deployed-image scan).
-   *  The Supply Chain Security tab passes a preview fetch of the about-to-be-built image. */
-  fetcher?: () => Promise<SupplyChainReport>;
+   *  The Supply Chain Security tab passes a preview fetch of the about-to-be-built image.
+   *  `force` is threaded through so Retry can demand a real rescan, not a refetch. */
+  fetcher?: (opts?: { force?: boolean }) => Promise<SupplyChainReport>;
   /** Message shown when there's nothing to scan (status not-deployed). */
   emptyHint?: string;
   /** Override the intro line above the rollup (e.g. the Supply Chain Security tab explains
@@ -82,8 +119,11 @@ export function SupplyChainPanel({
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
 
+  // `force` is an argument rather than state so runFetch's identity — and the
+  // effects keyed on it — never change just because a Retry was pressed.
   const fetchReport = useCallback(
-    () => (fetcher ? fetcher() : api.supplyChain(bp, stage)),
+    (force: boolean) =>
+      fetcher ? fetcher({ force }) : api.supplyChain(bp, stage, force),
     [bp, stage, fetcher],
   );
 
@@ -108,7 +148,7 @@ export function SupplyChainPanel({
   // never missed. Event-driven; the bake is serialized server-side so repeats
   // are safe cache hits.
   const runFetch = useCallback(
-    (showLoading: boolean) => {
+    (showLoading: boolean, force = false) => {
       if (fetchingRef.current) {
         queuedRef.current = true;
         return;
@@ -117,7 +157,7 @@ export function SupplyChainPanel({
       queuedRef.current = false;
       if (showLoading) setLoading(true);
       setError(null);
-      fetchReport()
+      fetchReport(force)
         .then((r) => {
           if (!mountedRef.current) return;
           statusRef.current = r?.status;
@@ -156,7 +196,11 @@ export function SupplyChainPanel({
   const scanTick = useSupplyChainTick();
   useEffect(() => {
     const s = statusRef.current;
-    if (s === undefined || s === 'pending') runFetch(false);
+    // 'unavailable' belongs here too: failures are retried server-side, so the
+    // panel must pick up the recovery. Without it a pane that once showed a
+    // failure kept showing it until a manual reload, however many good scans
+    // landed behind it.
+    if (s === undefined || s === 'pending' || s === 'unavailable') runFetch(false);
     // Only react to scanTick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scanTick]);
@@ -226,7 +270,7 @@ export function SupplyChainPanel({
         </pre>
         <button
           type="button"
-          onClick={() => runFetch(true)}
+          onClick={() => runFetch(true, true)}
           className="rounded border border-border px-3 py-1 text-xs font-medium hover:bg-accent"
         >
           Retry
@@ -251,8 +295,33 @@ export function SupplyChainPanel({
       />
     );
   }
-  if (report.status === 'unavailable') {
-    return <Notice icon={AlertTriangle} text="Vulnerability scan unavailable (syft/grype or the vuln DB couldn't run on this image)." />;
+  // A failed scan is NOT an empty scan. When we still have the package list we
+  // render the whole report with a banner on top, so the SBOM stays usable and a
+  // broken scanner can never be mistaken for a clean image; only a failure with
+  // nothing at all to show falls back to a standalone notice.
+  const failure = report.status === 'unavailable' ? describeFailure(report) : null;
+  if (failure && report.packages.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-3 px-3 py-12 text-center">
+        <AlertTriangle className="size-7 text-muted-foreground" aria-hidden />
+        <div className="max-w-md text-[13px] font-medium text-foreground">{failure.title}</div>
+        <div className="max-w-md text-[12.5px] leading-relaxed text-muted-foreground">
+          {failure.hint}
+        </div>
+        {report.reason && (
+          <pre className="max-w-md overflow-auto whitespace-pre-wrap rounded bg-muted px-3 py-2 text-left text-[11px] text-muted-foreground">
+            {report.reason}
+          </pre>
+        )}
+        <button
+          type="button"
+          onClick={() => runFetch(true, true)}
+          className="rounded border border-border px-3 py-1 text-xs font-medium hover:bg-accent"
+        >
+          Retry
+        </button>
+      </div>
+    );
   }
 
   const waivers = report.waivers ?? [];
@@ -263,6 +332,35 @@ export function SupplyChainPanel({
 
   return (
     <div className="relative flex flex-col gap-3">
+      {/* The scan broke but we do have the package list — say so loudly above the
+          report, so nobody reads a CVE-less table as "this image is clean". */}
+      {failure && (
+        <div className="flex flex-col gap-1.5 rounded-[10px] border border-amber-300 bg-amber-50 px-3.5 py-3">
+          <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-amber-900">
+            <AlertTriangle className="size-3.5 shrink-0" aria-hidden /> {failure.title}
+          </div>
+          <div className="text-[12px] leading-relaxed text-amber-900/80">
+            {failure.hint} The packages below are the image’s contents; they have{' '}
+            <strong className="font-semibold">not</strong> been checked for
+            vulnerabilities.
+          </div>
+          {report.reason && (
+            <pre className="overflow-auto whitespace-pre-wrap rounded bg-amber-100/70 px-2.5 py-1.5 text-[11px] text-amber-900">
+              {report.reason}
+            </pre>
+          )}
+          <div>
+            <button
+              type="button"
+              onClick={() => runFetch(true, true)}
+              className="mt-0.5 rounded border border-amber-300 bg-background px-2.5 py-1 text-[11px] font-medium text-amber-900 hover:bg-amber-100"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Intro + rollup */}
       <div className="flex flex-wrap items-center gap-3">
         <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-muted-foreground">
@@ -289,11 +387,18 @@ export function SupplyChainPanel({
               </span>
             ) : null,
           )}
-          {totalActive === 0 && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-              <Check className="size-3" aria-hidden /> No active CVEs
-            </span>
-          )}
+          {/* "No active CVEs" is a RESULT — it may only be claimed when the scan
+              actually ran. A failed scan gets its own pill instead. */}
+          {totalActive === 0 &&
+            (failure ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800">
+                <AlertTriangle className="size-3" aria-hidden /> Not scanned
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                <Check className="size-3" aria-hidden /> No active CVEs
+              </span>
+            ))}
         </div>
       </div>
 
@@ -351,7 +456,9 @@ export function SupplyChainPanel({
           ))}
           {rows.length === 0 && (
             <div className="px-3.5 py-6 text-center text-[12px] text-muted-foreground">
-              No vulnerable packages. 🎉
+              {failure
+                ? 'No vulnerability data — the scan above didn’t complete.'
+                : 'No vulnerable packages. 🎉'}
             </div>
           )}
         </div>
@@ -359,8 +466,16 @@ export function SupplyChainPanel({
 
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <span>
-          {report.packages.length} packages · {totalActive} in-scope {totalActive === 1 ? 'CVE' : 'CVEs'}
-          {waivers.length > 0 && <> · {waivers.length} out of scope</>} · scanned {scannedAt}
+          {report.packages.length} packages ·{' '}
+          {failure ? (
+            'vulnerabilities not scanned'
+          ) : (
+            <>
+              {totalActive} in-scope {totalActive === 1 ? 'CVE' : 'CVEs'}
+            </>
+          )}
+          {waivers.length > 0 && <> · {waivers.length} out of scope</>} ·{' '}
+          {failure ? 'last attempt' : 'scanned'} {scannedAt}
         </span>
         <button type="button" onClick={() => setShowClean((v) => !v)} className="text-primary hover:underline">
           {showClean ? 'Hide clean packages' : `Show all ${report.packages.length} packages`}

@@ -623,13 +623,19 @@ export function registerAutomationRoutes(
 
   // Supply chain → SBOM packages + CVEs (syft/grype) for the deployed image(s)
   // at a stage, plus the out-of-scope waiver log.
-  app.get<{ Params: { bp: string }; Querystring: { stage?: string } }>(
+  app.get<{ Params: { bp: string }; Querystring: { stage?: string; force?: string } }>(
     '/api/automations/business-processes/:bp/supply-chain',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
       if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
       try {
-        const r = await gitops.supplyChain(req.params.bp, req.query.stage || 'dev');
+        // `force` is the panel's Retry: rescan now instead of being paced by the
+        // server-side cooldown that throttles automatic refetches.
+        const r = await gitops.supplyChain(
+          req.params.bp,
+          req.query.stage || 'dev',
+          req.query.force === 'true',
+        );
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)
@@ -645,13 +651,17 @@ export function registerAutomationRoutes(
 
   // Supply chain preview → SBOM + CVEs for the image a deploy of this BP would
   // build from the current source (Sync & Deploy → Checks). Builds + scans.
-  app.get<{ Params: { bp: string }; Querystring: { copy?: string } }>(
+  app.get<{ Params: { bp: string }; Querystring: { copy?: string; force?: string } }>(
     '/api/automations/business-processes/:bp/supply-chain/preview',
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
       if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
       try {
-        const r = await gitops.supplyChainPreview(req.params.bp, req.query.copy ?? null);
+        const r = await gitops.supplyChainPreview(
+          req.params.bp,
+          req.query.copy ?? null,
+          req.query.force === 'true',
+        );
         if (!r.ok) {
           return reply
             .code(r.status >= 400 && r.status < 500 ? r.status : 502)

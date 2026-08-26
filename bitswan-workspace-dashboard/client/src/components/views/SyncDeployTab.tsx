@@ -125,7 +125,7 @@ export function SyncDeployTab({
   // this copy's source (built + scanned on demand). Memoised so the panel
   // doesn't refetch on every render.
   const checksFetcher = useCallback(
-    () => api.supplyChainPreview(bp.name, wt.name),
+    (opts?: { force?: boolean }) => api.supplyChainPreview(bp.name, wt.name, opts?.force),
     [bp.name, wt.name],
   );
 

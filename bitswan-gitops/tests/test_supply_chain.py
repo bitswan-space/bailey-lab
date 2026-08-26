@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 
 from app.utils import dump_bitswan_yaml
 from app.services import automation_service as asvc
@@ -285,10 +286,198 @@ async def test_ensure_vuln_db_reads_only_never_updates(monkeypatch):
     monkeypatch.setattr(scs, "_db_ready", False)
     monkeypatch.setattr(scs, "_db_lock", None)
 
-    assert await scs.ensure_vuln_db() is True
+    ready, detail = await scs.ensure_vuln_db()
+    assert ready is True and detail == ""
     assert calls, "grype db status was not invoked"
     cmd, env = calls[0]
     assert cmd == ("grype", "db", "status")
     assert env["GRYPE_DB_AUTO_UPDATE"] == "false"
     assert not any("update" in part for (c, _e) in calls for part in c)
     monkeypatch.setattr(scs, "_db_ready", False)  # don't leak readiness to other tests
+
+
+# ── failures are named, retried, and never mistaken for a clean image ────────
+def test_grype_db_missing_is_its_own_diagnosis(tmp_path, monkeypatch):
+    """When the daemon's DB isn't on the host yet we must NOT run grype (it is
+    configured never to fetch a DB itself); we record `db-missing` with what
+    `grype db status` said, so the panel can name the state instead of showing
+    one catch-all sentence."""
+    d = str(tmp_path / "sc")
+    monkeypatch.setattr(scs, "supply_chain_dir", lambda: d)
+    os.makedirs(d)
+    k = scs._key("sha256:abc")
+    with open(scs._sbom_path(d, k), "w") as f:
+        json.dump({"artifacts": [{"name": "openssl", "version": "3.0.11"}]}, f)
+
+    ran = []
+
+    async def fake_ensure():
+        return False, "no database found in /grype-db"
+
+    async def fake_run(*cmd, timeout=600, env=None):
+        ran.append(cmd)
+        return (0, b"{}", b"")
+
+    monkeypatch.setattr(scs, "ensure_vuln_db", fake_ensure)
+    monkeypatch.setattr(scs, "_run", fake_run)
+    asyncio.run(scs.scan_image("internal/ws-x:sha1", "sha256:abc"))
+
+    assert ran == [], "grype was run against a database that isn't there"
+    scan = scs.read_image_scan("sha256:abc")
+    assert scan["status"] == "unavailable"
+    assert scan["code"] == scs.FAIL_DB_MISSING
+    assert "no database found in /grype-db" in scan["reason"]
+    # The SBOM survives the failure, so the panel can still show the packages.
+    assert [p["name"] for p in scan["packages"]] == ["openssl"]
+
+
+def test_unreadable_db_is_not_reported_as_a_missing_one(tmp_path, monkeypatch):
+    """The real #370/#271 failure: the daemon downloads the shared DB as root and
+    grype makes its schema dir 0700, but gitops scans as user1000 — so the DB is
+    present and unreadable. Reporting that as "not downloaded yet" points the
+    operator at a download that already succeeded and never resolves."""
+    d = str(tmp_path / "sc")
+    monkeypatch.setattr(scs, "supply_chain_dir", lambda: d)
+    os.makedirs(d)
+    k = scs._key("sha256:abc")
+    with open(scs._sbom_path(d, k), "w") as f:
+        json.dump({"artifacts": [{"name": "openssl", "version": "3.0.11"}]}, f)
+
+    denied = (
+        "[0000] ERROR failed to access database file: "
+        "stat /grype-db/6/vulnerability.db: permission denied"
+    )
+
+    async def fake_ensure():
+        return False, denied
+
+    monkeypatch.setattr(scs, "ensure_vuln_db", fake_ensure)
+    asyncio.run(scs.scan_image("internal/ws-x:sha1", "sha256:abc"))
+
+    scan = scs.read_image_scan("sha256:abc")
+    assert scan["code"] == scs.FAIL_DB_UNREADABLE
+    assert scan["code"] != scs.FAIL_DB_MISSING
+    assert "not allowed to read it" in scan["reason"]
+    assert denied in scan["reason"]  # the operator gets grype's own words
+
+
+def test_missing_grype_binary_reports_scanner_missing(tmp_path, monkeypatch):
+    """A gitops image without grype is a different problem from a missing DB —
+    `_run` turns the spawn failure into rc 127 and the code says so."""
+    d = str(tmp_path / "sc")
+    monkeypatch.setattr(scs, "supply_chain_dir", lambda: d)
+    os.makedirs(d)
+    k = scs._key("sha256:abc")
+    with open(scs._sbom_path(d, k), "w") as f:
+        json.dump({"artifacts": []}, f)
+
+    async def fake_ensure():
+        return True, ""
+
+    async def fake_run(*cmd, timeout=600, env=None):
+        return (scs.RC_NOT_FOUND, b"", b"grype: not found")
+
+    monkeypatch.setattr(scs, "ensure_vuln_db", fake_ensure)
+    monkeypatch.setattr(scs, "_run", fake_run)
+    asyncio.run(scs.scan_image("internal/ws-x:sha1", "sha256:abc"))
+
+    assert scs.read_image_scan("sha256:abc")["code"] == scs.FAIL_SCANNER_MISSING
+
+
+def test_sbom_failure_is_surfaced_not_left_pending(tmp_path, monkeypatch):
+    """A syft/driver failure leaves no SBOM at all. It used to read back as
+    `pending`, so the recorded reason sat behind a spinner that never resolved."""
+    d = str(tmp_path / "sc")
+    monkeypatch.setattr(scs, "supply_chain_dir", lambda: d)
+
+    async def boom(image_ref):
+        raise RuntimeError("HTTP 500: docker: no such image")
+
+    monkeypatch.setattr(scs, "_driver_sbom", boom)
+    asyncio.run(scs.scan_image("internal/ws-x:sha1", "sha256:abc"))
+
+    scan = scs.read_image_scan("sha256:abc")
+    assert scan["status"] == "unavailable"
+    assert scan["code"] == scs.FAIL_SBOM
+    assert "no such image" in scan["reason"]
+
+
+def test_recorded_failures_are_retried_after_the_cooldown():
+    """A cached failure is not a final answer. Before this, one bad scan (e.g.
+    during the daemon's first DB download) pinned an image to 'unavailable' until
+    the daily job ran or somebody deleted the cache file."""
+    assert scs.should_rescan({"status": "pending"}) is True
+    assert scs.should_rescan({"status": "ok"}) is False
+
+    fresh = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    stale = (
+        datetime.now(timezone.utc) - scs.FAILED_SCAN_RETRY_AFTER - timedelta(minutes=1)
+    ).isoformat()
+    assert scs.should_rescan({"status": "unavailable", "scanned_at": fresh}) is False
+    assert scs.should_rescan({"status": "unavailable", "scanned_at": stale}) is True
+    # Unparseable/absent timestamps retry rather than pinning the image forever.
+    assert scs.should_rescan({"status": "unavailable"}) is True
+
+
+def test_retry_forces_a_rescan_through_the_cooldown(tmp_path, monkeypatch):
+    """The panel's Retry must actually rescan. The cooldown paces AUTOMATIC
+    refetches, but an operator pressing Retry has usually just fixed the host —
+    serving them the identical cached error for 10 minutes makes the button a
+    lie (PR #377 review)."""
+    svc, d = _svc(tmp_path, monkeypatch)
+    cve_path = scs._cve_path(d, scs._key("sha256:fe"))
+    scs._write_failure(cve_path, scs.FAIL_DB_UNREADABLE, "permission denied")
+
+    # Freshly recorded, so the automatic path deliberately declines to rescan.
+    assert scs.should_rescan(scs.read_image_scan("sha256:fe")) is False
+
+    spawned = []
+    monkeypatch.setattr(
+        scs, "spawn_scan", lambda ref, iid, **kw: spawned.append((iid, kw))
+    )
+
+    # A normal view leaves the cached failure alone...
+    svc.read_supply_chain("shop", "dev")
+    assert spawned == []
+    assert os.path.exists(cve_path)
+
+    # ...but Retry discards it and rescans now.
+    out = svc.read_supply_chain("shop", "dev", force=True)
+    assert ("sha256:fe", {"force_cve": True}) in spawned
+    assert not os.path.exists(cve_path), "the stale failure survived a forced retry"
+    # With the failure gone and a scan in flight, the panel shows the honest
+    # "scanning" state rather than repeating the error it was just asked to clear.
+    assert out["status"] == "pending"
+
+
+def test_clear_failure_never_discards_a_good_scan(tmp_path, monkeypatch):
+    """Retry may throw away an error; it must never throw away real results."""
+    d = str(tmp_path / "sc")
+    monkeypatch.setattr(scs, "supply_chain_dir", lambda: d)
+    _write_scan(
+        d,
+        "sha256:ok",
+        artifacts=[{"name": "openssl", "version": "3.0.11", "type": "deb"}],
+        matches=[("CVE-2023-5678", "High", "openssl", "3.0.11")],
+    )
+    assert scs.clear_failure("sha256:ok") is False
+    assert scs.read_image_scan("sha256:ok")["status"] == "ok"
+    # Nothing cached at all is not a failure to clear either.
+    assert scs.clear_failure("sha256:nothing-here") is False
+
+
+def test_partial_scan_failure_never_reads_as_a_clean_image(tmp_path, monkeypatch):
+    """One member image scanning fine while another fails used to report `ok` —
+    a partial scan rendered as a complete, clean bill of health."""
+    svc, d = _svc(tmp_path, monkeypatch)
+    scs._write_failure(
+        scs._cve_path(d, scs._key("sha256:fe")),
+        scs.FAIL_DB_MISSING,
+        "the shared grype vulnerability database is not available",
+    )
+    sc = svc.read_supply_chain("shop", "dev")
+    assert sc["status"] == "unavailable"
+    assert sc["code"] == scs.FAIL_DB_MISSING
+    assert "vulnerability database" in sc["reason"]
+    # The packages we DID resolve still ride along for the panel to show.
+    assert {p["name"] for p in sc["packages"]} == {"openssl", "react"}
