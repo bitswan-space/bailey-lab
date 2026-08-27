@@ -217,3 +217,113 @@ func TestServeServerConsole_ServesSPAAndSetsCSP(t *testing.T) {
 		}
 	}
 }
+
+// A handbook the build does not carry must come back as a 404, not as the SPA
+// shell. The shell fallback made the absence invisible: "GET
+// /handbook/handbook.pdf" answered 200 text/html, so "Download PDF" saved the
+// console's own HTML under a .pdf name and "Read the handbook" just rendered
+// the console again in a new tab.
+func TestServeServerConsole_MissingAssetIsNotDisguisedAsTheShell(t *testing.T) {
+	writeTestConfig(t)
+	saved := serverConsoleRoot
+	serverConsoleRoot = fstest.MapFS{
+		"index.html":        {Data: []byte("<html><head></head><body>console-shell</body></html>")},
+		"assets/app.js":     {Data: []byte("console.log('bundle')")},
+		"handbook/.gitkeep": {Data: []byte("")},
+	}
+	t.Cleanup(func() { serverConsoleRoot = saved })
+
+	get := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "https://bailey.test.example.com"+path, nil)
+		r.Host = "bailey.test.example.com"
+		w := httptest.NewRecorder()
+		serveServerConsole(w, r)
+		return w
+	}
+
+	// Missing files inside a real dist directory are honest 404s.
+	for _, path := range []string{"/handbook/handbook.html", "/handbook/handbook.pdf", "/assets/gone.js"} {
+		w := get(path)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s: code=%d body=%q, want 404", path, w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "console-shell") {
+			t.Errorf("%s: served the SPA shell instead of 404", path)
+		}
+	}
+	// Client-side routes are untouched — including /handbook itself, and a
+	// deep link whose param contains dots (an email), which must never be
+	// mistaken for a file.
+	for _, path := range []string{"/handbook", "/handbook/", "/users", "/users/ada@example.com", "/assets"} {
+		w := get(path)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "console-shell") {
+			t.Errorf("%s: code=%d body=%q, want the SPA shell", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+// The console cannot discover whether a handbook exists by fetching for it, so
+// the daemon declares what it carries in the shell HTML. The tag is always
+// present; an empty value is the honest "this build has none".
+func TestHandbookFormats_DeclaredInTheShell(t *testing.T) {
+	writeTestConfig(t)
+	saved := serverConsoleRoot
+	t.Cleanup(func() { serverConsoleRoot = saved })
+
+	shell := map[string]*fstest.MapFile{
+		"index.html": {Data: []byte("<html><head></head><body>console-shell</body></html>")},
+	}
+	cases := []struct {
+		name    string
+		files   map[string]*fstest.MapFile
+		want    []string
+		wantTag string
+	}{
+		{
+			name:    "no handbook staged",
+			files:   map[string]*fstest.MapFile{"handbook/.gitkeep": {Data: []byte("")}},
+			want:    nil,
+			wantTag: `<meta name="bitswan-handbook" content="">`,
+		},
+		{
+			name:    "html only",
+			files:   map[string]*fstest.MapFile{"handbook/handbook.html": {Data: []byte("<html>doc</html>")}},
+			want:    []string{"html"},
+			wantTag: `<meta name="bitswan-handbook" content="html">`,
+		},
+		{
+			name: "html and pdf",
+			files: map[string]*fstest.MapFile{
+				"handbook/handbook.html": {Data: []byte("<html>doc</html>")},
+				"handbook/handbook.pdf":  {Data: []byte("%PDF-fake")},
+			},
+			want:    []string{"html", "pdf"},
+			wantTag: `<meta name="bitswan-handbook" content="html,pdf">`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fsys := fstest.MapFS{}
+			for k, v := range shell {
+				fsys[k] = v
+			}
+			for k, v := range tc.files {
+				fsys[k] = v
+			}
+			serverConsoleRoot = fsys
+
+			got := handbookFormats()
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("handbookFormats() = %v, want %v", got, tc.want)
+			}
+			r := httptest.NewRequest(http.MethodGet, "https://bailey.test.example.com/handbook", nil)
+			r.Host = "bailey.test.example.com"
+			w := httptest.NewRecorder()
+			serveServerConsole(w, r)
+			if !strings.Contains(w.Body.String(), tc.wantTag) {
+				t.Errorf("shell missing %s\ngot: %s", tc.wantTag, w.Body.String())
+			}
+		})
+	}
+}
