@@ -46,17 +46,23 @@ const (
 )
 
 type recoverServerOpts struct {
-	aocAPI    string
-	serverID  string
-	otp       string
-	keyFile   string
-	snapshot  string
-	image     string
-	only      []string
-	skipWS    bool
-	skipBuild bool
-	dryRun    bool
-	yes       bool
+	aocAPI   string
+	serverID string
+	otp      string
+	keyFile  string
+	snapshot string
+	image    string
+	only     []string
+	// privateAddr re-declares a private (VPN/LAN-reached) server's address on the
+	// REPLACEMENT machine. The restored config still says the server is private —
+	// that survives the backup — but its address does not survive: this is
+	// different hardware on a different network position, so the old address would
+	// point the AOC's DNS record at the machine that was lost.
+	privateAddr string
+	skipWS      bool
+	skipBuild   bool
+	dryRun      bool
+	yes         bool
 }
 
 func newRecoverCmd() *cobra.Command {
@@ -106,6 +112,9 @@ func newRecoverServerCmd() *cobra.Command {
 	f.StringVar(&o.snapshot, "snapshot", "", "server-state snapshot to restore (default: the newest)")
 	f.StringVar(&o.image, "runtime-image", "", "image providing restic (default: the one recorded in the backup)")
 	f.StringSliceVar(&o.only, "workspace", nil, "only recover this workspace (repeatable)")
+	f.StringVar(&o.privateAddr, "private-address", "",
+		"for a private (VPN/LAN-reached) server: this machine's address, published by the AOC "+
+			"instead of the relay. Omit and DNS keeps pointing at the lost machine.")
 	f.BoolVar(&o.skipWS, "skip-workspaces", false, "restore the server and its ingress, then stop")
 	f.BoolVar(&o.skipBuild, "skip-image-rebuild", false,
 		"do not rebuild business-process images (their containers will not start until you do)")

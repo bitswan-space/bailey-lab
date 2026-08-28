@@ -831,7 +831,31 @@ func (c *Client) RemoveCertAuthority(certName string) error {
 
 // InitIngress initializes the Traefik ingress proxy.
 func (c *Client) InitIngress(verbose bool) (*IngressInitResponse, error) {
-	reqBody := IngressInitRequest{Verbose: verbose}
+	return c.initIngress(IngressInitRequest{Verbose: verbose})
+}
+
+// InitIngressWithBindAddress initializes the ingress AND states which host
+// address Traefik publishes :80/:443 on — "" for every interface. Stating it
+// persists the choice and reconfigures a running Traefik, so this is also how an
+// already-deployed server is narrowed onto a VPN address after the fact.
+func (c *Client) InitIngressWithBindAddress(verbose bool, bindAddress string) (*IngressInitResponse, error) {
+	return c.initIngress(IngressInitRequest{Verbose: verbose, BindAddress: &bindAddress})
+}
+
+// InitIngressWith initializes the ingress, optionally settling the TLS mode and
+// the bind address in the SAME call. Registration uses it so Traefik is created
+// once, already on the right certificate backend, rather than coming up on the
+// default and being reconfigured afterwards. Nil fields leave the stored values
+// alone.
+func (c *Client) InitIngressWith(verbose bool, tlsMode, bindAddress *string) (*IngressInitResponse, error) {
+	return c.initIngress(IngressInitRequest{
+		Verbose:     verbose,
+		TLSMode:     tlsMode,
+		BindAddress: bindAddress,
+	})
+}
+
+func (c *Client) initIngress(reqBody IngressInitRequest) (*IngressInitResponse, error) {
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -872,6 +896,94 @@ func (c *Client) InitIngress(verbose bool) (*IngressInitResponse, error) {
 	}
 
 	return &result, nil
+}
+
+// IngressTLS reports the server's certificate mode and anything about it worth
+// warning an operator about.
+func (c *Client) IngressTLS() (*IngressTLSStatus, error) {
+	req, err := http.NewRequest("GET", "http://unix/ingress/tls", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	return c.ingressTLSCall(req)
+}
+
+// SetIngressTLSMode switches the certificate mode and applies it: the static
+// config is rewritten (which recreates Traefik) and the live route table is
+// reconciled onto the new backend. Long-running for the same reason as
+// InitIngress.
+func (c *Client) SetIngressTLSMode(mode string) (*IngressTLSStatus, error) {
+	bodyBytes, err := json.Marshal(IngressTLSModeRequest{Mode: mode})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix/ingress/tls", strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.ingressTLSCall(req)
+}
+
+func (c *Client) ingressTLSCall(req *http.Request) (*IngressTLSStatus, error) {
+	resp, err := c.doLongRunningRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return nil, fmt.Errorf("%s", errResp.Error)
+		}
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result IngressTLSStatus
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &result, nil
+}
+
+// InstallIngressTLSCert installs an operator-supplied certificate. Exactly one of
+// domain (installs a wildcard covering the whole domain) or hostname is used.
+func (c *Client) InstallIngressTLSCert(domain, hostname, certsDir string) (*IngressTLSStatus, error) {
+	bodyBytes, err := json.Marshal(IngressTLSInstallRequest{
+		Domain:   domain,
+		Hostname: hostname,
+		CertsDir: certsDir,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix/ingress/tls/install-cert",
+		strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.ingressTLSCall(req)
+}
+
+// RemoveIngressTLSCert removes an installed certificate and its files.
+func (c *Client) RemoveIngressTLSCert(hostname string) (*IngressTLSStatus, error) {
+	bodyBytes, err := json.Marshal(IngressTLSRemoveCertRequest{Hostname: hostname})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix/ingress/tls/remove-cert",
+		strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.ingressTLSCall(req)
 }
 
 // ProvisionProtectedProxy asks the daemon to bring up the shared
@@ -1343,6 +1455,11 @@ type EndpointVerifyResult struct {
 	Issuer  string `json:"issuer"`
 	Pending bool   `json:"pending"`
 	Error   string `json:"error"`
+	// Trust is "public" when the served certificate validates against the system
+	// CA roots (what a browser does) and "private" when it does not but is
+	// verifiably ours — the only outcome available to a server serving an internal
+	// CA's certificate.
+	Trust string `json:"trust"`
 }
 
 // VerifyEndpoint asks the daemon to check that this server's public URL is
@@ -1374,18 +1491,29 @@ type ProxyConfig struct {
 	Proxied          bool
 	RelayAddr        string
 	RelayFingerprint string
+	// Private / PrivateAddress declare the opposite position: a server reached
+	// over a VPN, ZTNA overlay or LAN, which must never be put on the relay.
+	// Mutually exclusive with Proxied (the daemon rejects both at once).
+	Private        bool
+	PrivateAddress string
 }
 
-func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string, proxy ProxyConfig) error {
+// SetAOCConfig persists the registration. dnsManaged is the AOC's answer to
+// whether it controls the domain's DNS — nil when it did not say, which the
+// daemon treats as the historical "it does".
+func (c *Client) SetAOCConfig(aocUrl, automationServerId, accessToken, expiresAt, domain string, dnsManaged *bool, proxy ProxyConfig) error {
 	reqBody := AOCConfigRequest{
 		AOCUrl:             aocUrl,
 		AutomationServerId: automationServerId,
 		AccessToken:        accessToken,
 		ExpiresAt:          expiresAt,
 		Domain:             domain,
+		DNSManaged:         dnsManaged,
 		Proxied:            proxy.Proxied,
 		RelayAddr:          proxy.RelayAddr,
 		RelayFingerprint:   proxy.RelayFingerprint,
+		Private:            proxy.Private,
+		PrivateAddress:     proxy.PrivateAddress,
 	}
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

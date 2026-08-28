@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,6 +23,20 @@ import (
 // IngressInitRequest represents the request to initialize ingress
 type IngressInitRequest struct {
 	Verbose bool `json:"verbose"`
+	// BindAddress narrows the host address Traefik publishes :80/:443 on
+	// (see config.Config.IngressBindAddress). Three states, which is why it is
+	// a pointer: nil leaves the stored value alone (every existing caller),
+	// a pointer to an address sets it, and a pointer to "" clears it back to
+	// every interface. Stating it forces the reconfigure path even when Traefik
+	// is already running, since the point of the call is to change how it binds.
+	BindAddress *string `json:"bind_address,omitempty"`
+	// TLSMode selects the certificate backend as part of the same call. It exists
+	// so registration can settle the mode BEFORE the ingress first comes up:
+	// setting it afterwards means Traefik starts on the default, opens an ACME
+	// order that a bring-your-own-certificate server can never complete, and the
+	// operator meets that as a failure rather than as a choice they already made.
+	// nil leaves the stored mode alone.
+	TLSMode *string `json:"tls_mode,omitempty"`
 }
 
 // IngressInitResponse represents the response from initializing ingress
@@ -140,6 +155,12 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressProvisionProtectedProxy(w, r)
 	case path == "wait":
 		s.handleIngressWait(w, r)
+	case path == "tls":
+		s.handleIngressTLS(w, r)
+	case path == "tls/install-cert":
+		s.handleIngressTLSInstallCert(w, r)
+	case path == "tls/remove-cert":
+		s.handleIngressTLSRemoveCert(w, r)
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}
@@ -216,7 +237,55 @@ func (s *Server) handleIngressInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newlyInitialized, err := initIngress(req.Verbose)
+	// A stated bind address is a change to HOW Traefik listens, so persist it
+	// and take the reconfigure path directly: initIngress short-circuits when
+	// the container is already up, which would silently accept the new address
+	// and never apply it.
+	forceReconfigure := false
+	if req.TLSMode != nil {
+		mode, err := ParseTLSMode(*req.TLSMode)
+		if err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateTLSModeChoice(mode); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg := config.NewAutomationServerConfig()
+		if cfg.GetTLSMode() != string(mode) {
+			if err := cfg.SetTLSMode(string(mode)); err != nil {
+				writeJSONError(w, "failed to persist TLS mode: "+err.Error(),
+					http.StatusInternalServerError)
+				return
+			}
+			forceReconfigure = true
+		}
+	}
+	if req.BindAddress != nil {
+		addr := strings.TrimSpace(*req.BindAddress)
+		if err := validateIngressBindAddress(addr); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg := config.NewAutomationServerConfig()
+		if cfg.GetIngressBindAddress() != addr {
+			if err := cfg.SetIngressBindAddress(addr); err != nil {
+				writeJSONError(w, "failed to persist ingress bind address: "+err.Error(),
+					http.StatusInternalServerError)
+				return
+			}
+			forceReconfigure = true
+		}
+	}
+
+	var newlyInitialized bool
+	var err error
+	if forceReconfigure {
+		newlyInitialized, err = initTraefikIngressFn(req.Verbose)
+	} else {
+		newlyInitialized, err = initIngress(req.Verbose)
+	}
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -298,7 +367,16 @@ providers:
 `
 
 func renderTraefikStaticConfig(acmeEmail string, dnsChallenge bool) string {
-	cfg := fmt.Sprintf(`entryPoints:
+	return renderTraefikStaticConfigForMode(acmeEmail, dnsChallenge, DefaultTLSMode)
+}
+
+// renderTraefikStaticConfigForMode renders the static config for a given TLS
+// mode. A mode that contacts no CA gets NO certificatesResolvers at all —
+// not even the HTTP-01 one — so a route that somehow kept a resolver name cannot
+// quietly start an ACME order that could never succeed, and nothing on the server
+// waits on a challenge that will never be answered.
+func renderTraefikStaticConfigForMode(acmeEmail string, dnsChallenge bool, mode TLSMode) string {
+	cfg := `entryPoints:
   web:
     address: ":80"
   websecure:
@@ -314,7 +392,15 @@ providers:
   docker:
     exposedByDefault: false
     network: bitswan_network
-certificatesResolvers:
+`
+
+	if !mode.usesACME() {
+		// Certificates come from the file-provider TLS store (see
+		// traefikapi.InstallTLSCerts); Traefik picks them by SNI.
+		return cfg
+	}
+
+	cfg += fmt.Sprintf(`certificatesResolvers:
   letsencrypt:
     acme:
       email: %s
@@ -347,6 +433,77 @@ certificatesResolvers:
 	}
 
 	return cfg
+}
+
+// initTraefikIngressFn is the reconfigure step, indirected through a var so tests
+// can replace it — the same reason ingressProbe and ingressWaitPoll are vars.
+//
+// This is not stylistic. initTraefikIngress runs `docker compose -p
+// bitswan-traefik up -d`, and both the project name and the `bitswan` named
+// volume it mounts are fixed — so a test that reaches it does not create a
+// sandboxed Traefik, it RECREATES the one belonging to whatever Bailey is
+// installed on the machine running the test. It reads the real config files
+// (they live in that volume) but with whatever the test asked for, which for a
+// bind-address test means republishing a live server's ingress on loopback and
+// taking it off the network until someone notices. A temp HOME does not protect
+// against this: the volume and the project name are not derived from HOME.
+var initTraefikIngressFn = initTraefikIngress
+
+// validateIngressBindAddress rejects anything that isn't a bare IP literal.// validateIngressBindAddress rejects anything that isn't a bare IP literal.
+//
+// The value is interpolated into a docker-compose port mapping
+// ("<addr>:443:443"), so a hostname or a stray colon would either fail at
+// container-create time with an opaque Docker error or, worse, change which
+// port is published. An IP is also the only thing that is stable enough to bind
+// to: publishing follows the address, not the interface name. Empty is valid and
+// means "every interface".
+func validateIngressBindAddress(addr string) error {
+	if addr == "" {
+		return nil
+	}
+	ip := net.ParseIP(addr)
+	if ip == nil {
+		return fmt.Errorf(
+			"ingress bind address %q is not an IP address; pass the address Traefik should "+
+				"publish on (e.g. the server's VPN address, 10.8.0.7), or \"\" for every interface",
+			addr)
+	}
+	// A publish bound to a v6 address needs brackets in the mapping; we don't
+	// render those, so refuse rather than emit a mapping Docker misreads.
+	if ip.To4() == nil {
+		return fmt.Errorf(
+			"ingress bind address %q is IPv6; only IPv4 bind addresses are supported today",
+			addr)
+	}
+	return nil
+}
+
+// localAddressExists reports whether addr is assigned to an interface on this
+// machine. Used only to explain a failure, never to decide behaviour — an
+// interface that is merely late (a VPN tunnel coming up after boot) must not
+// change how the ingress is published.
+func localAddressExists(addr string) bool {
+	want := net.ParseIP(addr)
+	if want == nil {
+		return false
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true // can't tell; don't claim a problem we haven't observed
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip != nil && ip.Equal(want) {
+			return true
+		}
+	}
+	return false
 }
 
 // initTraefikIngress starts a new Traefik ingress proxy, or reconfigures a
@@ -383,9 +540,19 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	// DNS-01 cert resolver so Traefik can obtain a *.<domain> wildcard
 	// certificate. Traefik's httpreq provider authenticates against the
 	// daemon's bridge endpoints with basic auth using a shared secret.
+	//
+	// A mode that contacts no CA gets none of this: no bridge credentials in
+	// Traefik's environment, and no resolver in the static config.
+	tlsMode := currentTLSMode()
 	wildcardDomain := getWildcardCertDomain()
+	// The DNS-01 resolver is only configured when the challenge can actually be
+	// written: the mode has to use the AOC bridge, and the AOC has to manage the
+	// zone. Rendering it for a domain the AOC does not own gives Traefik a
+	// resolver whose every order 502s, retried forever, with the ACME bridge
+	// credentials in its environment for no reason.
+	dnsChallenge := wildcardDomain != "" && aocDNSUsable(tlsMode)
 	var traefikEnv map[string]string
-	if wildcardDomain != "" {
+	if dnsChallenge {
 		secret, err := getOrCreateACMEBridgeSecret(traefikConfig)
 		if err != nil {
 			return false, err
@@ -397,7 +564,7 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		}
 	}
 
-	traefikStaticConfig := renderTraefikStaticConfig(acmeEmail, wildcardDomain != "")
+	traefikStaticConfig := renderTraefikStaticConfigForMode(acmeEmail, dnsChallenge, tlsMode)
 
 	hostHomeDir := os.Getenv("HOST_HOME")
 	traefikConfigForCompose := traefikConfig
@@ -415,7 +582,20 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		}
 	}
 
-	traefikDockerCompose, err := dockercompose.CreateTraefikDockerComposeFile(traefikConfigForCompose, traefikEnv)
+	bindAddress := config.NewAutomationServerConfig().GetIngressBindAddress()
+	// Diagnose the one failure mode a narrowed publish adds, BEFORE Docker turns
+	// it into an opaque "cannot assign requested address". We deliberately do not
+	// widen back to every interface as a fallback: on a private server that would
+	// silently start publishing on the public one, which is the exact outcome the
+	// bind address exists to prevent. Fail closed, but say why.
+	if bindAddress != "" && !localAddressExists(bindAddress) {
+		fmt.Printf("Warning: ingress bind address %s is not configured on any interface of this "+
+			"machine, so Traefik cannot publish on it. If this is a VPN address, bring the tunnel up "+
+			"(the container's restart policy will keep retrying until then); if the machine's address "+
+			"changed, re-point it with 'bitswan ingress init --bind-address <addr>'.\n", bindAddress)
+	}
+	traefikDockerCompose, err := dockercompose.CreateTraefikDockerComposeFile(
+		traefikConfigForCompose, traefikEnv, bindAddress)
 	if err != nil {
 		return false, fmt.Errorf("failed to create ingress docker-compose file: %w", err)
 	}
@@ -435,8 +615,12 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		currentCompose, _ := os.ReadFile(traefikDockerComposePath)
 		if string(currentConfig) == traefikStaticConfig && string(currentCompose) == traefikDockerCompose {
 			// Running and unchanged — just refresh the file-provider config from
-			// the saved state in case it drifted, then leave it.
+			// the saved state in case it drifted, then leave it. The route table is
+			// still reconciled onto the configured TLS mode: a route added while the
+			// mode was something else would otherwise keep the wrong backend
+			// forever, and this is the cheap, idempotent place to catch that.
 			_ = traefikapi.InitTraefik()
+			reconcileTLSMode()
 			return false, nil
 		}
 		if verbose {
@@ -500,13 +684,12 @@ func initTraefikIngress(verbose bool) (bool, error) {
 		return false, fmt.Errorf("failed to init ingress: %w", err)
 	}
 
-	// Switch any existing ACME routes under the wildcard domain to the
-	// shared wildcard certificate.
-	if wildcardDomain != "" {
-		if err := traefikapi.ApplyWildcardCertResolver(wildcardDomain, dnsCertResolverName); err != nil {
-			fmt.Printf("Warning: failed to apply wildcard cert resolver to existing routes: %v\n", err)
-		}
-	}
+	// Put the live route table on the backend the configured mode implies: the
+	// shared wildcard certificate under aoc-dns, no ACME at all under manual.
+	reconcileTLSMode()
+	// Nothing renews an operator-installed certificate, so boot is the earliest
+	// anyone can be told one is running out.
+	warnAboutInstalledCertExpiry()
 
 	return true, nil
 }

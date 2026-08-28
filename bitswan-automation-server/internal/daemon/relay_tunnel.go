@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -42,6 +43,20 @@ func (s *Server) startRelayTunnel() {
 	if err != nil || settings == nil || settings.AccessToken == "" || settings.Domain == "" {
 		s.relayMu.Unlock()
 		return // not registered, or no domain
+	}
+
+	// A private server never dials the relay — full stop, before we even ask the
+	// AOC. The relay is the AOC's uniform default for its own domains, so a
+	// server deployed behind a VPN would otherwise be re-published to the public
+	// internet through the relay on the next daemon restart. This local pin is
+	// what makes that impossible rather than merely unlikely: it holds even if
+	// the AOC's record for this server is wrong, is changed later, or the AOC is
+	// rolled back to a build that doesn't know about private servers.
+	if settings.Private {
+		s.relayMu.Unlock()
+		fmt.Printf("relay: this server is registered as private (reached over a VPN or LAN at %s) — "+
+			"not dialing the AOC relay\n", privateAddressLabel(settings.PrivateAddress))
+		return
 	}
 
 	// Resolve the relay endpoint. Two sources, in order:
@@ -105,6 +120,12 @@ type verifyResult struct {
 	Issuer  string `json:"issuer,omitempty"`
 	Pending bool   `json:"pending,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Trust says which root store accepted the served certificate: "public" (the
+	// system CA roots — what a browser does) or "private" (nothing public trusts
+	// it, but it is byte-for-byte the certificate our own Traefik holds). A
+	// manual-mode server with an internal CA can only ever reach "private", and
+	// treating that as a failure would make registration impossible for it.
+	Trust string `json:"trust,omitempty"`
 }
 
 // verifyPublicEndpoint fetches this server's OWN public Bailey URL and confirms
@@ -117,6 +138,12 @@ type verifyResult struct {
 //  3. ours — the served leaf is byte-for-byte the cert our local Traefik holds,
 //     so a *trusted* cert that isn't ours (a MITM with its own valid cert) is
 //     still rejected.
+//
+// In a TLS mode that contacts no CA, (2) can never be true — an internal CA is by
+// definition not in the public root store — so requiring it would make
+// registration impossible on exactly the servers that mode exists for. There, the
+// check falls back to (1) and (3) alone and reports trust: "private". (3) is the
+// property that actually detects interception, and it is unaffected.
 //
 // register polls this so it only prints the URL once it's genuinely usable.
 func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
@@ -144,6 +171,11 @@ func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := conn.HandshakeContext(ctx); err != nil {
+		if !currentTLSMode().usesACME() {
+			// No public CA is coming: this mode serves what the operator installed.
+			// Verify the two properties that still mean something.
+			return verifyPrivatelyTrustedEndpoint(dialAddr, publicHost, localLeaf)
+		}
 		// The wildcard cert is still being issued (Traefik is serving its
 		// self-signed default until Let's Encrypt responds) — the common wait.
 		return verifyResult{Pending: true, Error: "waiting for the TLS certificate to be issued"}
@@ -158,7 +190,27 @@ func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
 		// HARD failure — a valid-but-not-ours cert means interception. Not pending.
 		return verifyResult{Error: "served certificate is not ours — TLS is being intercepted in transit"}
 	}
-	return verifyResult{OK: true, Issuer: served[0].Issuer.CommonName}
+	return verifyResult{OK: true, Issuer: served[0].Issuer.CommonName, Trust: "public"}
+}
+
+// verifyPrivatelyTrustedEndpoint is the manual-mode form of the check: the served
+// certificate is not expected to chain to a public root, so confirm instead that
+// the endpoint answers and that what it serves is byte-for-byte our own
+// certificate. That second property is the one that detects interception, and it
+// does not depend on who signed anything.
+func verifyPrivatelyTrustedEndpoint(dialAddr, publicHost string, localLeaf []byte) verifyResult {
+	servedRaw, err := fetchServedLeaf(dialAddr, publicHost)
+	if err != nil {
+		return verifyResult{Pending: true, Error: "waiting for the ingress to serve " + publicHost}
+	}
+	if sha256.Sum256(servedRaw) != sha256.Sum256(localLeaf) {
+		return verifyResult{Error: "served certificate is not ours — TLS is being intercepted in transit"}
+	}
+	issuer := ""
+	if served, err := x509.ParseCertificate(servedRaw); err == nil {
+		issuer = served.Issuer.CommonName
+	}
+	return verifyResult{OK: true, Issuer: issuer, Trust: "private"}
 }
 
 // handleRelayVerify runs verifyPublicEndpoint once and returns the result.
@@ -174,12 +226,35 @@ func (s *Server) handleRelayVerify(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(s.verifyPublicEndpoint(settings.Domain))
 }
 
+// privateAddressLabel renders a declared private address for a log line,
+// falling back to a phrase when the operator didn't state one (the address is
+// the AOC's to publish; a server can be private without knowing it).
+func privateAddressLabel(addr string) string {
+	if addr == "" {
+		return "an address this server did not declare"
+	}
+	return addr
+}
+
 // handleRelayStart lets `register` kick the tunnel after the AOC has just
 // provisioned the proxy path — the daemon started before the AOC knew this
 // server was proxied, so its boot-time check found nothing. Idempotent.
+//
+// Refuses outright on a private server: the caller is asking for the one thing
+// a private registration exists to prevent, so this answers with an error the
+// operator can act on rather than quietly doing nothing.
 func (s *Server) handleRelayStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := config.NewAutomationServerConfig()
+	if settings, err := cfg.GetAutomationOperationsCenterSettings(); err == nil &&
+		settings != nil && settings.Private {
+		writeJSONError(w,
+			"this server is registered as private (reached over a VPN or LAN); the AOC relay "+
+				"would republish it on the public internet. Re-register without --private to use the relay.",
+			http.StatusConflict)
 		return
 	}
 	s.startRelayTunnel()
