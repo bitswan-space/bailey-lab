@@ -10,6 +10,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
@@ -117,6 +118,118 @@ func injectConsoleMode(body []byte, mode string) []byte {
 	return append(append([]byte{}, tag...), body...)
 }
 
+// ─── Caching ────────────────────────────────────────────────────────────────
+//
+// Two tiers, decided by whether the URL identifies its own content.
+//
+//   - assets/* carry a content hash in the filename (index-MHpSpLrB.js), so the
+//     URL changes whenever the bytes do. Nothing at such a URL can ever go
+//     stale, which is the entire point of the hash — cache it for a year and
+//     never ask again. This is where the win is: the bundle is ~960 kB.
+//
+//   - index.html has a FIXED url and its only job is to name the hashed bundle
+//     to load. Cache that and the browser is pinned to the old bundle name
+//     forever, and the hashing buys nothing — a deploy that changes everything
+//     appears to change nothing. It must be revalidated every time.
+//
+// Note that `no-cache` does NOT mean "don't store": it means "store it, but
+// ask before reusing it". With a validator that question is a 304 with no
+// body, which is why everything below also gets an ETag. Without one,
+// revalidating the 13 MB handbook would mean refetching the 13 MB handbook.
+const consoleImmutableCacheControl = "public, max-age=31536000, immutable"
+
+// consoleAssetPrefix is the one directory whose filenames are content-hashed
+// by the SPA build (vite's build.assetsDir). Everything else in the bundle —
+// index.html, favicon.svg, handbook/* — has a stable name across builds.
+const consoleAssetPrefix = "assets/"
+
+// consoleETags maps an embedded file's path to a strong ETag over its content.
+//
+// The dist is baked into the binary, so a file's bytes cannot change while the
+// process runs: the whole map is computed once, on first use, and every later
+// request is a map lookup. http.ServeContent honours an ETag the handler has
+// already set, so setting it here is enough to turn a revalidation into a 304.
+var consoleETags = sync.OnceValue(func() map[string]string {
+	out := map[string]string{}
+	_ = fs.WalkDir(serverConsoleRoot, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil //nolint:nilerr // a partial map degrades to "no ETag", never to a wrong one
+		}
+		b, err := fs.ReadFile(serverConsoleRoot, p)
+		if err != nil {
+			return nil
+		}
+		out[p] = etagFor(b)
+		return nil
+	})
+	return out
+})
+
+// etagFor builds a strong ETag from content. Strong (not W/) because these are
+// exact bytes, not a semantically-equivalent rendering.
+func etagFor(body []byte) string {
+	sum := sha256.Sum256(body)
+	return `"` + base64.RawURLEncoding.EncodeToString(sum[:16]) + `"`
+}
+
+// setConsoleCacheHeaders applies the tier for the file being served. p is the
+// embedded path ("" for the SPA shell).
+func setConsoleCacheHeaders(w http.ResponseWriter, p string) {
+	if strings.HasPrefix(p, consoleAssetPrefix) {
+		w.Header().Set("Cache-Control", consoleImmutableCacheControl)
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	if tag, ok := consoleETags()[p]; ok {
+		w.Header().Set("ETag", tag)
+	}
+}
+
+// clientHasETag reports whether the request's If-None-Match names tag, so a
+// hand-written response can answer 304 the way http.ServeContent does for the
+// files it serves. Handles the comma-separated list and "*".
+func clientHasETag(r *http.Request, tag string) bool {
+	inm := r.Header.Get("If-None-Match")
+	if inm == "" || tag == "" {
+		return false
+	}
+	for _, c := range strings.Split(inm, ",") {
+		c = strings.TrimSpace(c)
+		if c == "*" || c == tag || strings.TrimPrefix(c, "W/") == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// writeConsoleShell sends the SPA shell — index.html plus the injected nav-sync
+// script and console-mode statement — under the revalidate-always half of the
+// policy.
+//
+// Takes the raw file rather than reading it, so the caching behaviour is
+// testable without a built console — the repo ships serverconsole_dist as a
+// lone .gitkeep and only `make console` fills it in.
+//
+// The ETag is computed AFTER both injections, over the body actually sent: the
+// same "/" serves a different document on the onboarding host than on the
+// console host (#403), and a browser must never be told those are the same
+// thing. It also means a change to either injection reads as new.
+func writeConsoleShell(w http.ResponseWriter, r *http.Request, raw []byte, mode string) {
+	body := appendNavSyncToHTML(raw)
+	body = injectConsoleMode(body, mode)
+	tag := etagFor(body)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("ETag", tag)
+	if clientHasETag(r, tag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
 // serveServerConsole serves the embedded SPA. Real files (index.html,
 // assets/*) are served as-is; any other path falls back to index.html so a
 // deep link or reload of a client-side view still loads the app.
@@ -178,16 +291,18 @@ func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 	// updates as you move between subpages.
 	if serve == "/" {
 		if raw, err := fs.ReadFile(serverConsoleRoot, "index.html"); err == nil {
-			body := appendNavSyncToHTML(raw)
-			body = injectConsoleMode(body, consoleModeForHost(host))
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(body)
+			writeConsoleShell(w, r, raw, consoleModeForHost(host))
 			return
 		}
 		// On a read error fall through to FileServer (still serves the shell).
 	}
+
+	// A real file. FileServer would send it with no cache headers at all:
+	// embed.FS reports a zero mtime, so http.ServeContent omits Last-Modified
+	// too, leaving the browser nothing to revalidate with and nothing to trust.
+	// Supply both before delegating — ServeContent answers If-None-Match
+	// against the ETag we set here, so a repeat visit costs a 304.
+	setConsoleCacheHeaders(w, strings.TrimPrefix(path.Clean("/"+serve), "/"))
 
 	r2 := r.Clone(r.Context())
 	r2.URL.Path = serve
