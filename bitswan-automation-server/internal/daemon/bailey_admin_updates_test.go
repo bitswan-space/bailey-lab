@@ -245,6 +245,166 @@ func TestAdminUpdates_ReturnsPayload(t *testing.T) {
 	}
 }
 
+// TestAdminUpdates_MarksWhatTheCallerCanApply covers issue #367: the Updates
+// view is admin-gated but the update/rollback handlers are OWNER-gated, so the
+// payload has to tell the console which rows this caller can actually act on —
+// otherwise the console offers buttons that only ever 403.
+func TestAdminUpdates_MarksWhatTheCallerCanApply(t *testing.T) {
+	domain := writeTestConfig(t)
+	const caller = "notowner@example.com"
+
+	// Two workspaces in the ledger: one the caller owns, one they don't.
+	if _, err := registerEndpoint("minews-gitops."+domain, caller, "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint("theirsws-gitops."+domain, "owner@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range []updateHistoryEntry{
+		{Actor: "x@example.com", TargetKind: updateTargetWorkspace, TargetName: "minews", FromVersion: "g1", ToVersion: "g2"},
+		{Actor: "x@example.com", TargetKind: updateTargetWorkspace, TargetName: "theirsws", FromVersion: "g1", ToVersion: "g2"},
+		{Actor: "x@example.com", TargetKind: updateTargetServer, FromVersion: "v1", ToVersion: "v2"},
+	} {
+		if _, err := dbInsertUpdateHistory(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := &Server{version: "v2026.07.07.21-git-test"}
+	w := newRecorder()
+	srv.handleAdminUpdates(w, baileyReq(http.MethodGet, "/bailey/api/admin/updates", caller, adminGrp))
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin updates = %d, want 200", w.Code)
+	}
+	var body struct {
+		Workspaces []struct {
+			Name      string `json:"name"`
+			Owner     string `json:"owner"`
+			CanUpdate bool   `json:"can_update"`
+		} `json:"workspaces"`
+		History []struct {
+			TargetKind  string `json:"target_kind"`
+			TargetName  string `json:"target_name"`
+			CanRollback bool   `json:"can_rollback"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, w.Body.String())
+	}
+
+	// can_rollback must agree with callerOwnsWorkspace — the check
+	// handleBaileyWorkspaceRollback enforces — and the server's own binary is
+	// admin-gated, not owner-gated, so it stays rollable.
+	seen := map[string]bool{}
+	for _, h := range body.History {
+		if h.TargetKind == updateTargetServer {
+			if !h.CanRollback {
+				t.Error("server history row should be rollable by an admin")
+			}
+			continue
+		}
+		switch h.TargetName {
+		case "minews", "theirsws":
+			seen[h.TargetName] = true
+			want := h.TargetName == "minews"
+			if h.CanRollback != want {
+				t.Errorf("%s can_rollback = %v, want %v", h.TargetName, h.CanRollback, want)
+			}
+		}
+	}
+	if !seen["minews"] || !seen["theirsws"] {
+		t.Fatalf("seeded history rows missing from the payload: %+v", body.History)
+	}
+
+	// Whatever the docker state makes stale, every listed workspace must carry a
+	// can_update that matches the owner check, and never be one the caller can't
+	// even see.
+	for _, ws := range body.Workspaces {
+		if want := callerOwnsWorkspace(caller, nil, ws.Name); ws.CanUpdate != want {
+			t.Errorf("%s can_update = %v, want %v", ws.Name, ws.CanUpdate, want)
+		}
+		role, err := workspaceRoleFor(ws.Name, domain, caller, nil)
+		if !ws.CanUpdate && (err != nil || role == roleNone) {
+			t.Errorf("%s is listed but the caller has no role on it", ws.Name)
+		}
+	}
+}
+
+// The Updates view must not carry the removed "server owner" override either
+// (#337). An earlier draft of this view computed
+// `callerOwns := serverOwner || callerRole(name) == roleOwner`, which had two
+// effects for whoever owned the bailey.<domain> endpoint: every workspace
+// became can_update/can_rollback, AND — because the drop rule is
+// `!can && callerRole == roleNone` — nothing was dropped, so the page listed
+// every stale workspace on the server by name and version. Owning the bailey
+// row must confer nothing here.
+func TestAdminUpdates_BaileyHostOwnerGetsNoCapability(t *testing.T) {
+	domain := writeTestConfig(t)
+	const caller = "srvowner@example.com"
+	baileyHost := "bailey." + domain
+	if err := deleteEndpoint(baileyHost); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint(baileyHost, caller, "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// A workspace owned by somebody else, with a rollback point in the ledger.
+	if _, err := registerEndpoint("notourws-dashboard."+domain, "someone@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbInsertUpdateHistory(updateHistoryEntry{
+		Actor: "x@example.com", TargetKind: updateTargetWorkspace,
+		TargetName: "notourws", FromVersion: "g1", ToVersion: "g2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{version: "v2026.07.07.21-git-test"}
+	w := newRecorder()
+	srv.handleAdminUpdates(w, baileyReq(http.MethodGet, "/bailey/api/admin/updates", caller, adminGrp))
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin updates = %d, want 200", w.Code)
+	}
+	var body struct {
+		Workspaces []struct {
+			Name      string `json:"name"`
+			CanUpdate bool   `json:"can_update"`
+		} `json:"workspaces"`
+		History []struct {
+			TargetKind  string `json:"target_kind"`
+			TargetName  string `json:"target_name"`
+			CanRollback bool   `json:"can_rollback"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v\n%s", err, w.Body.String())
+	}
+	// Nothing they don't own is offered — and nothing they have no role on is
+	// even listed. (Whether a workspace is stale depends on docker state, so
+	// this asserts the negative, which holds either way.)
+	for _, ws := range body.Workspaces {
+		if ws.CanUpdate && !callerOwnsWorkspace(caller, nil, ws.Name) {
+			t.Errorf("%s offered can_update to the bailey-host owner, who does not own it", ws.Name)
+		}
+		if ws.Name == "notourws" {
+			t.Errorf("someone else's workspace %q was listed to the bailey-host owner", ws.Name)
+		}
+	}
+	var sawRow bool
+	for _, h := range body.History {
+		if h.TargetKind != updateTargetWorkspace || h.TargetName != "notourws" {
+			continue
+		}
+		sawRow = true
+		if h.CanRollback {
+			t.Error("the bailey-host owner was offered rollback on someone else's workspace")
+		}
+	}
+	if !sawRow {
+		t.Fatal("seeded history row missing from the payload — the assertion above proved nothing")
+	}
+}
+
 // TestWorkspaceRollback_MethodAndValidation covers the CLI rollback daemon
 // handler: method/validation guards and the streamed no-snapshot error path.
 func TestWorkspaceRollback_MethodAndValidation(t *testing.T) {
