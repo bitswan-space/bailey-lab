@@ -76,7 +76,7 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 
 	// Get the full workspace list from the daemon's perspective,
 	// then filter to those the caller has access to.
-	full, err := GetWorkspaceList(false, false)
+	full, err := workspaceInventory()
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
 		return
