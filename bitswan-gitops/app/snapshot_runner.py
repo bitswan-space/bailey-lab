@@ -141,37 +141,12 @@ async def spawn_create_snapshot(bp: str, stage: str, label: str = "") -> dict:
     async def run(progress):
         # No off-site push here: the automation-server daemon's nightly
         # backup captures this workspace's whole snapshots directory, so a
-        # manual snapshot reaches off-site storage with the next run (and
-        # can be fetched back through the daemon once pruned locally).
+        # manual snapshot reaches off-site storage with the next run.
         return await service.create_snapshot(
             bp, stage, label=label, kind="manual", progress=progress, db=db
         )
 
     _spawn_bg(_run_task(task.task_id, f"Snapshot of {bp} ({stage})", run))
-    return {"task_id": task.task_id}
-
-
-async def spawn_fetch_snapshot(bp: str, stage: str, snapshot_id: str) -> dict:
-    """Reserve bp×stage and materialize a snapshot from the server's backup
-    locally in the background (without restoring it)."""
-    from app.services.snapshot_service import get_snapshot_service
-    from app.utils import daemon_fetch_offsite_snapshot
-
-    task, conflict = await snapshot_manager.create_task(
-        "fetch", bp, [stage], source_stage=stage, snapshot_id=snapshot_id
-    )
-    if task is None:
-        raise BusyError(
-            f"A snapshot operation is already running for {bp} at {conflict}"
-        )
-
-    async def run(progress):
-        if progress:
-            await progress("fetch_offsite", "Fetching from off-site storage…")
-        await asyncio.to_thread(daemon_fetch_offsite_snapshot, bp, stage, snapshot_id)
-        return get_snapshot_service().get_snapshot(bp, stage, snapshot_id)
-
-    _spawn_bg(_run_task(task.task_id, f"Off-site fetch of {bp}/{snapshot_id}", run))
     return {"task_id": task.task_id}
 
 
@@ -193,23 +168,12 @@ async def spawn_restore_snapshot(
     """
     from app.services.snapshot_service import get_snapshot_service
     from app.dependencies import get_automation_service
-    from app.utils import daemon_fetch_offsite_snapshot, daemon_list_offsite_snapshots
 
     service = get_snapshot_service()
     # Existence check up-front so the route can 404 before a task is created.
-    # A snapshot whose local files are gone but which is mirrored off-site is
-    # still restorable — it gets fetched inside the task, before anything
-    # destructive happens.
-    local = True
-    try:
-        service.get_snapshot(bp, source_stage, snapshot_id)
-    except LookupError:
-        local = False
-        remote = await asyncio.to_thread(
-            daemon_list_offsite_snapshots, bp, source_stage
-        )
-        if not any(r.get("snapshot_id") == snapshot_id for r in remote):
-            raise
+    # Local files are the whole story: a snapshot the server's nightly capture
+    # still holds is recovered by restoring the workspace, not from here.
+    service.get_snapshot(bp, source_stage, snapshot_id)
 
     stages = sorted({source_stage, target_stage})
     deploying = _bp_deploy_in_flight(get_automation_service(), bp, stages)
@@ -232,14 +196,6 @@ async def spawn_restore_snapshot(
         )
 
     async def run(progress):
-        if not local:
-            # A dead daemon/AOC aborts here, before validation and the
-            # pre-restore snapshot — zero side effects.
-            if progress:
-                await progress("fetch_offsite", "Fetching from off-site storage…")
-            await asyncio.to_thread(
-                daemon_fetch_offsite_snapshot, bp, source_stage, snapshot_id
-            )
         result = await service.restore_snapshot(
             bp, snapshot_id, source_stage, target_stage, progress=progress, db=db
         )

@@ -69,8 +69,6 @@ export function snapshotStepLabel(step: string | null): string {
   switch (step) {
     case 'validating':
       return 'Validating…';
-    case 'fetch_offsite':
-      return 'Fetching from off-site storage…';
     case 'pre_restore_snapshot':
       return 'Auto-snapshotting target…';
     case 'pruning':

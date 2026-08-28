@@ -81,8 +81,6 @@ func newBackupRecoverCmd() *cobra.Command {
 	f.BoolVar(&req.SkipPostgres, "skip-postgres", false, "do not restore Postgres")
 	f.BoolVar(&req.SkipCouchDB, "skip-couchdb", false, "do not restore CouchDB")
 	f.BoolVar(&req.SkipGarage, "skip-garage", false, "do not restore Garage object storage")
-	f.BoolVar(&req.SkipBPSnapshots, "skip-bp-snapshots", false,
-		"exclude per-process snapshots from the file restore (faster; they can be fetched back on demand)")
 	f.BoolVar(&req.GarageMirror, "garage-mirror", false,
 		"mirror Garage buckets instead of copying — DELETES objects absent from the backup")
 	f.BoolVar(&req.DiscardBackup, "discard-previous", false,

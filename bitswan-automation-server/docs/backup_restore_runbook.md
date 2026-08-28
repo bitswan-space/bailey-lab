@@ -148,7 +148,6 @@ Useful flags:
 | `--stage S` | only this stage (repeatable) |
 | `--skip-files` | keep the current tree; only rebuild containers and reload data |
 | `--skip-postgres` / `--skip-couchdb` / `--skip-garage` | leave that data alone |
-| `--skip-bp-snapshots` | exclude per-process snapshots (large, and fetchable on demand) |
 | `--garage-mirror` | mirror Garage instead of copying — **deletes** objects absent from the backup |
 | `--discard-previous` | delete the quarantined pre-recovery tree on success (kept by default) |
 

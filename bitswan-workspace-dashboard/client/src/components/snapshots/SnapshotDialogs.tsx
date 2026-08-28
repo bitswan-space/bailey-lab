@@ -63,8 +63,8 @@ export function CreateSnapshotDialog({
       setLabel('');
     }
     // Reset only on the closed→open transition. enabledStages gets a fresh
-    // array identity from every background list refresh (e.g. the off-site
-    // upload poll) — re-running this while open wiped the typed label.
+    // array identity from every background list refresh — re-running this
+    // while open wiped the typed label.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 

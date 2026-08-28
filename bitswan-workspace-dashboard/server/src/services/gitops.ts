@@ -1831,17 +1831,6 @@ export class GitopsClient {
     );
   }
 
-  /** `POST /snapshots/{bp}/{stage}/{snapshotId}/fetch` — materialize an
-   * off-site snapshot back into the local store (202 + task_id, or 200
-   * already_local). */
-  fetchSnapshot(bp: string, stage: string, snapshotId: string) {
-    return this.requestJson(
-      'POST',
-      `/snapshots/${encodeURIComponent(bp)}/${encodeURIComponent(stage)}/${encodeURIComponent(snapshotId)}/fetch`,
-      {},
-    );
-  }
-
   // ---------------------------------------------------------------------
   // Read-only data explorer (`/data-explorer/*`) — backs the dashboard's
   // Object Storage / SQL panels. GET-only; the route builds `qs` from a

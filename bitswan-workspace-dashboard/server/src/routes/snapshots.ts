@@ -205,35 +205,6 @@ export function registerSnapshotRoutes(
     },
   );
 
-  // Materialize an off-site snapshot back into the local store (202 + task,
-  // or 200 already_local). Restores auto-fetch on their own; this is the
-  // explicit "bring it back" action.
-  app.post<{ Params: { bp: string; stage: string; snapshotId: string } }>(
-    '/api/snapshots/:bp/:stage/:snapshotId/fetch',
-    async (req, reply) => {
-      reply.header('Cache-Control', 'no-store');
-      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-      const { stage } = req.params;
-      if (!STAGES.has(stage)) {
-        return reply
-          .code(400)
-          .send({ error: "stage must be 'dev', 'staging' or 'production'" });
-      }
-      try {
-        return await forward(
-          reply,
-          gitops.fetchSnapshot(req.params.bp, stage, req.params.snapshotId),
-        );
-      } catch (err) {
-        app.log.warn(
-          { err, bp: req.params.bp, snapshotId: req.params.snapshotId },
-          'snapshot off-site fetch failed',
-        );
-        return reply.code(502).send({ error: 'gitops unreachable' });
-      }
-    },
-  );
-
   app.delete<{ Params: { bp: string; stage: string; snapshotId: string } }>(
     '/api/snapshots/:bp/:stage/:snapshotId',
     async (req, reply) => {

@@ -65,43 +65,6 @@ func listSnapshotsMeta(ctx context.Context, restic *Restic, tags []string) ([]sn
 	return snapshots, nil
 }
 
-// lsSnapshot lists a snapshot's entries under one path (recursive), one
-// absolute path per line.
-func lsSnapshot(ctx context.Context, restic *Restic, snapshotID, path string) ([]string, error) {
-	stdout, _, err := restic.Run(ctx, "ls", snapshotID, path)
-	if err != nil {
-		return nil, err
-	}
-	var entries []string
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "/") {
-			entries = append(entries, line)
-		}
-	}
-	return entries, nil
-}
-
-// FindSnapshotWithPath returns the newest snapshot (matching tags) that
-// contains path — a locally-pruned artifact may only exist in an older
-// nightly, so probing newest→oldest is required, not just "latest".
-func FindSnapshotWithPath(ctx context.Context, restic *Restic, tags []string, path string) (string, error) {
-	snapshots, err := listSnapshotsMeta(ctx, restic, tags)
-	if err != nil {
-		return "", err
-	}
-	for _, snapshot := range snapshots {
-		entries, err := lsSnapshot(ctx, restic, snapshot.ID, path)
-		if err != nil {
-			continue // path not in this snapshot (restic ls errors) — keep probing
-		}
-		if len(entries) > 0 {
-			return snapshot.ID, nil
-		}
-	}
-	return "", fmt.Errorf("no snapshot contains %s", path)
-}
-
 // resticRestore restores one snapshot (optionally --include-scoped) to target.
 func resticRestore(ctx context.Context, restic *Restic, snapshotID, target string, includes ...string) error {
 	if err := os.MkdirAll(target, 0o700); err != nil {
@@ -155,16 +118,15 @@ func RestoreWorkspaceFiles(ctx context.Context, ws, snapshotID string) (string, 
 }
 
 // RestoreFilesInPlace restores a workspace's tree onto its LIVE volume path
-// (restic restore --target / --include <wsDir>), the same pattern FetchSnapshot
-// uses. Ownership and modes come from the snapshot — restic preserves them and
-// the daemon runs as root — so no chown pass is needed.
+// (restic restore --target / --include <wsDir>). Ownership and modes come from
+// the snapshot — restic preserves them and the daemon runs as root — so no
+// chown pass is needed.
 //
 // The caller MUST have emptied wsDir first (recovery quarantine-renames it):
 // restic restore merges into an existing tree rather than replacing it, so
 // files that the snapshot doesn't contain would otherwise survive.
 //
-// excludes are absolute paths dropped from the restore (e.g. the per-BP
-// snapshots dir, which is large and re-fetchable on demand).
+// excludes are absolute paths dropped from the restore.
 func RestoreFilesInPlace(ctx context.Context, ws string, snap FilesSnapshot, excludes []string) error {
 	restic, err := newResticFromState()
 	if err != nil {
@@ -448,94 +410,4 @@ func readCouchExport(tarball string) (map[string]json.RawMessage, []string, erro
 		}
 	}
 	return documents, databases, nil
-}
-
-// --- DR-rehearsal fetch: gitops pulls a pruned per-BP snapshot back ---
-
-// OffsiteSnapshotRef is one fetchable per-BP snapshot found in the nightly
-// file captures.
-type OffsiteSnapshotRef struct {
-	SnapshotID     string    `json:"snapshot_id"`     // the gitops snapshot dir name
-	ResticSnapshot string    `json:"restic_snapshot"` // which nightly holds it
-	BackedUpAt     time.Time `json:"backed_up_at"`
-}
-
-// snapshotsPath is where a BP's stage snapshots live inside the nightly file
-// capture (absolute daemon-side path, which is what restic recorded).
-func snapshotsPath(ws, bp, stage string) string {
-	return filepath.Join(workspaceDir(ws), "snapshots", bp, stage)
-}
-
-// ListOffsiteSnapshots reports which per-BP snapshots exist in the nightly
-// captures — the replacement for gitops's own offsite index. Probes the
-// newest maxProbe nightlies (older ones only add already-pruned history).
-func ListOffsiteSnapshots(ctx context.Context, ws, bp, stage string) ([]OffsiteSnapshotRef, error) {
-	restic, err := newResticFromState()
-	if err != nil {
-		return nil, err
-	}
-	snapshots, err := listSnapshotsMeta(ctx, restic, []string{"files,ws:" + ws})
-	if err != nil {
-		return nil, err
-	}
-	const maxProbe = 30
-	if len(snapshots) > maxProbe {
-		snapshots = snapshots[:maxProbe]
-	}
-
-	prefix := snapshotsPath(ws, bp, stage) + "/"
-	seen := map[string]OffsiteSnapshotRef{}
-	for _, snapshot := range snapshots {
-		entries, err := lsSnapshot(ctx, restic, snapshot.ID, strings.TrimSuffix(prefix, "/"))
-		if err != nil {
-			continue // dir absent in this nightly
-		}
-		for _, entry := range entries {
-			rest := strings.TrimPrefix(entry, prefix)
-			if rest == entry || rest == "" {
-				continue
-			}
-			id := strings.SplitN(rest, "/", 2)[0]
-			if _, ok := seen[id]; !ok {
-				// Newest-first iteration: first sighting is the newest capture.
-				seen[id] = OffsiteSnapshotRef{
-					SnapshotID:     id,
-					ResticSnapshot: snapshot.ShortID,
-					BackedUpAt:     snapshot.Time,
-				}
-			}
-		}
-	}
-	refs := make([]OffsiteSnapshotRef, 0, len(seen))
-	for _, ref := range seen {
-		refs = append(refs, ref)
-	}
-	sort.Slice(refs, func(i, j int) bool { return refs[i].SnapshotID < refs[j].SnapshotID })
-	return refs, nil
-}
-
-// FetchSnapshot restores one per-BP snapshot dir IN PLACE on the shared
-// volume (restic restore --target / --include <abs path>) so gitops's
-// snapshot lister sees it immediately. Ownership/modes come back from the
-// snapshot itself (restic preserves them; the daemon runs as root).
-func FetchSnapshot(ctx context.Context, ws, bp, stage, snapshotID string) error {
-	restic, err := newResticFromState()
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(snapshotsPath(ws, bp, stage), snapshotID)
-	if _, err := os.Stat(path); err == nil {
-		return nil // already local
-	}
-	resticSnapshot, err := FindSnapshotWithPath(ctx, restic, []string{"files,ws:" + ws}, path)
-	if err != nil {
-		return err
-	}
-	if _, _, err := restic.Run(ctx, "restore", resticSnapshot, "--target", "/", "--include", path); err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("restore reported success but %s is still missing", path)
-	}
-	return nil
 }

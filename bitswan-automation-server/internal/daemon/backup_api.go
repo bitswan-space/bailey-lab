@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -128,31 +127,9 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	case path == "/recover/server/end" && r.Method == http.MethodPost:
 		s.handleServerRecoveryMark(w, r, false)
 
-	case path == "/fetch-snapshot" && r.Method == http.MethodPost:
-		s.handleBackupFetchSnapshot(w, r)
-
-	case path == "/offsite-snapshots" && r.Method == http.MethodGet:
-		s.handleBackupOffsiteSnapshots(w, r)
-
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}
-}
-
-// workspaceSecretOK verifies the caller presented workspace ws's gitops
-// secret (X-Bitswan-Workspace-Secret). The socket peer alone proves nothing
-// — every workspace container can reach it — so gitops-facing routes prove
-// workspace identity with the secret only that workspace's env carries.
-func workspaceSecretOK(r *http.Request, ws string) bool {
-	presented := r.Header.Get("X-Bitswan-Workspace-Secret")
-	if presented == "" {
-		return false
-	}
-	metadata, err := config.GetWorkspaceMetadata(ws)
-	if err != nil || metadata.GitopsSecret == "" {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(presented), []byte(metadata.GitopsSecret)) == 1
 }
 
 // handleBackupRestore runs a targeted restore as a job (admin only —
@@ -315,72 +292,6 @@ func (s *Server) handleBackupRecoverWorkspace(w http.ResponseWriter, r *http.Req
 
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, map[string]string{"job_id": job.ID})
-}
-
-// handleBackupFetchSnapshot restores a pruned per-BP snapshot back onto the
-// shared volume for DR rehearsal. Called by gitops (workspace-secret auth);
-// synchronous — gitops runs it inside its own task machinery.
-func (s *Server) handleBackupFetchSnapshot(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Workspace  string `json:"workspace"`
-		BP         string `json:"bp"`
-		Stage      string `json:"stage"`
-		SnapshotID string `json:"snapshot_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.Workspace == "" || req.BP == "" || req.Stage == "" || req.SnapshotID == "" {
-		writeJSONError(w, "workspace, bp, stage and snapshot_id are all required", http.StatusBadRequest)
-		return
-	}
-	// Path traversal guard: each field becomes one path segment.
-	for _, field := range []string{req.Workspace, req.BP, req.Stage, req.SnapshotID} {
-		if strings.ContainsAny(field, "/\\") || field == ".." {
-			writeJSONError(w, "invalid path component", http.StatusBadRequest)
-			return
-		}
-	}
-	if !workspaceSecretOK(r, req.Workspace) {
-		writeJSONError(w, "workspace secret required", http.StatusForbidden)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
-	defer cancel()
-	if err := backup.FetchSnapshot(ctx, req.Workspace, req.BP, req.Stage, req.SnapshotID); err != nil {
-		writeJSONError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]bool{"fetched": true})
-}
-
-// handleBackupOffsiteSnapshots lists a BP's snapshots present in the nightly
-// captures (gitops's "remote-only" listing source; workspace-secret auth).
-func (s *Server) handleBackupOffsiteSnapshots(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	ws, bp, stage := query.Get("workspace"), query.Get("bp"), query.Get("stage")
-	if ws == "" || bp == "" || stage == "" {
-		writeJSONError(w, "workspace, bp and stage are all required", http.StatusBadRequest)
-		return
-	}
-	if !workspaceSecretOK(r, ws) {
-		writeJSONError(w, "workspace secret required", http.StatusForbidden)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
-	defer cancel()
-	refs, err := backup.ListOffsiteSnapshots(ctx, ws, bp, stage)
-	if err != nil {
-		writeJSONError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if refs == nil {
-		refs = []backup.OffsiteSnapshotRef{}
-	}
-	writeJSON(w, map[string]interface{}{"snapshots": refs})
 }
 
 func (s *Server) handleBackupConfigUpdate(w http.ResponseWriter, r *http.Request) {

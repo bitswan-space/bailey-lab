@@ -23,15 +23,15 @@ export interface SnapshotServiceMeta {
 /**
  * A snapshot in the list.
  *
- * Everything below `id`/`bp`/`stage`/`created_at` is OPTIONAL, because a
- * `remote_only` entry has none of it. Those are synthesised by gitops from what
- * the server's backup repo knows about an off-site copy — an id, a stage and a
- * timestamp — and the repo simply does not record which services the snapshot
- * held or how large it was. gitops does not invent values it cannot know.
+ * Everything below `id`/`bp`/`stage`/`created_at` is OPTIONAL. gitops serves
+ * each snapshot's manifest.json back verbatim, so what is present is whatever
+ * the gitops that wrote the file put there — a manifest older than a field
+ * simply lacks it.
  *
  * These were once declared required, which is why `Object.entries(s.services)`
- * type-checked and then crashed the whole Backups page on the first remote-only
- * snapshot. Keep them optional: the compiler is what stops that recurring.
+ * type-checked and then crashed the whole Backups page on the first snapshot
+ * that had none. Keep them optional: the compiler is what stops that
+ * recurring.
  */
 export interface Snapshot {
   id: string;
@@ -52,14 +52,9 @@ export interface Snapshot {
     restored_from_stage?: string;
     target_stage?: string;
   };
-  /** False when the snapshot exists only in the server backup (local files
-   *  deleted or pruned) — Fetch materializes it back. */
-  local?: boolean;
-  /** True for snapshots known only from the server's backup repo. */
-  remote_only?: boolean;
 }
 
-export type SnapshotOperation = 'create' | 'restore' | 'clone' | 'fetch';
+export type SnapshotOperation = 'create' | 'restore' | 'clone';
 
 export type SnapshotTaskStatus =
   | 'pending'

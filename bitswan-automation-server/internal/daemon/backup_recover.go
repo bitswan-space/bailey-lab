@@ -54,7 +54,6 @@ type RecoverRequest struct {
 	SkipPostgres    bool `json:"skip_postgres,omitempty"`
 	SkipCouchDB     bool `json:"skip_couchdb,omitempty"`
 	SkipGarage      bool `json:"skip_garage,omitempty"`
-	SkipBPSnapshots bool `json:"skip_bp_snapshots,omitempty"`
 
 	GarageMirror  bool `json:"garage_mirror,omitempty"`  // rclone sync (deletes extraneous)
 	DiscardBackup bool `json:"discard_backup,omitempty"` // drop the quarantined tree on success
@@ -453,11 +452,7 @@ func (s *Server) recoverWorkspace(ctx context.Context, req RecoverRequest, log f
 			quarantine = q
 			report.QuarantineDir = q
 
-			var excludes []string
-			if req.SkipBPSnapshots {
-				excludes = append(excludes, filepath.Join(wsDir, "snapshots"))
-			}
-			if err := recoverRestoreFiles(ctx, ws, set.Files, excludes); err != nil {
+			if err := recoverRestoreFiles(ctx, ws, set.Files, nil); err != nil {
 				rollbackQuarantine(ws, q, log)
 				report.QuarantineDir = ""
 				return "", err
