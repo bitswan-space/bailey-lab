@@ -126,8 +126,7 @@ func RestoreWorkspaceFiles(ctx context.Context, ws, snapshotID string) (string, 
 // restic restore merges into an existing tree rather than replacing it, so
 // files that the snapshot doesn't contain would otherwise survive.
 //
-// excludes are absolute paths dropped from the restore (e.g. the per-BP
-// snapshots dir, which is large and re-fetchable on demand).
+// excludes are absolute paths dropped from the restore.
 func RestoreFilesInPlace(ctx context.Context, ws string, snap FilesSnapshot, excludes []string) error {
 	restic, err := newResticFromState()
 	if err != nil {
