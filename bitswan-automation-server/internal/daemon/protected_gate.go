@@ -423,10 +423,20 @@ func enforceProtectedGate(w http.ResponseWriter, r *http.Request) bool {
 // the request should be served; false if it was handled (denied page
 // rendered).
 //
-// bailey.<domain> gets a free pass — it's the management surface,
-// whose pages apply their own per-page authorization. We still
-// register it as an endpoint on first sign-in so it has an owner (the
-// "server owner") for the share/audit UI, but the gate doesn't 403 it.
+// bailey.<domain> gets a free pass — it's the management surface, whose pages
+// apply their own per-page authorization.
+//
+// It is NOT registered as an endpoint. The gate used to auto-register it on
+// first sign-in purely so it would have an owner_email — the "server owner",
+// which then granted that arbitrary first visitor server-wide read and write
+// over everyone's workspaces (#337). With that identity gone the row has no
+// purpose, and minting one would keep re-recording a meaningless ownership
+// that any future roleFor / "endpoints you own" caller could accidentally
+// treat as special again. Nothing functional needs it: every bailey/onboard
+// special case is a HOST PREDICATE (isBaileyHost here,
+// isServerConsoleOnboardHost in the MFA gate and console serving), never a DB
+// lookup, and the audit page synthesises its rows for these hosts (see
+// specialAccessEndpoints).
 func enforceEndpointACL(w http.ResponseWriter, r *http.Request, email string, groups []string) bool {
 	host := requestEndpointHost(r)
 	if host == "" {
@@ -436,9 +446,6 @@ func enforceEndpointACL(w http.ResponseWriter, r *http.Request, email string, gr
 	// requests look up against the same row.
 	host = toOuterHost(host)
 	if isBaileyHost(host) {
-		if ep, _ := getEndpoint(host); ep == nil {
-			_, _ = registerEndpoint(host, email, "Bailey ("+host+")", "", "", "")
-		}
 		return true
 	}
 	ep, err := getEndpoint(host)

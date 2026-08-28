@@ -108,30 +108,43 @@ func TestEnforceEndpointACL_GroupGrantPasses(t *testing.T) {
 	}
 }
 
-func TestEnforceEndpointACL_BaileyHostFreePassAndAutoRegister(t *testing.T) {
+// The bailey host is never gated — and never registered. The gate used to
+// auto-register it on first sign-in so it would have an owner_email, which
+// designated a "server owner" with server-wide read and write over everyone
+// else's workspaces (#337). With that identity gone the row has no purpose,
+// and minting one would keep recording a meaningless ownership that future
+// code could mistake for a privilege. The free pass is a host predicate and
+// needs no row.
+func TestEnforceEndpointACL_BaileyHostFreePassWithoutRegistering(t *testing.T) {
 	host := "bailey.gate-test.example.com"
-	w := httptest.NewRecorder()
-	r := gateRequest(t, host, "/", "first@example.com")
-	if !enforceEndpointACL(w, r, "first@example.com", nil) {
-		t.Fatal("bailey host must never be gated")
+	if err := deleteEndpoint(host); err != nil {
+		t.Fatal(err)
 	}
-	// First sign-in claims server ownership.
+	for _, email := range []string{"first@example.com", "second@example.com"} {
+		w := httptest.NewRecorder()
+		r := gateRequest(t, host, "/", email)
+		if !enforceEndpointACL(w, r, email, nil) {
+			t.Fatalf("bailey host must never be gated (%s, status %d)", email, w.Code)
+		}
+	}
 	ep, err := getEndpoint(host)
-	if err != nil || ep == nil {
-		t.Fatalf("bailey endpoint not auto-registered: %v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.EqualFold(ep.OwnerEmail, "first@example.com") {
-		t.Errorf("bailey owner = %q", ep.OwnerEmail)
+	if ep != nil {
+		t.Errorf("bailey host was registered with owner %q — no ownership may be minted here", ep.OwnerEmail)
 	}
-	// A later user passes too, but doesn't steal ownership.
-	w2 := httptest.NewRecorder()
-	r2 := gateRequest(t, host, "/", "second@example.com")
-	if !enforceEndpointACL(w2, r2, "second@example.com", nil) {
-		t.Error("second user gated on bailey host")
+	// Same for the public onboarding host, which isBaileyHost also matches.
+	onboard := "bailey-onboard.gate-test.example.com"
+	if err := deleteEndpoint(onboard); err != nil {
+		t.Fatal(err)
 	}
-	ep2, _ := getEndpoint(host)
-	if !strings.EqualFold(ep2.OwnerEmail, "first@example.com") {
-		t.Errorf("bailey ownership changed to %q", ep2.OwnerEmail)
+	w := httptest.NewRecorder()
+	if !enforceEndpointACL(w, gateRequest(t, onboard, "/", "new@example.com"), "new@example.com", nil) {
+		t.Fatalf("onboarding host must never be gated (status %d)", w.Code)
+	}
+	if ep, _ := getEndpoint(onboard); ep != nil {
+		t.Errorf("onboarding host was registered with owner %q", ep.OwnerEmail)
 	}
 }
 
