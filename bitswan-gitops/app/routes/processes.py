@@ -269,6 +269,9 @@ async def create_process(
             stage=stage,
             copy=body.copy,
             service=automation_service,
+            # Whole-BP enumeration, so the new BP's stage holds exactly what was
+            # scaffolded — no entry inherited from an earlier same-named BP (#378).
+            prune_scope=True,
         )
         if res.get("deploy"):
             deploy_task_id = res["deploy"]["task_id"]
@@ -386,6 +389,9 @@ async def create_process_from_bundle(
             stage=stage,
             copy=copy,
             service=automation_service,
+            # Whole-BP enumeration, so the restored stage matches the restored
+            # source rather than the pre-delete incarnation's entries (#378).
+            prune_scope=True,
         )
         if res.get("deploy"):
             deploy_task_id = res["deploy"]["task_id"]
