@@ -13,6 +13,7 @@ import "time"
 const (
 	auditDeviceApprove   = "device.approve"   // a device became trusted (pair-approve, self-trust, or claim TOFU)
 	auditDeviceRevoke    = "device.revoke"    // a device was removed (self-service or admin)
+	auditDeviceRename    = "device.rename"    // a user renamed one of their own devices
 	auditWorkspaceCreate = "workspace.create" // a workspace was provisioned
 	auditWorkspaceTrash  = "workspace.trash"  // a workspace was moved to trash
 	auditServerClaim     = "server.claim"     // the one-time root-admin bootstrap ran

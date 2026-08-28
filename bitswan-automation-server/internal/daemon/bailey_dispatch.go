@@ -121,6 +121,11 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleBaileyDevicesRemoveAPI(w, r, email)
 			return
 		}
+	case "/bailey/api/devices/rename":
+		if r.Method == http.MethodPost {
+			handleBaileyDevicesRenameAPI(w, r, email)
+			return
+		}
 	case "/bailey/api/totp/remove":
 		// Remove THIS user's authenticator. A trusted-device account action
 		// (it's past the device-trust backstop), distinct from the untrusted

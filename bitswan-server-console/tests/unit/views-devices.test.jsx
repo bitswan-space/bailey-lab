@@ -207,3 +207,91 @@ describe('SecurityView', () => {
     await waitFor(() => expect(s.toast).toHaveBeenCalledWith('regen fail', 'error'));
   });
 });
+
+// ─── Renaming a device ──────────────────────────────────────────────────────
+//
+// The handbook (Ch. 04, "Your devices") tells operators to keep devices named
+// so the one to cut is obvious in an incident. The names Bailey derives itself
+// come from the User-Agent, so several browsers on one machine are
+// indistinguishable — until you can rename them here.
+describe('DevicesView rename', () => {
+  it('renames a device and refreshes the list', async () => {
+    const s = spies();
+    installFetch({ '/bailey/api/devices/rename': { json: { ok: true, id: 'd-cur', name: 'Work laptop' } } });
+    render(<Host View={DevicesView} data={makeData()} extra={s} />);
+
+    fireEvent.click(screen.getByLabelText('Rename This Mac'));
+    const input = screen.getByLabelText('Name for This Mac');
+    fireEvent.change(input, { target: { value: 'Work laptop' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(
+      expect.stringContaining('renamed to Work laptop'), 'success'));
+    expect(s.refresh).toHaveBeenCalledWith('devices');
+  });
+
+  it('sends the id and the new name to the rename endpoint', async () => {
+    const s = spies();
+    const fetchMock = installFetch({ '/bailey/api/devices/rename': { json: { ok: true } } });
+    render(<Host View={DevicesView} data={makeData()} extra={s} />);
+
+    fireEvent.click(screen.getByLabelText('Rename Other Phone'));
+    fireEvent.change(screen.getByLabelText('Name for Other Phone'), { target: { value: 'Kitchen iPad' } });
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(s.refresh).toHaveBeenCalledWith('devices'));
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/devices/rename'));
+    expect(call).toBeTruthy();
+    const body = String(call[1].body);
+    expect(body).toContain('id=d-other');
+    expect(body).toContain(encodeURIComponent('Kitchen iPad').replace(/%20/g, '+'));
+  });
+
+  // The current device is the one you are most likely to want labelled — it is
+  // the one you keep, and the one whose name tells the others apart.
+  it('the current device can be renamed too', () => {
+    render(<Host View={DevicesView} data={makeData()} extra={spies()} />);
+    expect(screen.getByLabelText('Rename This Mac')).toBeTruthy();
+  });
+
+  it('cancel leaves the name alone and calls nothing', async () => {
+    const s = spies();
+    const fetchMock = installFetch({ '/bailey/api/devices/rename': { json: { ok: true } } });
+    render(<Host View={DevicesView} data={makeData()} extra={s} />);
+
+    fireEvent.click(screen.getByLabelText('Rename This Mac'));
+    fireEvent.change(screen.getByLabelText('Name for This Mac'), { target: { value: 'Discarded' } });
+    fireEvent.click(screen.getByText('Cancel'));
+
+    expect(screen.getByText('This Mac')).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/devices/rename'))).toBe(false);
+  });
+
+  // An unchanged name is not a write. Posting it would put a pointless
+  // device.rename row in the audit log every time someone opened the field.
+  it('saving an unchanged name closes the editor without calling the API', () => {
+    const fetchMock = installFetch({ '/bailey/api/devices/rename': { json: { ok: true } } });
+    render(<Host View={DevicesView} data={makeData()} extra={spies()} />);
+
+    fireEvent.click(screen.getByLabelText('Rename This Mac'));
+    fireEvent.click(screen.getByText('Save'));
+
+    expect(screen.getByText('This Mac')).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/devices/rename'))).toBe(false);
+  });
+
+  it('a rejected name surfaces the backend reason and keeps the editor open', async () => {
+    const s = spies();
+    installFetch({ '/bailey/api/devices/rename': { status: 400, json: { error: 'name must be at most 60 characters' } } });
+    render(<Host View={DevicesView} data={makeData()} extra={s} />);
+
+    fireEvent.click(screen.getByLabelText('Rename This Mac'));
+    fireEvent.change(screen.getByLabelText('Name for This Mac'), { target: { value: 'x'.repeat(61) } });
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(s.toast).toHaveBeenCalledWith(
+      expect.stringContaining("Couldn't rename device"), 'danger'));
+    // Still editing, so the typed name isn't lost.
+    expect(screen.getByLabelText('Name for This Mac')).toBeTruthy();
+  });
+});
