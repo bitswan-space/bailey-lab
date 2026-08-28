@@ -1,23 +1,28 @@
 package daemon
 
 import (
-	"database/sql"
-	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
 
-// Endpoints page in bailey. Shows a map of every protected
-// endpoint with its owner + grants. Anyone signed in can open it
-// (it's part of the chrome-wrapped bailey-admin), but the JSON API
-// filters per caller:
+// Endpoints listing in bailey (GET /bailey/api/endpoints). Open to any
+// signed-in user, and filtered per caller to the endpoints they are
+// genuinely involved with: they own it, are granted on it, or are in a
+// granted group of it. That is the same set roleFor admits at the gate, so
+// what this lists is exactly what the caller can open.
 //
-//   - server owner (original owner of bailey.<domain>): sees
-//     EVERY endpoint, with full ACL detail, in read-only audit mode.
-//   - everyone else: sees only the endpoints they're involved with
-//     (own, are granted on, or are in a granted group of).
+// SECURITY (#337): the "server owner" — the recorded owner of the
+// bailey.<domain> endpoint — used to additionally receive a read-only
+// "viewer" row for EVERY endpoint on the server. This listing is what the
+// console's "Apps you can access" grid is built from, so that override
+// leaked other people's app hostnames, display names and business-process
+// names to a caller the gate then refused. The identity itself has since
+// been removed entirely: nothing in the daemon derives privilege from who
+// owns the bailey endpoint. Server-wide auditing lives on
+// /bailey/api/admin/acl, which is admin-gated in handleBailey; this
+// endpoint is not an audit surface and widens for nobody.
 //
 // Modifying grants happens through /2fa-gate/share/<host>, which
 // continues to enforce owner-only writes.
@@ -39,79 +44,38 @@ type endpointListEntry struct {
 	ParentEndpoint  string          `json:"parent_endpoint,omitempty"`
 	Workspace       string          `json:"workspace,omitempty"`
 	BusinessProcess string          `json:"business_process,omitempty"`
-	CallerRole      string          `json:"caller_role"`      // owner | access | viewer (server owner) | none
-	Grants          []endpointGrant `json:"grants,omitempty"` // populated for owner/server-owner views
+	CallerRole      string          `json:"caller_role"`      // owner | access (never empty — roleless rows are omitted)
+	Grants          []endpointGrant `json:"grants,omitempty"` // populated for the caller's own endpoints
 }
 
 type endpointListing struct {
-	CallerEmail   string              `json:"caller_email"`
-	IsServerOwner bool                `json:"is_server_owner"`
-	Endpoints     []endpointListEntry `json:"endpoints"`
-}
-
-// callerIsServerOwner reports whether the caller is the original
-// owner of the bailey.<domain> endpoint. Used to gate the
-// server-wide audit view.
-func callerIsServerOwner(callerEmail string, r *http.Request) (bool, error) {
-	host := serverBaileyAdminHost(r)
-	if host == "" {
-		return false, nil
-	}
-	ep, err := getEndpoint(host)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, err
-	}
-	if ep == nil {
-		return false, nil
-	}
-	return strings.EqualFold(ep.OwnerEmail, callerEmail), nil
-}
-
-// serverBaileyAdminHost returns the hostname of the bailey-admin
-// endpoint for this server. Prefers what the caller's request was
-// addressed to (so the same daemon can serve multiple bailey-admin
-// hosts if needed); falls back to the configured domain.
-func serverBaileyAdminHost(r *http.Request) string {
-	if r != nil {
-		if h := requestEndpointHost(r); isBaileyHost(h) {
-			return h
-		}
-	}
-	sc, err := config.NewAutomationServerConfig().LoadConfig()
-	if err != nil || sc == nil {
-		return ""
-	}
-	if d := sc.ProtectedHostnameDomain(); d != "" {
-		return "bailey." + d
-	}
-	return ""
+	CallerEmail string              `json:"caller_email"`
+	Endpoints   []endpointListEntry `json:"endpoints"`
 }
 
 // buildEndpointListing constructs the JSON used by the endpoints
-// page. The result is already filtered per caller — clients render
-// it directly.
+// listing. The result is already filtered per caller — clients render
+// it directly, and MUST be able to: a row reaching a client is a
+// statement that the caller can open that endpoint.
+//
+// The filter fails closed. roleFor returning an error aborts the whole
+// listing (the caller gets a 500) rather than emitting a row whose access
+// we could not establish.
 //
 // All endpoint rows are read up-front into a slice, then closed
 // before any other DB calls run. SetMaxOpenConns(1) on bailey.db
 // means a still-open rows handle holds the only connection; calling
 // roleFor or listGrants inside the loop would deadlock waiting for
 // itself.
+// r is unused by the filter itself (nothing about the caller's privileges
+// depends on the request any more); it stays in the signature because
+// request-scoped work is layered on top of this listing.
 func buildEndpointListing(callerEmail string, callerGroups []string, r *http.Request) (*endpointListing, error) {
 	endpoints, err := listAllEndpoints()
 	if err != nil {
 		return nil, err
 	}
-	serverOwner, err := callerIsServerOwner(callerEmail, r)
-	if err != nil {
-		return nil, err
-	}
-	out := &endpointListing{
-		CallerEmail:   callerEmail,
-		IsServerOwner: serverOwner,
-	}
+	out := &endpointListing{CallerEmail: callerEmail}
 	wsByDash := workspaceByDashboardHost()
 	for _, ep := range endpoints {
 		entry := endpointListEntry{
@@ -136,13 +100,12 @@ func buildEndpointListing(callerEmail string, callerGroups []string, r *http.Req
 			return nil, err
 		}
 		entry.CallerRole = string(role)
-		if entry.CallerRole == "" && serverOwner {
-			entry.CallerRole = "viewer"
-		}
+		// No role ⇒ the gate would deny this endpoint, so it must not appear
+		// here either — not even for the server owner (#337).
 		if entry.CallerRole == "" {
 			continue
 		}
-		if entry.CallerRole == "owner" || entry.CallerRole == "viewer" {
+		if entry.CallerRole == "owner" {
 			grants, gerr := listGrants(ep.Hostname)
 			if gerr != nil {
 				return nil, gerr

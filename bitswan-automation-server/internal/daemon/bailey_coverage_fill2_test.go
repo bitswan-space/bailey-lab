@@ -143,12 +143,19 @@ func TestGateAPI_EnrollReusesCandidateCookie(t *testing.T) {
 	}
 }
 
-// --- acl_endpoints_page.go: server-owner viewer path -------------------
+// --- acl_endpoints_page.go: the listing never widens for anyone --------
 
-func TestEndpoints_ServerOwnerSeesViewerRows(t *testing.T) {
+// /bailey/api/endpoints is the source for the console's "Apps you can
+// access" grid, so a row in it is a claim that the caller can open that
+// endpoint. Owning the bailey.<domain> endpoint used to make its owner a
+// "server owner" who received a read-only "viewer" row for every endpoint on
+// the server, leaking third-party app hostnames, display names and business
+// processes into that grid (#337). That identity no longer exists: owning the
+// bailey row confers nothing at all here.
+func TestEndpoints_OwningBaileyHostConfersNothing(t *testing.T) {
 	domain := writeTestConfig(t)
 	host := "bailey." + domain
-	// Make srvowner the bailey-admin endpoint owner → server owner.
+	// Own the bailey-admin endpoint — the old god-mode qualification.
 	if err := deleteEndpoint(host); err != nil {
 		t.Fatal(err)
 	}
@@ -158,6 +165,11 @@ func TestEndpoints_ServerOwnerSeesViewerRows(t *testing.T) {
 	// A third-party endpoint the server owner has no direct role on.
 	other := "viewer-target.example.com"
 	if _, err := registerEndpoint(other, "thirdparty@example.com", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// And one they really do own — visibility must not be over-corrected away.
+	own := "srvowner-target.example.com"
+	if _, err := registerEndpoint(own, "srvowner@example.com", "", "", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	r := baileyReq(http.MethodGet, "/bailey/api/endpoints", "srvowner@example.com")
@@ -172,17 +184,55 @@ func TestEndpoints_ServerOwnerSeesViewerRows(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &listing); err != nil {
 		t.Fatal(err)
 	}
-	if !listing.IsServerOwner {
-		t.Fatal("caller not recognised as server owner")
-	}
-	var sawViewer bool
+	var sawOwn bool
 	for _, e := range listing.Endpoints {
-		if strings.EqualFold(e.Hostname, other) && e.CallerRole == "viewer" {
-			sawViewer = true
+		if strings.EqualFold(e.Hostname, other) {
+			t.Errorf("the bailey-host owner was shown a third-party endpoint (%q, role %q) — the listing leaks", e.Hostname, e.CallerRole)
+		}
+		if e.CallerRole == "viewer" || e.CallerRole == "" {
+			t.Errorf("endpoint %q carries role %q — every listed row must be openable", e.Hostname, e.CallerRole)
+		}
+		if strings.EqualFold(e.Hostname, own) {
+			sawOwn = true
 		}
 	}
-	if !sawViewer {
-		t.Error("server owner did not get a viewer row for a third-party endpoint")
+	if !sawOwn {
+		t.Errorf("caller lost sight of an endpoint they genuinely own (%q)", own)
+	}
+}
+
+// The deny direction for an ordinary caller, and the allow direction that
+// must survive it: a workspace member inherits their workspace's apps
+// (roleFor delegates through the parent dashboard), a stranger gets nothing.
+func TestEndpoints_NonMemberSeesNoAppsOfOtherWorkspaces(t *testing.T) {
+	dashboard, child := unionFixture(t, "endpoints-listing")
+
+	for _, tc := range []struct {
+		email  string
+		groups []string
+		want   bool
+	}{
+		{"wsowner@example.com", nil, true},                // workspace owner
+		{"member@example.com", nil, true},                 // granted member
+		{"dev@example.com", []string{"/Acme/devs"}, true}, // member via group
+		{"stranger@example.com", nil, false},              // no relationship at all
+	} {
+		listing, err := buildEndpointListing(tc.email, tc.groups, nil)
+		if err != nil {
+			t.Fatalf("buildEndpointListing(%s): %v", tc.email, err)
+		}
+		var sawChild, sawDashboard bool
+		for _, e := range listing.Endpoints {
+			if strings.EqualFold(e.Hostname, child) {
+				sawChild = true
+			}
+			if strings.EqualFold(e.Hostname, dashboard) {
+				sawDashboard = true
+			}
+		}
+		if sawChild != tc.want || sawDashboard != tc.want {
+			t.Errorf("%s: saw child=%v dashboard=%v, want %v for both", tc.email, sawChild, sawDashboard, tc.want)
+		}
 	}
 }
 

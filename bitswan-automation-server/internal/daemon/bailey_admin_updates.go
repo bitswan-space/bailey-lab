@@ -181,8 +181,7 @@ func (s *Server) handleUpdateWorkspace(w http.ResponseWriter, r *http.Request, e
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
-	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+	if !callerOwnsWorkspace(email, groups, workspaceName) {
 		http.Error(w, `{"error":"only the workspace owner can update it"}`, http.StatusForbidden)
 		return
 	}
@@ -298,8 +297,7 @@ func (s *Server) handleUpgradeWorkspace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
-	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+	if !callerOwnsWorkspace(email, groups, workspaceName) {
 		writeJSONError(w, "only the workspace owner can update it", http.StatusForbidden)
 		return
 	}

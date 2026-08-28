@@ -178,24 +178,31 @@ func TestEmptyTrashFor_NoWorkspacesDir(t *testing.T) {
 	t.Setenv("HOME", tmp)
 	t.Setenv("SUDO_USER", "")
 	var buf bytes.Buffer
-	if err := EmptyTrashFor("u@example.com", nil, false, &buf); err == nil {
+	if err := EmptyTrashFor("u@example.com", nil, &buf); err == nil {
 		t.Error("EmptyTrashFor with no workspaces dir should error")
 	}
 }
 
-func TestEmptyTrashFor_ServerOwnerRemovesOwnedEntry(t *testing.T) {
+// The happy path: a genuine owner's trashed workspace is hard-deleted. This
+// used to be driven by the server-owner override, which reached
+// RunWorkspaceRemove without owning anything; now the caller has to actually
+// own the workspace's dashboard ACL endpoint, which is the only way in.
+func TestEmptyTrashFor_OwnerRemovesOwnedEntry(t *testing.T) {
 	requireDocker(t)
-	writeTestConfig(t)
+	domain := writeTestConfig(t)
 	name := "etf-zztoremove-unique"
+	owner := "etf-owner@example.com"
 	wsDir := mkWorkspaceDir(t, name, false)
+	if _, err := registerEndpoint(name+"-dashboard."+domain, owner, "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
 	if err := MarkWorkspaceTrashed(name); err != nil {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	// isServerOwner=true → bypasses the per-entry ACL check and calls
-	// RunWorkspaceRemove. There are no real containers for this synthetic
-	// name, so the docker compose downs are quiet no-ops.
-	if err := EmptyTrashFor("srv-owner@example.com", nil, true, &buf); err != nil {
+	// There are no real containers for this synthetic name, so the docker
+	// compose downs are quiet no-ops.
+	if err := EmptyTrashFor(owner, nil, &buf); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(wsDir); !os.IsNotExist(err) {
@@ -220,7 +227,7 @@ func TestEmptyTrashFor_SkipsNonOwnerEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := EmptyTrashFor("not-the-owner@example.com", nil, false, &buf); err != nil {
+	if err := EmptyTrashFor("not-the-owner@example.com", nil, &buf); err != nil {
 		t.Fatal(err)
 	}
 	// The workspace must NOT have been removed (skipped as non-owner).

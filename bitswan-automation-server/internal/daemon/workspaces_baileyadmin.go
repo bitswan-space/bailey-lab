@@ -20,6 +20,11 @@ import (
 // (owner, grantee, or in a granted group). POST creates a new
 // workspace with the caller as the owner of its gitops
 // endpoint.
+//
+// GET is a "what can I open" list, NOT an audit view: it must return
+// exactly the workspaces the gate would let the caller into, and nothing
+// else. The server-wide audit surface is /bailey/api/admin/acl, which is
+// admin-gated (#337).
 
 type accessibleWorkspace struct {
 	Name          string   `json:"name"`
@@ -42,10 +47,25 @@ type listAccessibleResponse struct {
 	Workspaces  []accessibleWorkspace `json:"workspaces"`
 }
 
-// handleListAccessibleWorkspaces returns the workspaces the caller
-// can see. A workspace is visible if the caller has any ACL on its
-// gitops endpoint, OR is its owner. Server owners see
-// every workspace (audit view).
+// handleListAccessibleWorkspaces returns the workspaces the caller can
+// genuinely open: those where workspaceRoleFor — the same resolver the gate
+// uses — reports a real role (owner, grantee, or member of a granted group)
+// on the workspace's ACL endpoint.
+//
+// SECURITY (#337): there is deliberately NO server-wide override here, and
+// no identity left that could carry one. An earlier version listed every
+// workspace on the server for the "server owner" — the recorded owner of the
+// bailey.<domain> endpoint, set by whoever first signs in to the console
+// host. That disclosed the names,
+// build identifiers and membership of other people's workspaces to someone
+// the gate then refused at the door — the list and the enforcement
+// disagreed, and the list was the one that was wrong. It also contradicted
+// the product's own role semantics, under which an admin "still sees only
+// workspaces they own or were granted — not everyone's". Auditing all
+// endpoints is the job of /bailey/api/admin/acl, which is admin-gated.
+//
+// The filter FAILS CLOSED: a membership lookup that errors tells us nothing
+// about the caller, so the workspace is omitted rather than listed.
 func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, email string) {
 	_, groups := identityFromHeaders(r)
 	sc, _ := config.NewAutomationServerConfig().LoadConfig()
@@ -62,8 +82,6 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 		return
 	}
 
-	serverOwner, _ := callerIsServerOwner(email, r)
-
 	out := listAccessibleResponse{CallerEmail: email}
 	if full != nil {
 		for _, ws := range full.Workspaces {
@@ -73,13 +91,13 @@ func handleListAccessibleWorkspaces(w http.ResponseWriter, r *http.Request, emai
 			// The dashboard endpoint is the workspace's canonical ACL surface;
 			// ownership and visibility are resolved there via the same helper
 			// the auth checks use, so "Owner" here == able-to-manage everywhere.
-			role := workspaceRoleFor(name, domain, email, groups)
-			isOwner := role == roleOwner
-			// Visible to any member of the workspace ACL, or the server owner
-			// (audit view).
-			if role == roleNone && !serverOwner {
+			role, roleErr := workspaceRoleFor(name, domain, email, groups)
+			// Visible only to a real member of the workspace ACL. An errored
+			// lookup omits the workspace — never widens the list (#337).
+			if roleErr != nil || role == roleNone {
 				continue
 			}
+			isOwner := role == roleOwner
 			wv := detectWorkspaceVersions(name)
 			entry := accessibleWorkspace{
 				Name:          name,
@@ -450,24 +468,36 @@ func workspaceACLHost(workspaceName, domain string) string {
 // use it, so the "Owner" the UI shows and the owner the auth checks enforce can
 // never diverge. roleFor honours owner GRANTS on the dashboard, not just its
 // recorded owner_email — a co-owner granted ownership is a real owner.
-func workspaceRoleFor(workspaceName, domain, email string, groups []string) endpointRole {
-	role, _ := roleFor(workspaceACLHost(workspaceName, domain), email, groups)
-	return role
+// The error is returned, not swallowed: callers that gate VISIBILITY on it
+// must be able to fail closed on a lookup failure rather than treat an
+// unknown role as a grant (#337).
+func workspaceRoleFor(workspaceName, domain, email string, groups []string) (endpointRole, error) {
+	return roleFor(workspaceACLHost(workspaceName, domain), email, groups)
 }
 
 // callerOwnsWorkspace is the auth check for trash + restore + update +
-// empty-trash. A caller owns the workspace if they own its dashboard ACL
-// endpoint (recorded owner_email OR an owner grant), OR they're the server
-// owner (audit override).
-func callerOwnsWorkspace(callerEmail string, callerGroups []string, isServerOwner bool, workspaceName string) bool {
-	if isServerOwner {
-		return true
-	}
+// empty-trash. A caller owns the workspace if — and only if — they own its
+// dashboard ACL endpoint: its recorded owner_email, or an owner grant on it.
+//
+// There is no override. This used to return true unconditionally for the
+// "server owner" (the recorded owner of the bailey.<domain> endpoint), which
+// let one arbitrary account trash, restore, update, upgrade and roll back
+// every workspace on the server. That identity has been removed entirely.
+// Bailey's own documented model is that a role grants capabilities, never
+// blanket reach over other people's data, and that there is deliberately no
+// god-mode admin; the override contradicted both.
+//
+// The escape hatch for a workspace whose owner is gone is host access:
+// `bitswan workspace remove` over the daemon's local socket, authorised by
+// being able to reach the machine. That is the right place for it — it cannot
+// be reached from a browser session.
+func callerOwnsWorkspace(callerEmail string, callerGroups []string, workspaceName string) bool {
 	sc, _ := config.NewAutomationServerConfig().LoadConfig()
 	if sc == nil {
 		return false
 	}
-	return workspaceRoleFor(workspaceName, sc.ProtectedHostnameDomain(), callerEmail, callerGroups) == roleOwner
+	role, err := workspaceRoleFor(workspaceName, sc.ProtectedHostnameDomain(), callerEmail, callerGroups)
+	return err == nil && role == roleOwner
 }
 
 // handleTrashWorkspace flips the trash marker synchronously (so the
@@ -484,8 +514,7 @@ func (s *Server) handleTrashWorkspace(w http.ResponseWriter, r *http.Request, em
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
-	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+	if !callerOwnsWorkspace(email, groups, workspaceName) {
 		http.Error(w, `{"error":"only the workspace owner can trash it"}`, http.StatusForbidden)
 		return
 	}
@@ -517,8 +546,7 @@ func (s *Server) handleRestoreWorkspace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
-	if !callerOwnsWorkspace(email, groups, serverOwner, workspaceName) {
+	if !callerOwnsWorkspace(email, groups, workspaceName) {
 		http.Error(w, `{"error":"only the workspace owner can restore it"}`, http.StatusForbidden)
 		return
 	}
@@ -553,7 +581,6 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request, email 
 		return
 	}
 	_, groups := identityFromHeaders(r)
-	serverOwner, _ := callerIsServerOwner(email, r)
 
 	// Stream the log just like the create flow — empty-trash can also
 	// take a while if there are several workspaces to tear down.
@@ -579,7 +606,7 @@ func (s *Server) handleEmptyTrash(w http.ResponseWriter, r *http.Request, email 
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		done <- EmptyTrashFor(email, groups, serverOwner, pw)
+		done <- EmptyTrashFor(email, groups, pw)
 		pw.Close()
 	}()
 	// The relay goroutine writes `log` events to `w` as output streams in. We

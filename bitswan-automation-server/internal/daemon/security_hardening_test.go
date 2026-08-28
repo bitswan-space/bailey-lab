@@ -75,16 +75,16 @@ func TestCallerOwnsWorkspace_DashboardAccessIsNotOwner(t *testing.T) {
 	}
 
 	// The fix: callerOwnsWorkspace must deny the access-only member.
-	if callerOwnsWorkspace("collab@example.com", nil, false, ws) {
+	if callerOwnsWorkspace("collab@example.com", nil, ws) {
 		t.Error("dashboard access-role member was treated as workspace owner (privilege escalation)")
 	}
 	// The real gitops owner still owns it.
-	if !callerOwnsWorkspace("owner@example.com", nil, false, ws) {
+	if !callerOwnsWorkspace("owner@example.com", nil, ws) {
 		t.Error("real gitops owner denied ownership")
 	}
-	// Server-owner override still works.
-	if !callerOwnsWorkspace("anyone@example.com", nil, true, ws) {
-		t.Error("server-owner override broken")
+	// And nobody else does — there is no override left to widen this.
+	if callerOwnsWorkspace("anyone@example.com", nil, ws) {
+		t.Error("an unrelated caller was treated as workspace owner")
 	}
 }
 

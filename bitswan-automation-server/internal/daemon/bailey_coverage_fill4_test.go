@@ -85,20 +85,7 @@ func TestSetDeviceCookie_HostOnlyStrict(t *testing.T) {
 	}
 }
 
-// --- acl_endpoints_page.go nil-request + access-role grants -------------
-
-func TestCallerIsServerOwner_NilRequestFalls(t *testing.T) {
-	writeTestConfig(t)
-	// A nil request still resolves the configured bailey host; an unknown
-	// caller is not the owner.
-	owner, err := callerIsServerOwner("nobody@example.com", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if owner {
-		t.Error("unknown caller reported as server owner with nil request")
-	}
-}
+// --- acl_endpoints_page.go access-role grants --------------------------
 
 func TestBuildEndpointListing_AccessRoleEntry(t *testing.T) {
 	writeTestConfig(t)

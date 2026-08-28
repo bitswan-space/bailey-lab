@@ -176,69 +176,6 @@ func TestOriginForHost(t *testing.T) {
 	}
 }
 
-// --- acl_endpoints_page.go: serverBaileyAdminHost / callerIsServerOwner -
-
-func TestServerBaileyAdminHost(t *testing.T) {
-	// Request addressed to a bailey.* host wins.
-	domain := writeTestConfig(t)
-	r := httptest.NewRequest(http.MethodGet, "https://bailey."+domain+"/bailey/api/overview", nil)
-	r.Host = "bailey." + domain
-	if got := serverBaileyAdminHost(r); got != "bailey."+domain {
-		t.Errorf("serverBaileyAdminHost (request) = %q", got)
-	}
-	// Non-bailey request host → falls back to the configured domain.
-	r2 := httptest.NewRequest(http.MethodGet, "https://app."+domain+"/x", nil)
-	r2.Host = "app." + domain
-	if got := serverBaileyAdminHost(r2); got != "bailey."+domain {
-		t.Errorf("serverBaileyAdminHost (fallback) = %q", got)
-	}
-	// nil request still resolves from config.
-	if got := serverBaileyAdminHost(nil); got != "bailey."+domain {
-		t.Errorf("serverBaileyAdminHost (nil) = %q", got)
-	}
-}
-
-func TestServerBaileyAdminHost_NoConfig(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SUDO_USER", "")
-	r := httptest.NewRequest(http.MethodGet, "https://app.example.com/x", nil)
-	r.Host = "app.example.com"
-	if got := serverBaileyAdminHost(r); got != "" {
-		t.Errorf("serverBaileyAdminHost no-config = %q, want empty", got)
-	}
-}
-
-func TestCallerIsServerOwner_NoHost(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SUDO_USER", "")
-	// No config + non-bailey host → serverBaileyAdminHost == "" → not owner.
-	r := httptest.NewRequest(http.MethodGet, "https://app.example.com/x", nil)
-	r.Host = "app.example.com"
-	ok, err := callerIsServerOwner("anyone@example.com", r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Error("callerIsServerOwner with no admin host should be false")
-	}
-}
-
-// callerIsServerOwner returns (false, nil) when the bailey-admin endpoint
-// isn't registered (sql.ErrNoRows path).
-func TestCallerIsServerOwner_EndpointMissing(t *testing.T) {
-	domain := writeTestConfig(t)
-	host := "bailey." + domain
-	r := httptest.NewRequest(http.MethodGet, "https://"+host+"/x", nil)
-	r.Host = host
-	ok, err := callerIsServerOwner("nobody@example.com", r)
-	if err != nil {
-		t.Fatalf("unexpected error for missing endpoint: %v", err)
-	}
-	if ok {
-		t.Error("missing endpoint should not yield server owner")
-	}
-}
-
 // --- bailey_network_map.go: buildNetworkMap base topology --------------
 
 func TestBuildNetworkMap_BaseTopology(t *testing.T) {
