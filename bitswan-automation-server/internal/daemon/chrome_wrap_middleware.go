@@ -74,6 +74,29 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 					originRedirect(w, r)
 					return
 				}
+				// The onboarding host has exactly ONE document: the device-trust
+				// scene at "/". Every console route (/workspaces, /people, …) is
+				// a deep link into a surface that must not exist here, and the
+				// SPA shell is what would render it — serveServerConsole falls
+				// unknown paths back to index.html, so without this the shell is
+				// delivered for any path at all (#403). Send the browser to the
+				// one page this host owns instead, keeping the query (?return=,
+				// ?invite=, ?recover) that drives which scene it shows.
+				if r.URL.Path != "/" {
+					target := "/"
+					if r.URL.RawQuery != "" {
+						target += "?" + r.URL.RawQuery
+					}
+					http.Redirect(w, r, target, http.StatusSeeOther)
+					return
+				}
+			} else if !onboardServableAsset(r.URL.Path) {
+				// Not a document navigation and not a real file in the bundle.
+				// The SPA fallback would answer with index.html, which is how a
+				// fetch()/asset probe smuggles the console shell out of this
+				// host; there is nothing legitimate to serve, so say so.
+				http.NotFound(w, r)
+				return
 			}
 			serveServerConsole(w, r)
 			return

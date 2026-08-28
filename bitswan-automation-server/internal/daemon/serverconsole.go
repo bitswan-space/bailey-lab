@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/base64"
@@ -65,6 +66,57 @@ func isServerConsoleOnboardHost(host string) bool {
 	return strings.EqualFold(host, serverConsoleOnboardHost(dom))
 }
 
+// onboardServableAsset reports whether p is a real file in the embedded bundle
+// — i.e. something the PUBLIC onboarding host may answer with directly.
+//
+// It exists because serveServerConsole falls every unknown path back to
+// index.html. That fallback is right for the console host (a reloaded deep link
+// must still boot the SPA) and wrong for the onboarding host, where it hands
+// the console shell to anyone who asks for any path (#403). Documents are
+// redirected to "/" by the caller; everything else must be a file that really
+// exists or nothing at all.
+func onboardServableAsset(p string) bool {
+	clean := strings.TrimPrefix(path.Clean("/"+p), "/")
+	if clean == "" || clean == "index.html" {
+		return true
+	}
+	st, err := fs.Stat(serverConsoleRoot, clean)
+	return err == nil && !st.IsDir()
+}
+
+// consoleModeMeta is the explicit statement of which surface the shell being
+// served is allowed to render. The SPA reads it (never its own hostname) and
+// refuses to mount the console in "onboarding" mode, so the admin surface is
+// not merely redirected away from the onboarding host — it does not exist
+// there. The host that serves the document is the only party that knows the
+// answer, so the answer travels with the document.
+const consoleModeMetaName = "bitswan-console-mode"
+
+// consoleModeForHost returns the mode to stamp into the shell served to host.
+func consoleModeForHost(host string) string {
+	if isServerConsoleOnboardHost(toOuterHost(host)) {
+		return "onboarding"
+	}
+	return "console"
+}
+
+// injectConsoleMode stamps <meta name="bitswan-console-mode" content="…"> into
+// the shell's <head>. Mirrors appendNavSyncToHTML: a byte-level insert, so the
+// built bundle needs no build-time variant per host.
+func injectConsoleMode(body []byte, mode string) []byte {
+	tag := []byte(`<meta name="` + consoleModeMetaName + `" content="` + mode + `">`)
+	if i := bytes.Index(body, []byte("<head>")); i >= 0 {
+		out := make([]byte, 0, len(body)+len(tag))
+		out = append(out, body[:i+len("<head>")]...)
+		out = append(out, tag...)
+		return append(out, body[i+len("<head>"):]...)
+	}
+	// No <head> to extend. Prepending still puts the tag ahead of the bundle
+	// that reads it, and a missing tag is NOT allowed to mean "console" (see
+	// consoleMode() in console-app.jsx), so this must not silently no-op.
+	return append(append([]byte{}, tag...), body...)
+}
+
 // serveServerConsole serves the embedded SPA. Real files (index.html,
 // assets/*) are served as-is; any other path falls back to index.html so a
 // deep link or reload of a client-side view still loads the app.
@@ -127,6 +179,7 @@ func serveServerConsole(w http.ResponseWriter, r *http.Request) {
 	if serve == "/" {
 		if raw, err := fs.ReadFile(serverConsoleRoot, "index.html"); err == nil {
 			body := appendNavSyncToHTML(raw)
+			body = injectConsoleMode(body, consoleModeForHost(host))
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 			w.WriteHeader(http.StatusOK)

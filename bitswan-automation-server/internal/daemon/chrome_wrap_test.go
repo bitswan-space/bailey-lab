@@ -116,14 +116,188 @@ func TestChromeWrap_OnboardServesOnboardingToUntrustedDevice(t *testing.T) {
 	domain := writeTestConfig(t)
 	onboard := serverConsoleOnboardHost(domain)
 	// Signed in (identity header) but NO device cookie → untrusted.
-	r := httptest.NewRequest(http.MethodGet, "https://"+onboard+"/workspaces", nil)
-	r.Host = onboard
-	r.Header.Set("Accept", "text/html")
-	r.Header.Set("X-Forwarded-Email", "newbie@example.com")
+	r := onboardGet(onboard, "/", "newbie@example.com")
 	w := httptest.NewRecorder()
 	wrappedHandler(t).ServeHTTP(w, r)
 	if w.Code == http.StatusSeeOther {
 		t.Fatalf("onboard bounced an UNtrusted device instead of serving the pairing scene (loc=%q)", w.Header().Get("Location"))
+	}
+}
+
+// onboardGet builds a signed-in but UNTRUSTED top-level document request (no
+// device cookie) — the shape a browser sends when it lands on the public
+// onboarding host for the first time.
+func onboardGet(host, path, email string) *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "https://"+host+path, nil)
+	r.Host = host
+	r.Header.Set("Accept", "text/html,application/xhtml+xml")
+	if email != "" {
+		r.Header.Set("X-Forwarded-Email", email)
+	}
+	return r
+}
+
+// consoleRoutes are the SPA's own client-side routes. Each is a real path a
+// browser can be pointed at, and each names an admin surface.
+var consoleRoutes = []string{
+	"/workspaces", "/overview", "/people", "/devices", "/security",
+	"/resources", "/updates", "/backups", "/handbook",
+}
+
+// TestChromeWrap_OnboardNeverDeliversAConsoleRouteDocument is the core #403
+// assertion: the PUBLIC onboarding host has exactly ONE document — the
+// device-trust scene at "/". Every console route must be sent there instead.
+//
+// This is what made the reported state reachable: serveServerConsole falls
+// unknown paths back to index.html, so bailey-onboard/<anything> answered 200
+// with the console shell. The shell then decides what to render client-side —
+// and on a host with no chrome wrap that meant the bare admin page.
+func TestChromeWrap_OnboardNeverDeliversAConsoleRouteDocument(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+
+	for _, route := range consoleRoutes {
+		t.Run("untrusted"+route, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			wrappedHandler(t).ServeHTTP(w, onboardGet(onboard, route, "newbie@example.com"))
+			if w.Code != http.StatusSeeOther {
+				t.Fatalf("%s: status = %d, want 303 to the one onboarding page (body=%.120q)",
+					route, w.Code, w.Body.String())
+			}
+			if loc := w.Header().Get("Location"); loc != "/" {
+				t.Errorf("%s: Location = %q, want %q", route, loc, "/")
+			}
+			if bodyLooksLikeSPA(w) {
+				t.Errorf("%s: onboarding host delivered the console shell", route)
+			}
+		})
+
+		t.Run("trusted"+route, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			wrappedHandler(t).ServeHTTP(w, browserGet(t, onboard, route, "admin@example.com"))
+			if w.Code != http.StatusSeeOther {
+				t.Fatalf("%s: status = %d, want 303 off the onboarding host", route, w.Code)
+			}
+			if loc := w.Header().Get("Location"); strings.Contains(loc, onboard) {
+				t.Errorf("%s: bounced back onto the onboarding host: %q", route, loc)
+			}
+			if bodyLooksLikeSPA(w) {
+				t.Errorf("%s: onboarding host delivered the console shell to a trusted device", route)
+			}
+		})
+	}
+}
+
+// The redirect to "/" must keep the query, because the query is what tells the
+// SPA which scene to render (?return= after a gate bounce, ?invite=<token> from
+// an invite link, ?recover for account recovery). Dropping it would strand the
+// user on a generic scene — or silently void an invite.
+func TestChromeWrap_OnboardRedirectKeepsTheSceneQuery(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+	w := httptest.NewRecorder()
+	wrappedHandler(t).ServeHTTP(w, onboardGet(onboard, "/workspaces?invite=tok123&return=x", "newbie@example.com"))
+	if got, want := w.Header().Get("Location"), "/?invite=tok123&return=x"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+// A non-document request (fetch/XHR/asset probe) for a path that is not a real
+// file must 404, not fall back to index.html. Otherwise the console shell is
+// still retrievable from the onboarding host — just through a different request
+// shape than a navigation.
+func TestChromeWrap_OnboardDoesNotSmuggleTheShellThroughAnAssetProbe(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+
+	for _, p := range []string{"/workspaces", "/assets/does-not-exist.js", "/some/deep/path"} {
+		r := httptest.NewRequest(http.MethodGet, "https://"+onboard+p, nil)
+		r.Host = onboard
+		r.Header.Set("Accept", "*/*") // not a document navigation
+		r.Header.Set("X-Forwarded-Email", "newbie@example.com")
+		w := httptest.NewRecorder()
+		wrappedHandler(t).ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", p, w.Code)
+		}
+		if bodyLooksLikeSPA(w) {
+			t.Errorf("%s: asset probe got the console shell back", p)
+		}
+	}
+}
+
+// The gate/data APIs and the oauth2 endpoints must keep flowing to the daemon
+// on the onboarding host — they are how an untrusted device becomes trusted, so
+// the path restriction must not catch them.
+func TestChromeWrap_OnboardStillRoutesTheGateAPIs(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+
+	for _, p := range []string{"/bailey/api/gate-state", "/bailey/api/claim", "/2fa-gate/pending-pair", "/oauth2/start"} {
+		r := httptest.NewRequest(http.MethodGet, "https://"+onboard+p, nil)
+		r.Host = onboard
+		r.Header.Set("Accept", "application/json")
+		r.Header.Set("X-Forwarded-Email", "newbie@example.com")
+		w := httptest.NewRecorder()
+		wrappedHandler(t).ServeHTTP(w, r)
+		if w.Header().Get("X-Test-Inner") != "1" {
+			t.Errorf("%s: did not reach the daemon (status=%d, loc=%q)", p, w.Code, w.Header().Get("Location"))
+		}
+	}
+}
+
+// onboardServableAsset decides what the onboarding host may answer directly.
+// "/" is the one page; anything that isn't a real file in the bundle is not
+// servable there (the SPA fallback is what leaked the shell).
+func TestOnboardServableAsset(t *testing.T) {
+	for _, p := range []string{"/", "", "/index.html"} {
+		if !onboardServableAsset(p) {
+			t.Errorf("onboardServableAsset(%q) = false, want true", p)
+		}
+	}
+	for _, p := range []string{"/workspaces", "/assets/nope.js", "/../secret", "/people"} {
+		if onboardServableAsset(p) {
+			t.Errorf("onboardServableAsset(%q) = true, want false", p)
+		}
+	}
+}
+
+// The mode the shell is stamped with is decided by the host that serves it —
+// including through the chrome wrap's inner hostname, which is what the SPA
+// actually sees in window.location (so the SPA must not derive this itself).
+func TestConsoleModeForHost(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+	cases := map[string]string{
+		onboard:                          "onboarding",
+		toInnerHost(onboard):             "onboarding",
+		serverConsoleHost(domain):        "console",
+		"someapp." + domain:              "console",
+		toInnerHost("someapp." + domain): "console",
+	}
+	for host, want := range cases {
+		if got := consoleModeForHost(host); got != want {
+			t.Errorf("consoleModeForHost(%q) = %q, want %q", host, got, want)
+		}
+	}
+}
+
+// injectConsoleMode must always put the statement in the document. The SPA
+// fails CLOSED on a missing meta (consoleMode() in console-app.jsx), so a
+// silent no-op here would take the console down rather than leak it — but it
+// would still be a bug, so both shapes are covered.
+func TestInjectConsoleMode(t *testing.T) {
+	withHead := []byte("<!doctype html><html><head><title>x</title></head><body></body></html>")
+	got := string(injectConsoleMode(withHead, "onboarding"))
+	if !strings.Contains(got, `<meta name="bitswan-console-mode" content="onboarding">`) {
+		t.Errorf("mode meta missing:\n%s", got)
+	}
+	if strings.Index(got, "bitswan-console-mode") > strings.Index(got, "<title>") {
+		t.Error("mode meta must come before the rest of <head>, so it is set before the bundle reads it")
+	}
+	noHead := []byte("<div id=\"root\"></div>")
+	if !strings.Contains(string(injectConsoleMode(noHead, "console")), `content="console"`) {
+		t.Error("injectConsoleMode dropped the statement when there was no <head>")
 	}
 }
 
@@ -242,5 +416,40 @@ func TestNavSyncInjection(t *testing.T) {
 	out2 := string(appendNavSyncToHTML([]byte("plain fragment")))
 	if !strings.Contains(out2, "bailey-nav") {
 		t.Error("nav-sync script not appended to tagless body")
+	}
+}
+
+// The bounce off the onboarding host must not land back on it. The origin
+// cookie that supplies the target is scoped to the whole protected domain — the
+// comment on rememberOrigin says so — which means any sibling app can plant it.
+// Both shapes it can take are covered: an absolute same-site URL naming the
+// onboarding host, and a bare path (which has no host and would therefore
+// resolve against the host we are trying to leave).
+func TestOriginRedirect_NeverReturnsToTheOnboardingHost(t *testing.T) {
+	domain := writeTestConfig(t)
+	onboard := serverConsoleOnboardHost(domain)
+	console := "https://" + serverConsoleHost(domain) + "/"
+
+	if got := safeOriginTarget("https://" + onboard + "/workspaces"); got != console {
+		t.Errorf("safeOriginTarget(onboarding URL) = %q, want the console root %q", got, console)
+	}
+	// A legitimate same-site app target still survives.
+	app := "https://someapp." + domain + "/page"
+	if got := safeOriginTarget(app); got != app {
+		t.Errorf("safeOriginTarget(%q) = %q, want it unchanged", app, got)
+	}
+
+	for _, planted := range []string{"https://" + onboard + "/workspaces", "/workspaces"} {
+		r := onboardGet(onboard, "/", "admin@example.com")
+		r.AddCookie(&http.Cookie{Name: gateOriginCookie, Value: planted})
+		w := httptest.NewRecorder()
+		originRedirect(w, r)
+		loc := w.Header().Get("Location")
+		if strings.Contains(loc, onboard) {
+			t.Errorf("planted %q: bounced back to the onboarding host (%q)", planted, loc)
+		}
+		if !strings.HasPrefix(loc, "https://") {
+			t.Errorf("planted %q: Location = %q, want an absolute URL naming another host", planted, loc)
+		}
 	}
 }
