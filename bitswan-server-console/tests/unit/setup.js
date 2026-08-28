@@ -9,11 +9,28 @@
 // short-circuiting on a null primitive).
 import '@testing-library/react';
 import React from 'react';
-import { afterEach } from 'vitest';
+import { afterEach, beforeEach } from 'vitest';
 import { cleanup } from '@testing-library/react';
 
 // Tear down the DOM between tests so repeated renders don't collide.
 afterEach(() => cleanup());
+
+// The daemon stamps <meta name="bitswan-console-mode" content="…"> into every
+// shell it serves (serveServerConsole → injectConsoleMode), and the SPA fails
+// CLOSED when it is missing or unrecognised — an unidentifiable document gets
+// no console (#403). So the suite has to reproduce the real document: default
+// every test to the console host, and let onboarding-host tests say so.
+export function setConsoleMode(mode) {
+  const existing = document.querySelector('meta[name="bitswan-console-mode"]');
+  if (existing) existing.remove();
+  if (mode === null) return; // caller wants the no-meta case
+  const el = document.createElement('meta');
+  el.setAttribute('name', 'bitswan-console-mode');
+  el.setAttribute('content', mode);
+  document.head.appendChild(el);
+}
+
+beforeEach(() => setConsoleMode('console'));
 
 // Mirror of the real design-system palette (src/shell.jsx). Components read many
 // of these keys; supplying the real values keeps inline-style branches honest.

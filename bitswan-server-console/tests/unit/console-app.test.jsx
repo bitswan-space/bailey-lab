@@ -7,6 +7,7 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { SC_APP, installFetch } from './harness.js';
+import { setConsoleMode } from './setup.js';
 
 const App = SC_APP;
 
@@ -75,10 +76,34 @@ describe('App gate-state scene selection', () => {
     await waitFor(() => expect(screen.getByText('Recover your account')).toBeTruthy());
   });
 
-  it('gate-state error → console with the error banner', async () => {
+  // #403: a gate-state read that fails leaves device trust UNKNOWN. This used
+  // to render the console with an error banner over it — fail-open, and the
+  // reported symptom on the public onboarding host. Unknown must mean no app.
+  it('gate-state error → blocking "can\'t verify" scene, never the console', async () => {
     installFetch({ '/bailey/api/gate-state': { status: 500, json: { error: 'gate down' } } });
     render(<App />);
-    await waitFor(() => expect(screen.getByText(/Couldn't load device-trust state/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Can't verify this device")).toBeTruthy());
+    expect(screen.queryByText('Server overview')).toBeNull();
+    expect(screen.queryByText('Workspaces')).toBeNull();
+  });
+
+  it('gate-state error → retry re-reads gate-state and opens the console', async () => {
+    // Fail once, then succeed: the scene must be recoverable, not a dead end.
+    let calls = 0;
+    const fetchMock = vi.fn(async (url) => {
+      if (String(url).includes('/bailey/api/gate-state')) {
+        calls += 1;
+        if (calls === 1) return { ok: false, status: 500, json: async () => ({ error: 'gate down' }) };
+        return { ok: true, status: 200, json: async () => ({ trusted: true, claimed: true }) };
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    });
+    global.fetch = fetchMock;
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Can't verify this device")).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: /Try again/ }));
+    await waitFor(() => expect(screen.queryByText("Can't verify this device")).toBeNull());
+    expect(calls).toBeGreaterThan(1);
   });
 });
 
@@ -346,5 +371,94 @@ describe('Handbook view links (issue #45)', () => {
     const read = await screen.findByText('Read the handbook');
     expect(read.closest('a').getAttribute('href'))
       .toBe('https://bailey.example.test:8443/handbook/handbook.html');
+  });
+});
+
+// ─── #403: the PUBLIC onboarding host has no console ────────────────────────
+//
+// bailey-onboard.<domain> is reachable without device trust — it is where an
+// untrusted device goes to pair. It must therefore deliver the device-trust
+// scenes and NOTHING else. The reported failure was the /workspaces admin page
+// rendering there (no bottom bar, no data). Two independent rules keep that
+// state unreachable, and both are asserted here:
+//
+//   1. the console component never mounts in onboarding mode, whatever
+//      gate-state says; and
+//   2. an unidentified document (no mode meta) is treated as onboarding, so a
+//      shell that somehow escapes the daemon's injection fails CLOSED.
+describe('#403 onboarding host never renders the console', () => {
+  const { pickScene, consoleMode } = window.SC_HELPERS;
+
+  // LeavingScene latches its single reload in sessionStorage; without a reset
+  // the first hand-off test would leave the latch set for the next one.
+  beforeEach(() => sessionStorage.clear());
+
+  it('pickScene: trusted resolves to leave, not console, in onboarding mode', () => {
+    expect(pickScene({ trusted: true, claimed: true }, false, '', 'onboarding')).toBe('leave');
+    expect(pickScene({ trusted: true, claimed: true }, false, '', 'console')).toBe('console');
+  });
+
+  it('pickScene: an unreadable gate-state is never the console, in either mode', () => {
+    expect(pickScene(null, false, '', 'onboarding')).toBe('unknown');
+    expect(pickScene(null, false, '', 'console')).toBe('unknown');
+  });
+
+  it('pickScene: the pairing scenes still work in onboarding mode', () => {
+    expect(pickScene({ claimed: false, can_claim: true }, false, '', 'onboarding')).toBe('bootstrap');
+    expect(pickScene({ claimed: false, can_claim: false }, false, '', 'onboarding')).toBe('waiting');
+    expect(pickScene({ claimed: true, trusted: false }, false, '', 'onboarding')).toBe('approval');
+    expect(pickScene({ claimed: true, trusted: false }, false, 'tok', 'onboarding')).toBe('invite');
+  });
+
+  it('consoleMode: absent or unrecognised meta fails closed to onboarding', () => {
+    setConsoleMode(null);
+    expect(consoleMode()).toBe('onboarding');
+    setConsoleMode('');
+    expect(consoleMode()).toBe('onboarding');
+    setConsoleMode('CONSOLE-ish');
+    expect(consoleMode()).toBe('onboarding');
+    setConsoleMode('console');
+    expect(consoleMode()).toBe('console');
+    setConsoleMode('onboarding');
+    expect(consoleMode()).toBe('onboarding');
+  });
+
+  it('a trusted device on the onboarding host gets no console surface at all', async () => {
+    setConsoleMode('onboarding');
+    setLocation({ pathname: '/workspaces' });
+    installFetch(fullRoutes()); // gate-state says trusted, every list would load
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('This device is trusted')).toBeTruthy());
+    // None of the console chrome may exist — not the nav, not the admin views.
+    expect(screen.queryByText('Server overview')).toBeNull();
+    expect(screen.queryByText('Workspaces')).toBeNull();
+    expect(screen.queryByText('People & roles')).toBeNull();
+    // It hands off by re-requesting the document; the daemon owns the target.
+    expect(window.location.reload).toHaveBeenCalled();
+  });
+
+  it('the hand-off reloads only once, so a disagreeing daemon cannot loop', async () => {
+    setConsoleMode('onboarding');
+    setLocation({ pathname: '/' });
+    installFetch(fullRoutes());
+    const { unmount } = render(<App />);
+    await waitFor(() => expect(window.location.reload).toHaveBeenCalledTimes(1));
+    unmount();
+    // Second pass = what the browser shows after that reload, if the daemon
+    // served the onboarding shell again instead of bouncing.
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('This device is already set up')).toBeTruthy());
+    expect(window.location.reload).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('Workspaces')).toBeNull();
+  });
+
+  it('an unreadable gate-state on the onboarding host shows no console either', async () => {
+    setConsoleMode('onboarding');
+    setLocation({ pathname: '/workspaces' });
+    installFetch({ '/bailey/api/gate-state': { status: 500, json: { error: 'gate down' } } });
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("Can't verify this device")).toBeTruthy());
+    expect(screen.queryByText('Server overview')).toBeNull();
+    expect(screen.queryByText('Workspaces')).toBeNull();
   });
 });
