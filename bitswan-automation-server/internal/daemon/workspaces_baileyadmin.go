@@ -454,12 +454,30 @@ func recordWorkspaceOwnership(name, domain, email string) []string {
 // outside) and must NOT be the ownership anchor. Legacy --no-dashboard
 // workspaces have no dashboard endpoint, so they fall back to gitops — the only
 // ACL surface they have.
-func workspaceACLHost(workspaceName, domain string) string {
+//
+// The three cases are kept apart, because two of them are answers and one is
+// not:
+//   - the dashboard endpoint EXISTS ⇒ the dashboard host;
+//   - it is genuinely ABSENT ⇒ the gitops host (the documented legacy
+//     --no-dashboard fallback);
+//   - the lookup ERRORED ⇒ no host at all, and the error travels.
+//
+// The error must not be swallowed into the absent case. An unreadable
+// dashboard row that fell through to gitops handed the gitops endpoint's
+// owner a clean `(roleOwner, nil)` on somebody else's workspace: the anchor
+// silently moved to the internal service endpoint this function exists to
+// keep out of the ACL, and because the error was gone the fail-closed guards
+// in workspaceRoleFor's callers had nothing to fail closed on (#337).
+func workspaceACLHost(workspaceName, domain string) (string, error) {
 	dashboardHost := workspaceName + "-dashboard." + domain
-	if ep, _ := getEndpoint(dashboardHost); ep != nil {
-		return dashboardHost
+	ep, err := getEndpoint(dashboardHost)
+	if err != nil {
+		return "", err
 	}
-	return workspaceName + "-gitops." + domain
+	if ep != nil {
+		return dashboardHost, nil
+	}
+	return workspaceName + "-gitops." + domain, nil
 }
 
 // workspaceRoleFor resolves the caller's role on the workspace's ACL endpoint
@@ -470,9 +488,21 @@ func workspaceACLHost(workspaceName, domain string) string {
 // recorded owner_email — a co-owner granted ownership is a real owner.
 // The error is returned, not swallowed: callers that gate VISIBILITY on it
 // must be able to fail closed on a lookup failure rather than treat an
-// unknown role as a grant (#337).
+// unknown role as a grant (#337). That holds for BOTH lookups this needs —
+// resolving which endpoint carries the ACL, and resolving the role on it.
+//
+// An errored resolution never carries roleOwner: roleFor short-circuits an
+// owner with a nil error, so an error can only accompany roleNone or
+// roleAccess. Owner-gates therefore fail closed on the role alone; gates that
+// admit roleAccess — the workspace list, the Updates view — have to read the
+// error, because there the role is real and only the error says the answer is
+// not trustworthy.
 func workspaceRoleFor(workspaceName, domain, email string, groups []string) (endpointRole, error) {
-	return roleFor(workspaceACLHost(workspaceName, domain), email, groups)
+	host, err := workspaceACLHost(workspaceName, domain)
+	if err != nil {
+		return roleNone, err
+	}
+	return roleFor(host, email, groups)
 }
 
 // callerOwnsWorkspace is the auth check for trash + restore + update +
