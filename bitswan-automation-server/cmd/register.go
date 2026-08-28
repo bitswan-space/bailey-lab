@@ -37,6 +37,8 @@ func newRegisterCmd() *cobra.Command {
 	var private bool
 	var privateAddress string
 	var bindAddress string
+	var tlsMode string
+	var certsDir string
 
 	cmd := &cobra.Command{
 		Use:          "register",
@@ -79,6 +81,19 @@ func newRegisterCmd() *cobra.Command {
 			}
 			if bindAddress != "" && net.ParseIP(bindAddress) == nil {
 				return fmt.Errorf("--bind-address %q is not an IP address", bindAddress)
+			}
+			// Reject a bad mode name here rather than after the OTP has been spent:
+			// registration is not re-runnable, so a typo that surfaces late is
+			// expensive out of all proportion to the mistake.
+			if tlsMode != "" {
+				if _, err := daemon.ParseTLSMode(tlsMode); err != nil {
+					return err
+				}
+			}
+			if certsDir != "" && tlsMode == "" {
+				return fmt.Errorf("--certs-dir needs --tls-mode %s: installing a certificate while the "+
+					"server still renews from a CA leaves the installed one shadowing it",
+					daemon.TLSModeManual)
 			}
 
 			// Fail closed by default: a private server that keeps publishing on
@@ -168,6 +183,11 @@ func newRegisterCmd() *cobra.Command {
 			// to serve: stating the address persists it and reconfigures a running
 			// Traefik, so this is the point at which a private server stops
 			// listening on its public interface.
+			// Settle how the ingress listens AND which certificate backend it uses
+			// before it first comes up. Doing the mode afterwards means Traefik
+			// starts on the default and opens an ACME order that a
+			// bring-your-own-certificate server can never complete.
+			var bindPtr, modePtr *string
 			if cmd.Flags().Changed("bind-address") || private {
 				if bindAddress == "" || bindAddress == "0.0.0.0" {
 					fmt.Println("\n🌐 Publishing the ingress on every interface.")
@@ -178,10 +198,17 @@ func newRegisterCmd() *cobra.Command {
 				if addr == "0.0.0.0" {
 					addr = "" // Docker's own "every interface"; keep the compose byte-identical
 				}
-				if _, err := client.InitIngressWithBindAddress(false, addr); err != nil {
-					fmt.Printf("Warning: failed to apply the ingress bind address: %v\n", err)
-					fmt.Println("The ingress may still be published on every interface — re-run with " +
-						"'bitswan ingress init --bind-address <addr>' before exposing this server.")
+				bindPtr = &addr
+			}
+			if tlsMode != "" {
+				fmt.Printf("\n🔑 Certificate mode: %s\n", tlsMode)
+				modePtr = &tlsMode
+			}
+			if bindPtr != nil || modePtr != nil {
+				if _, err := client.InitIngressWith(false, modePtr, bindPtr); err != nil {
+					fmt.Printf("Warning: failed to apply the ingress settings: %v\n", err)
+					fmt.Println("Re-run 'bitswan ingress init' (with --bind-address / 'bitswan ingress tls " +
+						"<mode>') before exposing this server.")
 				}
 			}
 
@@ -239,6 +266,27 @@ func newRegisterCmd() *cobra.Command {
 				// implicitly, that this is a Bailey server rather than a legacy
 				// one). Best-effort: an older AOC without this endpoint must not
 				// fail registration.
+				// The wildcard covers every hostname this server serves, including the
+				// ones the daemon registers for itself — which is why this waits until
+				// the AOC has told us the domain rather than asking the operator for it.
+				if certsDir != "" {
+					fmt.Printf("\n🔑 Installing your certificate for *.%s...\n", serverInfo.Domain)
+					if status, err := client.InstallIngressTLSCert(serverInfo.Domain, "", certsDir); err != nil {
+						fmt.Printf("Warning: failed to install the certificate: %v\n", err)
+						fmt.Printf("   Install it with 'bitswan ingress tls install-cert --domain %s "+
+							"--certs-dir <dir>' — until then this server serves an untrusted certificate.\n",
+							serverInfo.Domain)
+					} else {
+						for _, cert := range status.Certificates {
+							fmt.Printf("   %s — expires %s (%d days), issuer %q\n",
+								cert.Hostname, cert.NotAfter, cert.DaysLeft, cert.Issuer)
+						}
+						for _, warn := range status.Warnings {
+							fmt.Printf("   • %s\n", warn)
+						}
+					}
+				}
+
 				baileyURL := fmt.Sprintf("https://bailey.%s", serverInfo.Domain)
 				fmt.Printf("\n📓 Reporting Bailey console URL to the AOC: %s\n", baileyURL)
 				domainStatus, err := aocClient.ReportBaileyURL(baileyURL, aoc.BaileyURLReport{
@@ -311,6 +359,21 @@ func newRegisterCmd() *cobra.Command {
 				// change to reach INSYNC (live on every Route53 nameserver) before
 				// returning from the Bailey-URL report above, so our first lookup
 				// resolves rather than racing propagation and caching an NXDOMAIN.
+
+				// Don't spend eight minutes proving something already known. When the
+				// mode asks a CA that cannot validate this server — its DNS-01
+				// challenge is unwritable and HTTP-01 needs an inbound route it does
+				// not have — no certificate is coming, and the poll would only
+				// rediscover that slowly.
+				if st, err := client.IngressTLS(); err == nil && st != nil && !st.CanIssueHere {
+					return fmt.Errorf(
+						"registered, but %s cannot obtain a certificate as configured: mode %s asks a CA "+
+							"that cannot validate this server (its DNS-01 challenge is written in a zone the "+
+							"AOC does not manage, and HTTP-01 needs an inbound route from the internet).\n"+
+							"Pick a certificate backend that works here — 'bitswan ingress tls' lists them — "+
+							"then re-run 'bitswan ingress init'",
+						baileyURL, st.Mode)
+				}
 
 				start := time.Now()
 				// Generous ceiling: Let's Encrypt issuance is usually ~2 min but
@@ -405,6 +468,13 @@ func newRegisterCmd() *cobra.Command {
 	cmd.Flags().StringVar(&privateAddress, "private-address", "",
 		"The address clients reach this server on (e.g. the VPN address 10.8.0.7). The AOC publishes "+
 			"this in DNS instead of pointing the record at its relay.")
+	cmd.Flags().StringVar(&tlsMode, "tls-mode", "",
+		"Certificate backend to configure before the ingress starts (see 'bitswan ingress tls'). "+
+			"Set it here when the default cannot issue for your domain, so Traefik never opens an "+
+			"order that can't complete.")
+	cmd.Flags().StringVar(&certsDir, "certs-dir", "",
+		"Directory holding a certificate and key to install for *.<domain>, in any file naming. "+
+			"Requires --tls-mode "+string(daemon.TLSModeManual)+".")
 	cmd.Flags().StringVar(&bindAddress, "bind-address", "",
 		"Publish the ingress (:80/:443) on this host address only. Defaults to --private-address "+
 			"under --private; 0.0.0.0 means every interface.")

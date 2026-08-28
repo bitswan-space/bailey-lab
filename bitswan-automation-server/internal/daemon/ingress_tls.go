@@ -25,6 +25,10 @@ type IngressTLSStatus struct {
 	// certificate. Reported in every mode, because their presence is what decides
 	// whether a mode switch leaves anything behind.
 	InstalledCerts []string `json:"installed_certs,omitempty"`
+	// CanIssueHere is false when the configured mode asks a CA that cannot
+	// validate this server — no certificate is coming, and waiting will not
+	// change that. Callers use it to fail fast instead of polling.
+	CanIssueHere bool `json:"can_issue_here"`
 	// Certificates is the detail behind InstalledCerts: what each one is and when
 	// it expires. Nothing renews these, so the expiry is the operationally
 	// important field.
@@ -75,7 +79,13 @@ func (s *Server) handleIngressTLSInstallCert(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	info, notes, err := installCertificate(hostname, req.CertsDir)
+	certsDir, err := resolveHostPath(req.CertsDir)
+	if err != nil {
+		writeJSONError(w, "certs_dir: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	info, notes, err := installCertificate(hostname, certsDir)
 	if err != nil {
 		// A certificate that cannot serve traffic is a bad request, not a server
 		// error: the operator supplied it and the message says what is wrong with it.
@@ -170,16 +180,8 @@ func (s *Server) setTLSMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Refuse a mode that cannot issue for this server's domain. Storing it would
-	// leave the server in a state where every certificate order fails, and the
-	// operator would meet that as an ACME error minutes later rather than as an
-	// answer to what they just asked for.
-	if mode == TLSModeAOCDNS && getWildcardCertDomain() != "" && !aocManagesDNS() {
-		writeJSONError(w, fmt.Sprintf(
-			"mode %s issues through the AOC's zone, and the AOC does not manage DNS for %s — "+
-				"no challenge for it can succeed. Use %s instead",
-			mode, getWildcardCertDomain(), strings.Join(alternativeTLSModes(mode), " or ")),
-			http.StatusBadRequest)
+	if err := validateTLSModeChoice(mode); err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -209,6 +211,24 @@ func (s *Server) setTLSMode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status)
 }
 
+// validateTLSModeChoice refuses a mode that cannot issue for this server's
+// domain. Storing it would leave the server where every certificate order fails,
+// and the operator would meet that as an ACME error minutes later rather than as
+// an answer to what they just asked for.
+//
+// Shared by the mode endpoint and by the ingress init, which can also carry a
+// mode: the check has to be identical in both, or one route into the same state
+// skips it.
+func validateTLSModeChoice(mode TLSMode) error {
+	if mode == TLSModeAOCDNS && getWildcardCertDomain() != "" && !aocManagesDNS() {
+		return fmt.Errorf(
+			"mode %s issues through the AOC's zone, and the AOC does not manage DNS for %s — "+
+				"no challenge for it can succeed. Use %s instead",
+			mode, getWildcardCertDomain(), strings.Join(alternativeTLSModes(mode), " or "))
+	}
+	return nil
+}
+
 // tlsStatus reports the current certificate mode and anything about it that will
 // surprise an operator.
 func tlsStatus() IngressTLSStatus {
@@ -218,6 +238,7 @@ func tlsStatus() IngressTLSStatus {
 		Description:     TLSModeDescription(mode),
 		Domain:          getWildcardCertDomain(),
 		DNSManagedByAOC: aocManagesDNS(),
+		CanIssueHere:    canObtainCertificate(mode),
 		InstalledCerts:  traefikapi.InstalledCertHostnames(),
 	}
 	if status.Domain != "" && mode.usesACME() && !aocDNSUsable(mode) {

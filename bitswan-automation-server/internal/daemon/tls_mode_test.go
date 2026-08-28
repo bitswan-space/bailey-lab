@@ -356,3 +356,52 @@ func TestReconcileTLSModeWithoutDomainIsANoop(t *testing.T) {
 		t.Errorf("resolver = %q, want it untouched (%q)", got, dnsCertResolverName)
 	}
 }
+
+// TestIngressInitCarriesTheTLSMode: registration settles the mode in the same
+// call that brings the ingress up, so Traefik is created once on the right
+// backend instead of starting on the default and opening an ACME order a
+// bring-your-own-certificate server can never complete.
+func TestIngressInitCarriesTheTLSMode(t *testing.T) {
+	writeTLSModeConfig(t, "")
+	calls := stubIngressReconfigure(t)
+
+	mode := string(TLSModeManual)
+	body, _ := json.Marshal(IngressInitRequest{TLSMode: &mode})
+	s := &Server{}
+	rec := httptest.NewRecorder()
+	s.handleIngressInit(rec, httptest.NewRequest(http.MethodPost, "/ingress/init",
+		strings.NewReader(string(body))))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
+	if got := currentTLSMode(); got != TLSModeManual {
+		t.Errorf("mode = %q, want %q", got, TLSModeManual)
+	}
+	if *calls != 1 {
+		t.Errorf("reconfigure ran %d times, want 1 — a mode change has to be applied, not just stored", *calls)
+	}
+}
+
+// The same validation as the dedicated endpoint: two routes into one state must
+// not disagree about what's allowed.
+func TestIngressInitRejectsAnUnusableMode(t *testing.T) {
+	writeCertConfig(t, string(TLSModeManual), "false", true)
+	calls := stubIngressReconfigure(t)
+	s := &Server{}
+
+	for _, body := range []string{`{"tls_mode":"aoc-dns"}`, `{"tls_mode":"nonsense"}`} {
+		rec := httptest.NewRecorder()
+		s.handleIngressInit(rec, httptest.NewRequest(http.MethodPost, "/ingress/init",
+			strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 (body %q)", body, rec.Code, rec.Body.String())
+		}
+	}
+	if got := currentTLSMode(); got != TLSModeManual {
+		t.Errorf("mode changed to %q on a rejected request", got)
+	}
+	if *calls != 0 {
+		t.Errorf("a rejected mode reconfigured the ingress (%d calls)", *calls)
+	}
+}

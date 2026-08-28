@@ -30,6 +30,13 @@ type IngressInitRequest struct {
 	// every interface. Stating it forces the reconfigure path even when Traefik
 	// is already running, since the point of the call is to change how it binds.
 	BindAddress *string `json:"bind_address,omitempty"`
+	// TLSMode selects the certificate backend as part of the same call. It exists
+	// so registration can settle the mode BEFORE the ingress first comes up:
+	// setting it afterwards means Traefik starts on the default, opens an ACME
+	// order that a bring-your-own-certificate server can never complete, and the
+	// operator meets that as a failure rather than as a choice they already made.
+	// nil leaves the stored mode alone.
+	TLSMode *string `json:"tls_mode,omitempty"`
 }
 
 // IngressInitResponse represents the response from initializing ingress
@@ -235,6 +242,26 @@ func (s *Server) handleIngressInit(w http.ResponseWriter, r *http.Request) {
 	// the container is already up, which would silently accept the new address
 	// and never apply it.
 	forceReconfigure := false
+	if req.TLSMode != nil {
+		mode, err := ParseTLSMode(*req.TLSMode)
+		if err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateTLSModeChoice(mode); err != nil {
+			writeJSONError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg := config.NewAutomationServerConfig()
+		if cfg.GetTLSMode() != string(mode) {
+			if err := cfg.SetTLSMode(string(mode)); err != nil {
+				writeJSONError(w, "failed to persist TLS mode: "+err.Error(),
+					http.StatusInternalServerError)
+				return
+			}
+			forceReconfigure = true
+		}
+	}
 	if req.BindAddress != nil {
 		addr := strings.TrimSpace(*req.BindAddress)
 		if err := validateIngressBindAddress(addr); err != nil {

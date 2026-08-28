@@ -46,6 +46,19 @@ needs a re-register or an explicit mode.
 
 ### Installing your own certificates (`manual`)
 
+The mode and the certificate can be settled during registration, which is the
+order you want: set afterwards, Traefik first comes up on the default, opens an
+ACME order this server can never complete, and registration fails on a timeout
+rather than on a choice you already made.
+
+```
+bitswan register --name … --otp … --server-id … \
+    --tls-mode manual --certs-dir /path/to/certs
+```
+
+`--certs-dir` installs a wildcard for the domain the AOC assigns, so you do not
+have to know the hostnames in advance. On an already-registered server:
+
 ```
 # One wildcard covers everything this server serves:
 bitswan ingress tls manual
@@ -78,6 +91,10 @@ Two things worth knowing:
 
 - A wildcard does not cover the bare domain. If your certificate has no apex SAN,
   the install says so — any route on the domain itself will not be served.
+- Paths are yours, not the daemon's. The CLI runs on the host and the daemon in a
+  container with the host root at `/host`, so an absolute host path is resolved
+  through it automatically. Relative paths are refused — they would resolve
+  against the daemon, not your shell.
 - **Nothing renews these.** `bitswan ingress tls` reports the expiry of every
   installed certificate, the daemon warns at boot within 30 days of expiry, and
   re-running `install-cert` with the replacement is the renewal (Traefik picks it
@@ -97,6 +114,14 @@ alone and reports the trust as *private*. The third property is the one that
 actually detects interception, and it does not depend on who signed anything.
 `register` says plainly that the certificate is not publicly trusted and that
 browsers will warn until the CA is installed on each machine.
+
+And when no certificate can be obtained at all, registration says so at once
+instead of polling. If the mode asks a CA that cannot validate this server — its
+DNS-01 challenge is written in a zone the AOC does not manage, *and* HTTP-01 has
+no inbound route to use — the answer is already known, so the eight-minute wait
+is skipped and the message names the backends that would work. A publicly
+reachable server on an unmanaged domain still waits, because there the per-host
+HTTP-01 fallback genuinely can succeed.
 
 `manual` is for the case `aoc-dns` cannot cover — an internal CA, a corporate
 PKI, or DNS the operator keeps in-house on a provider that cannot be automated.

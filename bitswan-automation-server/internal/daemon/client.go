@@ -842,6 +842,19 @@ func (c *Client) InitIngressWithBindAddress(verbose bool, bindAddress string) (*
 	return c.initIngress(IngressInitRequest{Verbose: verbose, BindAddress: &bindAddress})
 }
 
+// InitIngressWith initializes the ingress, optionally settling the TLS mode and
+// the bind address in the SAME call. Registration uses it so Traefik is created
+// once, already on the right certificate backend, rather than coming up on the
+// default and being reconfigured afterwards. Nil fields leave the stored values
+// alone.
+func (c *Client) InitIngressWith(verbose bool, tlsMode, bindAddress *string) (*IngressInitResponse, error) {
+	return c.initIngress(IngressInitRequest{
+		Verbose:     verbose,
+		TLSMode:     tlsMode,
+		BindAddress: bindAddress,
+	})
+}
+
 func (c *Client) initIngress(reqBody IngressInitRequest) (*IngressInitResponse, error) {
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {

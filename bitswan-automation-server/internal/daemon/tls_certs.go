@@ -306,3 +306,29 @@ func warnAboutInstalledCertExpiry() {
 		}
 	}
 }
+
+// resolveHostPath maps a path the CALLER named onto one the daemon can read.
+//
+// The CLI runs on the host and the daemon runs in a container with the host root
+// bind-mounted at /host, so `--certs-dir /root/certs` means /host/root/certs from
+// in here. Without this, every host path an operator supplies fails as "cannot
+// read" and looks like a typo. Tries the path as given first, so a path that is
+// already container-local (or a test's temp dir) still works.
+func resolveHostPath(p string) (string, error) {
+	if p == "" {
+		return "", fmt.Errorf("no path given")
+	}
+	if _, err := os.Stat(p); err == nil {
+		return p, nil
+	}
+	if !filepath.IsAbs(p) {
+		return "", fmt.Errorf("%s does not exist (relative paths are resolved against the daemon, "+
+			"not your shell — pass an absolute path)", p)
+	}
+	viaHost := filepath.Join("/host", p)
+	if _, err := os.Stat(viaHost); err == nil {
+		return viaHost, nil
+	}
+	return "", fmt.Errorf("%s does not exist (also looked for it at %s, where the daemon sees "+
+		"the host filesystem)", p, viaHost)
+}

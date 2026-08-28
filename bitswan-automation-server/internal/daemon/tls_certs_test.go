@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -441,5 +442,97 @@ func TestInstallTargetHostname(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%+v = %q, want %q", tc.req, got, tc.want)
 		}
+	}
+}
+
+// TestCanObtainCertificate is what lets registration fail fast instead of
+// polling for eight minutes. The false case is narrow on purpose: it is only
+// reached when a CA-backed mode meets a challenge it cannot write AND a server
+// the CA cannot reach.
+func TestCanObtainCertificate(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mode       TLSMode
+		dnsManaged string
+		private    bool
+		want       bool
+	}{
+		{"aoc-dns, managed zone", TLSModeAOCDNS, "true", false, true},
+		{"aoc-dns, managed zone, private", TLSModeAOCDNS, "true", true, true},
+		// Unmanaged zone kills DNS-01, but a publicly reachable server still has
+		// the per-host HTTP-01 fallback.
+		{"aoc-dns, unmanaged, public", TLSModeAOCDNS, "false", false, true},
+		// The corner where nothing works: no writable challenge, no inbound route.
+		{"aoc-dns, unmanaged, private", TLSModeAOCDNS, "false", true, false},
+		// A mode that contacts no CA always can: the operator supplies the cert.
+		{"manual, unmanaged, private", TLSModeManual, "false", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeCertConfig(t, string(tc.mode), tc.dnsManaged, tc.private)
+			if got := canObtainCertificate(tc.mode); got != tc.want {
+				t.Errorf("canObtainCertificate(%s) = %v, want %v", tc.mode, got, tc.want)
+			}
+			// The status surface must agree — that is the field register reads.
+			if got := tlsStatus().CanIssueHere; got != tc.want {
+				t.Errorf("status.CanIssueHere = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// writeCertConfig lays down a config with an explicit mode, dns_managed and
+// private flag.
+func writeCertConfig(t *testing.T, mode, dnsManaged string, private bool) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SUDO_USER", "")
+	dir := filepath.Join(home, ".config", "bitswan")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	privLine := ""
+	if private {
+		privLine = "private = true\nprivate_address = \"10.8.0.7\"\n"
+	}
+	toml := fmt.Sprintf("tls_mode = %q\n[aoc]\naoc_url = \"https://aoc.example.com\"\n"+
+		"automation_server_id = \"test-server\"\naccess_token = \"test-token\"\n"+
+		"domain = \"acme-prod.bswn.io\"\ndns_managed = %s\n%s", mode, dnsManaged, privLine)
+	if err := os.WriteFile(filepath.Join(dir, "automation_server_config.toml"), []byte(toml), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestResolveHostPath: the CLI names paths on the host, the daemon reads them
+// through /host. Without the translation every host path an operator passes
+// looks like a typo.
+func TestResolveHostPath(t *testing.T) {
+	local := t.TempDir()
+	if got, err := resolveHostPath(local); err != nil || got != local {
+		t.Errorf("an existing path should be used as given: %q, %v", got, err)
+	}
+
+	// Simulate the container view: /host/<p> exists while <p> does not.
+	root := t.TempDir()
+	hostRoot := filepath.Join(root, "host")
+	inner := "/definitely/not/on/this/machine"
+	if err := os.MkdirAll(filepath.Join(hostRoot, inner), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// resolveHostPath hardcodes /host, so assert the error path instead of
+	// pretending we can relocate it — and that the message names both places.
+	_, err := resolveHostPath(inner)
+	if err == nil {
+		t.Fatal("a path that exists in neither place must be an error")
+	}
+	if !strings.Contains(err.Error(), "/host") {
+		t.Errorf("the error should say where else it looked: %v", err)
+	}
+
+	if _, err := resolveHostPath("relative/path"); err == nil {
+		t.Error("a relative path must be rejected — it would resolve against the daemon")
+	}
+	if _, err := resolveHostPath(""); err == nil {
+		t.Error("an empty path must be rejected")
 	}
 }

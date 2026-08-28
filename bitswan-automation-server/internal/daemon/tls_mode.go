@@ -116,6 +116,38 @@ func aocManagesDNS() bool {
 	return *settings.DNSManaged
 }
 
+// isPrivateServer reports whether this server declared itself reached over a
+// private network. It matters to the certificate story for one reason: HTTP-01
+// requires the CA to open a connection to the server, which is exactly what a
+// private deployment prevents.
+func isPrivateServer() bool {
+	settings, err := config.NewAutomationServerConfig().GetAutomationOperationsCenterSettings()
+	if err != nil || settings == nil {
+		return false
+	}
+	return settings.Private
+}
+
+// canObtainCertificate reports whether this server can actually get a
+// certificate in the given mode — as opposed to merely being configured to try.
+//
+// Three ways it is true: the mode asks no CA (the operator supplies the
+// certificate), or its DNS-01 challenge can be written, or the server is
+// publicly reachable so the per-host HTTP-01 fallback can complete. It is false
+// only in the corner where all three fail at once: a CA-backed mode, on a domain
+// whose challenge we cannot write, on a server the CA cannot reach. There, no
+// certificate is coming and no amount of waiting changes that — which is worth
+// knowing BEFORE spending eight minutes discovering it.
+func canObtainCertificate(mode TLSMode) bool {
+	if !mode.usesACME() {
+		return true
+	}
+	if aocDNSUsable(mode) {
+		return true
+	}
+	return !isPrivateServer()
+}
+
 // aocDNSUsable reports whether the mode's DNS-01 wildcard is actually obtainable:
 // the mode has to use the AOC bridge AND the AOC has to own the zone the
 // challenge is written into.
