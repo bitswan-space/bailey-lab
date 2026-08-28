@@ -118,9 +118,9 @@ func RestoreWorkspaceFiles(ctx context.Context, ws, snapshotID string) (string, 
 }
 
 // RestoreFilesInPlace restores a workspace's tree onto its LIVE volume path
-// (restic restore --target / --include <wsDir>), the same pattern FetchSnapshot
-// uses. Ownership and modes come from the snapshot — restic preserves them and
-// the daemon runs as root — so no chown pass is needed.
+// (restic restore --target / --include <wsDir>). Ownership and modes come from
+// the snapshot — restic preserves them and the daemon runs as root — so no
+// chown pass is needed.
 //
 // The caller MUST have emptied wsDir first (recovery quarantine-renames it):
 // restic restore merges into an existing tree rather than replacing it, so
