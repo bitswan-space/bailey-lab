@@ -913,7 +913,18 @@ func (c *Client) IngressTLS() (*IngressTLSStatus, error) {
 // reconciled onto the new backend. Long-running for the same reason as
 // InitIngress.
 func (c *Client) SetIngressTLSMode(mode string) (*IngressTLSStatus, error) {
-	bodyBytes, err := json.Marshal(IngressTLSModeRequest{Mode: mode})
+	return c.SetIngressTLSModeWithDNS(mode, "", nil)
+}
+
+// SetIngressTLSModeWithDNS switches the mode and, for custom-dns, configures the
+// provider in the same request so the change is validated as a whole. An empty
+// provider keeps whatever is stored.
+func (c *Client) SetIngressTLSModeWithDNS(mode, dnsProvider string, credentials map[string]string) (*IngressTLSStatus, error) {
+	bodyBytes, err := json.Marshal(IngressTLSModeRequest{
+		Mode:           mode,
+		DNSProvider:    dnsProvider,
+		DNSCredentials: credentials,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}

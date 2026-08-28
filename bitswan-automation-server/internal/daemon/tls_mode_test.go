@@ -98,12 +98,12 @@ func TestCurrentTLSModeRejectsUnknownStoredValue(t *testing.T) {
 }
 
 func TestParseTLSMode(t *testing.T) {
-	for _, in := range []string{"aoc-dns", "AOC-DNS", " manual ", "manual"} {
+	for _, in := range []string{"aoc-dns", "AOC-DNS", " manual ", "manual", "custom-dns"} {
 		if _, err := ParseTLSMode(in); err != nil {
 			t.Errorf("ParseTLSMode(%q) errored: %v", in, err)
 		}
 	}
-	for _, in := range []string{"", "http-01", "custom-dns", "letsencrypt"} {
+	for _, in := range []string{"", "http-01", "letsencrypt", "dns-01"} {
 		if _, err := ParseTLSMode(in); err == nil {
 			t.Errorf("ParseTLSMode(%q) should have been rejected", in)
 		}

@@ -41,6 +41,10 @@ type Config struct {
 	// which every server registered before this option existed relies on.
 	TLSMode string `toml:"tls_mode,omitempty"`
 
+	// TLSDNS configures the DNS-01 challenge when TLSMode is "custom-dns" —
+	// the operator's own DNS provider rather than the AOC's zone.
+	TLSDNS TLSDNSSettings `toml:"tls_dns,omitempty"`
+
 	AutomationOperationsCenter AutomationOperationsCenterSettings `toml:"aoc"`
 	LocalServer                LocalServerSettings                `toml:"local_server"`
 }
@@ -55,6 +59,25 @@ func (c *Config) ProtectedHostnameDomain() string {
 		return c.ProtectedDomain
 	}
 	return c.AutomationOperationsCenter.Domain
+}
+
+// TLSDNSSettings is the operator's own DNS-01 provider: which lego provider to
+// use and the environment it needs.
+//
+// Credentials live here rather than in the daemon's process environment because
+// they have to survive a daemon container being recreated, and because the thing
+// that consumes them is Traefik — the daemon renders them into Traefik's compose
+// file. That file is in the config volume, mode 0600, and IS part of a server
+// backup: a restic snapshot of this server therefore contains these credentials
+// (encrypted with a key that is never escrowed). Scope the DNS provider token to
+// the zone it needs, the way you would any token you hand to an ACME client.
+type TLSDNSSettings struct {
+	// Provider is a lego DNS provider id, e.g. "cloudflare", "route53",
+	// "azuredns" — the value Traefik passes to lego as the challenge provider.
+	Provider string `toml:"provider,omitempty"`
+	// Credentials are the environment variables that provider reads, e.g.
+	// {"CF_DNS_API_TOKEN": "..."}. Rendered verbatim into Traefik's environment.
+	Credentials map[string]string `toml:"credentials,omitempty"`
 }
 
 // LocalServerSettings represents the local automation server daemon settings
@@ -343,6 +366,33 @@ func (m *AutomationServerConfig) SetTLSMode(mode string) error {
 	}
 
 	config.TLSMode = mode
+	return m.SaveConfig(config)
+}
+
+// GetTLSDNS returns the custom DNS-01 provider settings. Never nil-mapped: a
+// caller can read Credentials without a nil check.
+func (m *AutomationServerConfig) GetTLSDNS() TLSDNSSettings {
+	config, err := m.LoadConfig()
+	if err != nil {
+		return TLSDNSSettings{Credentials: map[string]string{}}
+	}
+	settings := config.TLSDNS
+	if settings.Credentials == nil {
+		settings.Credentials = map[string]string{}
+	}
+	return settings
+}
+
+// SetTLSDNS records the custom DNS-01 provider settings. Validation belongs to
+// the caller (the daemon owns what a valid provider/credential looks like).
+func (m *AutomationServerConfig) SetTLSDNS(settings TLSDNSSettings) error {
+	config, err := m.LoadConfig()
+	if err != nil {
+		// If no config exists, create a new one
+		config = &Config{}
+	}
+
+	config.TLSDNS = settings
 	return m.SaveConfig(config)
 }
 

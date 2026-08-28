@@ -128,7 +128,7 @@ func certResolverForHostname(hostname string) (string, []traefikapi.TLSDomain) {
 	// so these hosts fall through to a per-host HTTP-01 certificate — which is
 	// exactly what dns_managed exists to select, and which works on a publicly
 	// reachable server.
-	if aocDNSUsable(mode) {
+	if canIssueWildcard(mode) {
 		if domain := getWildcardCertDomain(); domain != "" && traefikapi.HostCoveredByWildcard(hostname, domain) {
 			return dnsCertResolverName, traefikapi.WildcardTLSDomains(domain)
 		}
