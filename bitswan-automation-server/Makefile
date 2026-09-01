@@ -40,9 +40,13 @@ install: ## install golang binary
 run: ## run the app
 	@go run -ldflags "-X main.version=$(shell git describe --abbrev=0 --tags)"  main.go
 
+# The linters and formatters live in tools/, a module of their OWN, so their
+# dependencies stay out of the automation server's module graph — an image build
+# that only needs `go build` must not fetch seven linters to get there. Nothing
+# imports that module; this is the only thing that reads it.
 .PHONY: bootstrap
-bootstrap: ## install build deps
-	go generate -tags tools tools/tools.go
+bootstrap: ## install build deps (linters/formatters, from the tools module)
+	cd tools && go generate -tags tools tools.go
 
 PHONY: test
 test: clean ## display test coverage
