@@ -426,23 +426,55 @@ function Console({ data, setData, toast, refresh }) {
   );
 }
 
+// consoleMode reports which surface this document is allowed to render, as
+// stated by the server that served it (serveServerConsole stamps
+// <meta name="bitswan-console-mode">). Two values: 'console' (the console host)
+// and 'onboarding' (the PUBLIC bailey-onboard host, which has no console).
+//
+// It reads the server's statement rather than window.location.hostname on
+// purpose: the host→surface mapping is the daemon's to decide, and the SPA runs
+// on a different hostname than it is served from whenever the chrome wrap
+// frames it (foo--inner.<domain>). An absent or unrecognised value means the
+// document did not come from a host we can identify, and the restrictive answer
+// is the only safe one — see the ModeUnknownScene note in App.
+function consoleMode() {
+  try {
+    const el = document.querySelector('meta[name="bitswan-console-mode"]');
+    const v = el ? (el.getAttribute('content') || '').trim() : '';
+    return v === 'console' || v === 'onboarding' ? v : 'onboarding';
+  } catch (e) { return 'onboarding'; }
+}
+
 // pickScene maps a /bailey/api/gate-state response to the scene the SPA should
 // render, per the backend's scene-selection rule. `recoverIntent` is true when
 // the URL carries an explicit recovery entry (?recover); `inviteToken` is the
-// stashed invite token (see getInviteToken). Evaluated in order:
+// stashed invite token (see getInviteToken); `mode` is consoleMode(). Order:
 //   1. recovery intent      → 'recovery'
-//   2. trusted              → 'console' (gate cleared — render the app)
-//   3. invite token + claimed but untrusted → 'invite' (redeem the invite)
-//   4. unclaimed & can_claim → 'bootstrap' (first-admin claim)
-//   5. unclaimed & !can_claim → 'waiting' (claimed by someone else / not eligible)
-//   6. claimed but untrusted → 'approval'
+//   2. gate-state unknown   → 'unknown' (NEVER the console — see below)
+//   3. trusted              → 'console', or 'leave' in onboarding mode
+//   4. invite token + claimed but untrusted → 'invite' (redeem the invite)
+//   5. unclaimed & can_claim → 'bootstrap' (first-admin claim)
+//   6. unclaimed & !can_claim → 'waiting' (claimed by someone else / not eligible)
+//   7. claimed but untrusted → 'approval'
 // An invite on an UNCLAIMED server deliberately falls through to bootstrap/
 // waiting (the backend refuses redemption pre-claim — an invite must never
 // mint the bootstrap device).
-function pickScene(gs, recoverIntent, inviteToken) {
+//
+// Two rules here are load-bearing for #403:
+//
+//   · A missing gate-state used to mean 'console'. That is fail-OPEN: any
+//     transient error on /bailey/api/gate-state rendered the full admin
+//     surface, and on the onboarding host (no chrome wrap, no bottom bar)
+//     that is exactly the reported symptom. Not knowing whether the device is
+//     trusted can only mean "show no app".
+//
+//   · In onboarding mode 'console' is not a reachable value at all. The
+//     onboarding host's job ends the moment the device is trusted, so trust
+//     resolves to 'leave' (bounce off the host) instead of to the app.
+function pickScene(gs, recoverIntent, inviteToken, mode) {
   if (recoverIntent) return 'recovery';
-  if (!gs) return 'console';
-  if (gs.trusted) return 'console';
+  if (!gs) return 'unknown';
+  if (gs.trusted) return mode === 'onboarding' ? 'leave' : 'console';
   if (inviteToken && gs.claimed) return 'invite';
   if (!gs.claimed) return gs.can_claim ? 'bootstrap' : 'waiting';
   return 'approval';
@@ -528,6 +560,87 @@ function WaitingScene() {
         </p>
       </div>
     </div>
+  );
+}
+
+// SceneCard is the shared frame the terminal full-screen messages use (waiting,
+// gate-state unknown, leaving the onboarding host).
+function SceneCard({ icon, title, children, tone }) {
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: AC.surface,
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div style={{ width: 420, maxWidth: '100%', background: '#fff', border: `1px solid ${AC.border}`,
+        borderRadius: 16, boxShadow: '0 20px 50px rgba(0,0,0,0.10)', padding: '30px 30px 26px', textAlign: 'center' }}>
+        <div style={{ width: 52, height: 52, borderRadius: 13, background: tone === 'danger' ? AC.redSoft : AC.surface2,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+          <AIcon name={icon} size={24} color={tone === 'danger' ? AC.red : AC.muted} />
+        </div>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: AC.fg }}>{title}</h1>
+        <div style={{ margin: '8px auto 0', fontSize: 13.5, color: AC.muted, lineHeight: '20px', maxWidth: 340 }}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Shown when /bailey/api/gate-state could not be read. The device's trust
+// status is UNKNOWN, so no app surface may render (#403) — previously this
+// state fell through to the console. Offers a retry; nothing else.
+function GateUnknownScene({ error, onRetry }) {
+  return (
+    <SceneCard icon="shield-alert" title="Can't verify this device" tone="danger">
+      <p style={{ margin: 0 }}>
+        Bailey couldn't read this device's trust status, so it won't open the
+        server console.{error ? ' ' + error : ''}
+      </p>
+      <div style={{ marginTop: 16 }}>
+        <ABtn variant="primary" leftIcon="refresh-cw" onClick={onRetry}>Try again</ABtn>
+      </div>
+    </SceneCard>
+  );
+}
+
+// LEAVING_LATCH guards the one reload LeavingScene performs. Without it a
+// disagreement between gate-state ("trusted") and the daemon's cookie check
+// ("not trusted") would reload forever; with it we reload once and then say
+// what happened instead of spinning.
+const LEAVING_LATCH = 'bailey_onboard_leave_attempted';
+
+// The onboarding host's job is finished: this device is trusted, so it must not
+// linger on the PUBLIC host (which carries no chrome wrap and no console). We
+// re-request the document; the daemon answers a trusted device on this host with
+// a 303 to the saved origin, else the console host (chromeWrapMiddleware). The
+// server owns that decision, so the client deliberately doesn't compute a target.
+function LeavingScene() {
+  const [stuck, setStuck] = useA(false);
+  useAE(() => {
+    let attempted = false;
+    try { attempted = sessionStorage.getItem(LEAVING_LATCH) === '1'; } catch (e) { /* storage unavailable */ }
+    if (attempted) {
+      try { sessionStorage.removeItem(LEAVING_LATCH); } catch (e) { /* noop */ }
+      setStuck(true);
+      return;
+    }
+    try { sessionStorage.setItem(LEAVING_LATCH, '1'); } catch (e) { /* noop */ }
+    window.location.reload();
+  }, []);
+
+  if (stuck) {
+    return (
+      <SceneCard icon="shield-alert" title="This device is already set up" tone="danger">
+        <p style={{ margin: 0 }}>
+          Device setup is complete, but this page couldn't hand you on to the
+          server console. Open the console directly from your Bailey server's
+          address.
+        </p>
+      </SceneCard>
+    );
+  }
+  return (
+    <SceneCard icon="check" title="This device is trusted">
+      <p style={{ margin: 0 }}>Taking you to your server…</p>
+    </SceneCard>
   );
 }
 
@@ -761,7 +874,9 @@ function App() {
   const recoverIntent = hasRecoverIntent();
   const [inviteToken, setInviteToken] = useA(getInviteToken);
   const dropInviteToken = () => { clearInviteToken(); setInviteToken(''); };
-  const scene = pickScene(gate.state, recoverIntent, inviteToken);
+  // Which surface this document may render, per the serving host (#403).
+  const mode = consoleMode();
+  const scene = pickScene(gate.state, recoverIntent, inviteToken, mode);
 
   // A trusted user with a stale invite token (e.g. clicked the link again
   // after the device was already trusted) just lands in the console — drop
@@ -843,15 +958,24 @@ function App() {
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-      {/* opts must be forwarded — a view polling on its own needs
+      {/* The console mounts ONLY in the console scene. It used to render
+          unconditionally, with the gate scenes as full-screen overlays on top —
+          so any state that produced no overlay (a failed gate-state read) left
+          the bare admin surface on screen, including on the PUBLIC onboarding
+          host (#403). The gate decides whether the app exists, not what covers it.
+          opts must be forwarded — a view polling on its own needs
           { background: true } to refetch without the loading flicker. */}
-      <Console data={data} setData={setData} toast={showToast} refresh={(w, opts) => refresh.current(w, opts)} />
-      {gate.status === 'error' && (
+      {scene === 'console' && (
+        <Console data={data} setData={setData} toast={showToast} refresh={(w, opts) => refresh.current(w, opts)} />
+      )}
+      {gate.status === 'error' && scene !== 'unknown' && (
         <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, padding: '10px 16px', background: AC.red,
           color: '#fff', fontSize: 12.5, textAlign: 'center', zIndex: 90 }}>
           Couldn't load device-trust state: {gate.error}
         </div>
       )}
+      {scene === 'unknown' && <GateUnknownScene error={gate.error} onRetry={reloadGate} />}
+      {scene === 'leave' && <LeavingScene />}
       {scene === 'waiting' && <WaitingScene />}
       {scene === 'bootstrap' && <BootstrapScene
         onClaim={() => { showToast('Server claimed — you are the root admin', 'success'); reloadGate(); }} />}
@@ -875,4 +999,4 @@ function App() {
 // main.jsx owns mounting (so window.lucide is configured before first render).
 window.SC_APP = App;
 // Published for the views (real server host, not a seeded label) + tests.
-window.SC_HELPERS = { serverHost, pickScene, initialData, getInviteToken, clearInviteToken };
+window.SC_HELPERS = { serverHost, pickScene, consoleMode, initialData, getInviteToken, clearInviteToken };

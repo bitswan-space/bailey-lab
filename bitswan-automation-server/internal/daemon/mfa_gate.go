@@ -274,6 +274,15 @@ func safeOriginTarget(target string) string {
 	if d == "" || (h != d && !strings.HasSuffix(h, "."+d)) {
 		return fallback
 	}
+	// The onboarding host is same-site, so the check above accepts it — but it
+	// is never a legitimate destination. It is the host users are bounced OFF
+	// once they are trusted, and the cookie that carries this target is scoped
+	// to the whole protected domain, so any sibling app can plant it: a planted
+	// onboarding target would bounce a trusted device straight back to the
+	// host that just rejected it (#403).
+	if strings.EqualFold(h, serverConsoleOnboardHost(dom)) {
+		return fallback
+	}
 	return target
 }
 
@@ -285,6 +294,15 @@ func originRedirect(w http.ResponseWriter, r *http.Request) {
 		target = c.Value
 	}
 	target = safeOriginTarget(target)
+	// A bare path can't name a host, so it resolves against the host we are on.
+	// That is fine everywhere except the onboarding host, where the whole point
+	// of this redirect is to LEAVE — a relative target would keep the trusted
+	// device on the host that must never show it the console (#403).
+	if onOnboardHost(r) && strings.HasPrefix(target, "/") {
+		if dom := protectedHostnameDomain(); dom != "" {
+			target = "https://" + serverConsoleHost(dom) + target
+		}
+	}
 	http.SetCookie(w, &http.Cookie{Name: gateOriginCookie, Value: "", Path: "/", MaxAge: -1})
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
