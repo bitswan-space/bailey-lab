@@ -5,6 +5,9 @@
 FROM golang:1.25-bookworm AS bitswan-builder
 WORKDIR /src
 COPY bitswan-automation-server/go.mod bitswan-automation-server/go.sum ./
+# Fetch through the shared read-through module proxy when the builder passes one
+# (see build-dev-images.sh). Unset = Go's default, so a plain build is unchanged.
+ARG GOPROXY
 RUN go mod download
 COPY bitswan-automation-server/ ./
 RUN CGO_ENABLED=0 go build -ldflags "-w -s" -o /out/bitswan .

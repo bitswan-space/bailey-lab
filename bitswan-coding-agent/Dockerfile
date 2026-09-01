@@ -3,6 +3,9 @@ FROM golang:1.24-bookworm AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
+# Fetch through the shared read-through module proxy when one is passed in
+# (build-dev-images.sh); unset = Go's default.
+ARG GOPROXY
 RUN go mod tidy && go mod download
 
 COPY . .

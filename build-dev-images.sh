@@ -70,6 +70,23 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
+# Route the module/package fetches through the shared read-through proxies when
+# the caller has them running (the E2E bring-up and a Bailey server both do).
+# These images each start with `go mod download`, which otherwise goes straight
+# to proxy.golang.org on every build — slow, and dead in the water when that
+# proxy has a bad day. Opt-in: with the vars unset the array is empty and the
+# build is exactly what it was, so a plain `./build-dev-images.sh` on a laptop
+# is unchanged.
+#
+# The build needs to be ON the proxy network to resolve the container name, so
+# BITSWAN_BUILD_NETWORK and BITSWAN_GOPROXY are set together or not at all.
+PROXY_ARGS=()
+if [ -n "${BITSWAN_GOPROXY:-}" ] && [ -n "${BITSWAN_BUILD_NETWORK:-}" ]; then
+	PROXY_ARGS=(--network "$BITSWAN_BUILD_NETWORK" --build-arg "GOPROXY=$BITSWAN_GOPROXY")
+	[ -n "${BITSWAN_NPM_REGISTRY:-}" ] && PROXY_ARGS+=(--build-arg "NPM_CONFIG_REGISTRY=$BITSWAN_NPM_REGISTRY")
+	echo "Routing builds through $BITSWAN_GOPROXY on network $BITSWAN_BUILD_NETWORK"
+fi
+
 LOGDIR="$(mktemp -d)"
 declare -A PIDS
 ORDER=()
@@ -80,7 +97,7 @@ for entry in "${BUILDS[@]}"; do
 		SKIPPED+=("$name")
 		continue
 	fi
-	docker build -t "$tag" -f "$dockerfile" "$context" >"$LOGDIR/$name.log" 2>&1 &
+	docker build "${PROXY_ARGS[@]}" -t "$tag" -f "$dockerfile" "$context" >"$LOGDIR/$name.log" 2>&1 &
 	PIDS[$name]=$!
 	ORDER+=("$name")
 done
