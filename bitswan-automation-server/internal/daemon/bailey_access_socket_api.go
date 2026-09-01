@@ -10,9 +10,13 @@ import (
 // `bitswan bailey access` CLI. Like the device-trust API in
 // bailey_devices_socket_api.go, these handlers live ONLY on the daemon's
 // Unix-socket mux (setupRoutes) behind authMiddleware — never on the public
-// gate mux. Granting arbitrary access is deliberately an operator-only
-// capability: reaching the socket implies root on the host. The browser
-// share UI stays least-privileged (an owner can only approve pending
+// gate mux. Reading or changing an endpoint's ACL is deliberately an
+// operator-only capability, and since the socket is mounted into first-party
+// workspace containers that is enforced by the admin token, not by socket
+// reachability: all three handlers gate on callerAdminPrincipal /
+// callerHasAdminToken (#189 for grant/revoke, #234 for list). See
+// socketPrivilegedRoutes in server.go for the full operator-only set. The
+// browser share UI stays least-privileged (an owner can only approve pending
 // requests for endpoints they already own); blanket grants are not exposed
 // there. The daemon is also the only process with the bailey.db volume
 // mounted, so it is the one place the live ACL can be edited.
@@ -156,6 +160,17 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAccessList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// #234: the read side of the same capability #189 gated. An endpoint's full
+	// grant list plus its owner address is reconnaissance for picking a target,
+	// and it was readable by exactly the population of first-party containers
+	// that motivated gating the mutations. The only caller is the host CLI
+	// (Client.ListAccess), which always sends its bearer token, so the gate is
+	// transparent to the operator flow; no in-cluster consumer reads this route
+	// (gitops uses /bailey/role, /memory/admit and /ingress/* only).
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "listing endpoint access requires the automation-server admin token (run the bitswan CLI on the host, or pass the daemon token as a bearer token)", http.StatusForbidden)
 		return
 	}
 	host := strings.TrimSpace(r.URL.Query().Get("host"))
