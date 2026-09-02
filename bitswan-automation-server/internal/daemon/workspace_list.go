@@ -12,6 +12,20 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/ssh"
 )
 
+// workspaceInventory is the workspace list the ACL-filtered views start from
+// (the accessible-workspaces list, the admin Updates view and the endpoints
+// page's workspace grouping). It is a var so tests can install a fixed
+// inventory: the real implementation walks ~/.config/bitswan/workspaces on the
+// machine, which under test is empty, and a view whose loop never runs cannot
+// prove anything about what it lists or withholds (#367).
+//
+// Only READ views use this seam. syncWorkspaceListToAOC deliberately keeps
+// calling GetWorkspaceList directly: AOC deletes every workspace the list
+// omits, so that caller must always see the real machine, never a fake.
+var workspaceInventory = func() (*WorkspaceListResponse, error) {
+	return GetWorkspaceList(false, false)
+}
+
 // GetWorkspaceList returns a list of workspaces with optional detailed information
 func GetWorkspaceList(long, showPasswords bool) (*WorkspaceListResponse, error) {
 	// Use HOME for file operations (works inside container and outside)
