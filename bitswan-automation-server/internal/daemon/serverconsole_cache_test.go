@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // The console's caching has to answer two different questions, because it
@@ -244,5 +245,60 @@ func TestConsoleCache_ShellETagCoversTheConsoleMode(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `content="console"`) {
 		t.Error("cross-mode revalidation did not send the console shell")
+	}
+}
+
+// The shell also declares which handbook artifacts the build carries, and that
+// varies between builds of the same source (a release bakes HTML + PDF; any
+// other build generates HTML only — see the handbook-stub make target). So it
+// must be inside the ETag too, or a browser could be handed a 304 that leaves
+// the wrong set of handbook links on screen.
+func TestConsoleCache_ShellETagCoversTheHandbookFormats(t *testing.T) {
+	writeTestConfig(t)
+	saved := serverConsoleRoot
+	t.Cleanup(func() { serverConsoleRoot = saved })
+
+	raw := []byte("<!doctype html><html><head></head><body></body></html>")
+	req := func() *http.Request {
+		return httptest.NewRequest(http.MethodGet, "https://bailey.example.com/", nil)
+	}
+	shell := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		writeConsoleShell(w, req(), raw, "console")
+		return w
+	}
+
+	// A release build: HTML + PDF baked in.
+	serverConsoleRoot = fstest.MapFS{
+		"handbook/handbook.html": {Data: []byte("<html>doc</html>")},
+		"handbook/handbook.pdf":  {Data: []byte("%PDF-fake")},
+	}
+	full := shell()
+	// The same source built without the baked handbook: HTML only.
+	serverConsoleRoot = fstest.MapFS{
+		"handbook/handbook.html": {Data: []byte("<html>doc</html>")},
+	}
+	stub := shell()
+
+	if full.Header().Get("ETag") == stub.Header().Get("ETag") {
+		t.Fatal("a build with a PDF and one without share an ETag; a 304 could serve the wrong handbook links")
+	}
+	if !strings.Contains(full.Body.String(), `content="html,pdf"`) {
+		t.Errorf("full build did not declare both formats: %s", full.Body.String())
+	}
+	if !strings.Contains(stub.Body.String(), `content="html"`) {
+		t.Errorf("stub build did not declare html only: %s", stub.Body.String())
+	}
+
+	// Revalidating with the other build's tag must return this build's document.
+	r := req()
+	r.Header.Set("If-None-Match", full.Header().Get("ETag"))
+	w := httptest.NewRecorder()
+	writeConsoleShell(w, r, raw, "console")
+	if w.Code != http.StatusOK {
+		t.Fatalf("cross-build revalidation = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), `content="html"`) {
+		t.Error("cross-build revalidation did not send this build's formats")
 	}
 }
