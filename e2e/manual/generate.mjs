@@ -53,7 +53,13 @@ function loadShotsMap() {
 function attachShots(manual, shots) {
   const slotShot = (slot) => {
     const file = shots[slot.id];
-    return { label: slot.label, caption: slot.caption, dark: !!slot.dark, dataUri: file ? dataUriFor(file) : null };
+    // afterPara is passed through so a slot can declare which sell paragraph it
+    // belongs beneath (see renderChapter); omitted slots keep the tail layout.
+    return {
+      label: slot.label, caption: slot.caption, dark: !!slot.dark,
+      dataUri: file ? dataUriFor(file) : null,
+      ...(Number.isInteger(slot.afterPara) ? { afterPara: slot.afterPara } : {}),
+    };
   };
   return {
     ...manual,

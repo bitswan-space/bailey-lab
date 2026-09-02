@@ -12,10 +12,12 @@ export interface ViewingBannerProps {
 }
 
 /**
- * Awareness banner for looking at someone else's work: it says whose copy
+ * Awareness banner for working in someone else's copy: it says whose copy
  * you're in and offers one click back to your own. It does NOT gate anything
- * — a colleague's copy stays fully usable; the point is that you can't
- * mistake it for yours.
+ * — you can change a colleague's copy exactly as you can your own — so the
+ * banner names the copy your edits are landing in. It deliberately does not
+ * say "viewing": that would promise read-only, and the write that follows
+ * would be the very mistake this banner exists to prevent.
  */
 export function ViewingBanner({ copy, onSwitchBack }: ViewingBannerProps) {
   const isExperiment = copy.kind === 'experiment';
@@ -31,11 +33,14 @@ export function ViewingBanner({ copy, onSwitchBack }: ViewingBannerProps) {
   const what = isExperiment
     ? `${who}'s experiment "${copy.title ?? copy.name}"`
     : `${who}'s copy`;
+  // Name where the edits land, not just where you are: nothing is gated here,
+  // so the banner must not imply otherwise.
+  const where = isExperiment ? 'experiment' : 'copy';
 
   return (
     <div className="flex shrink-0 items-center gap-3 border-b border-amber-300 bg-amber-50 px-6 py-2 text-[13px] text-amber-900">
       <Eye className="size-4 shrink-0 text-amber-700" aria-hidden />
-      <span className="min-w-0 flex-1 truncate">{`You are viewing ${what}`}</span>
+      <span className="min-w-0 flex-1 truncate">{`You are in ${what} — your edits save to their ${where}`}</span>
       {onSwitchBack && (
         <Button
           size="sm"

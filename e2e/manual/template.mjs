@@ -209,6 +209,15 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
      header stays with its first rows) so a long chapter fills the foot of its
      page and continues, rather than jumping the whole card to a half-empty page. */
   .shot, .two, .howto, .callout, .specs, .scorecard, .std li, .std-h, .guide table tr{ break-inside:avoid }
+  /* Interleaved chapters pair a SHORT run of prose with the How-to box, so the
+     grid no longer has a tall text column to absorb the page break — and a
+     10-step How-to in the narrow .9fr column is taller than break-inside:avoid
+     can honour, which split the box mid-list (step 10 alone on the next sheet).
+     In print only, stack that one block so How-to spans the full width (roughly
+     half the height) and let the CONTAINER break: the box's own avoid then moves
+     it whole instead of being overridden. Screen layout is untouched. */
+  .two.interleaved{ display:block; break-inside:auto }
+  .two.interleaved .howto{ margin-top:18px }
   .std-h{ break-after:avoid }
   .runfoot{ break-before:avoid }
   p{ orphans:2; widows:2 }
@@ -358,12 +367,64 @@ function renderToc(m) {
 
 function renderChapter(ch, idx) {
   const num = ch.num || String(idx + 1).padStart(2, '0');
-  const shots = (ch.shots || []).map(renderShot);
+
+  // A shot may declare `afterPara: N` to sit directly beneath sell paragraph N
+  // (0-based) instead of being dumped after the whole chapter. It is explicit
+  // per shot rather than inferred from position, because which paragraph a
+  // capture belongs to is a fact about the capture, not something a rule can
+  // guess: ch5's merge/adopt shots each illustrate one specific paragraph.
+  // Chapters that declare none keep the original lead-plus-tail layout.
+  const all = (ch.shots || []).map((sh) => ({
+    html: renderShot(sh),
+    afterPara: Number.isInteger(sh.afterPara) ? sh.afterPara : null,
+  }));
+  const placed = all.filter((sh) => sh.afterPara !== null);
+  const shots = all.filter((sh) => sh.afterPara === null).map((sh) => sh.html);
   const leadShot = shots.shift() || '';
-  const sell = (ch.sell || []).map((p) => `<p>${p}</p>`).join('');
+
+  const paras = ch.sell || [];
   const steps = (ch.steps || []).map((t, i) => `<div class="step"><div class="s">${i + 1}</div><div class="t">${t}</div></div>`).join('');
   const howto = steps ? `<div class="howto"><h4>${esc(ch.howtoTitle || 'How to')}</h4>${steps}</div>` : '';
-  const two = (sell || howto) ? `<div class="two"><div class="selltext">${sell}</div>${howto}</div>` : '';
+
+  let two;
+  if (placed.length === 0) {
+    // Unchanged path: all prose in one two-column block beside "How to".
+    const sell = paras.map((p) => `<p>${p}</p>`).join('');
+    two = (sell || howto) ? `<div class="two"><div class="selltext">${sell}</div>${howto}</div>` : '';
+  } else {
+    // Interleaved: a full-width shot cannot live inside the `.two` grid without
+    // breaking the text/How-to pairing, so the chapter becomes a sequence of
+    // blocks. "How to" stays paired with the first block, where it has always
+    // been; every later run of paragraphs is full-width prose.
+    const byPara = new Map();
+    for (const sh of placed) {
+      if (!byPara.has(sh.afterPara)) byPara.set(sh.afterPara, []);
+      byPara.get(sh.afterPara).push(sh.html);
+    }
+    const blocks = [];
+    let run = [];
+    let first = true;
+    const flush = () => {
+      if (run.length === 0) return;
+      const sell = run.map((p) => `<p>${p}</p>`).join('');
+      blocks.push(first
+        ? `<div class="two interleaved"><div class="selltext">${sell}</div>${howto}</div>`
+        : `<div class="selltext">${sell}</div>`);
+      first = false;
+      run = [];
+    };
+    paras.forEach((p, i) => {
+      run.push(p);
+      if (byPara.has(i)) {
+        flush();
+        blocks.push(byPara.get(i).join(''));
+      }
+    });
+    flush();
+    // A chapter with only shots and a How-to still needs the How-to rendered.
+    if (blocks.length === 0 && howto) blocks.push(`<div class="two interleaved"><div class="selltext"></div>${howto}</div>`);
+    two = blocks.join('');
+  }
   const callout = ch.callout ? `<div class="callout"><span class="c-k">${esc(ch.callout.kind || 'Why it matters')}</span><p>${ch.callout.text}</p></div>` : '';
   const specs = (ch.specs && ch.specs.length) ? `<div class="specs">${ch.specs.map((s) => `<div class="spec"><div class="v">${s.v}</div><div class="l">${esc(s.l)}</div></div>`).join('')}</div>` : '';
   const extraShots = shots.join('');
