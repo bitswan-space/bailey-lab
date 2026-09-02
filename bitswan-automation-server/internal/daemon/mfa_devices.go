@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 )
@@ -92,6 +94,47 @@ func removeDevice(email, id string) error {
 		_ = recordEvent(email, auditDeviceRevoke, id)
 	}
 	return err
+}
+
+// deviceNameMaxLen bounds a device name. It is a label in a list, not a
+// document; the cap keeps one device from pushing the others off the row and
+// keeps the audit log readable.
+const deviceNameMaxLen = 60
+
+// validDeviceName normalises and checks a user-supplied device name. Returns
+// the name to store, or an error explaining what to fix.
+//
+// The default name is derived from the User-Agent (deviceNameFromRequest), so
+// this is the one place a person's own words enter the device list — and that
+// list is rendered in the console and echoed into the audit log. Control
+// characters are rejected rather than stripped: silently storing something
+// other than what was typed is how a name stops matching what the person
+// believes they set, which defeats the point of naming a device you may have
+// to revoke in a hurry.
+func validDeviceName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("name required")
+	}
+	if utf8.RuneCountInString(name) > deviceNameMaxLen {
+		return "", fmt.Errorf("name must be at most %d characters", deviceNameMaxLen)
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return "", fmt.Errorf("name must not contain control characters")
+		}
+	}
+	return name, nil
+}
+
+// renameDevice gives one of the caller's own devices a new display name.
+// Reports false when no such device belongs to this caller.
+func renameDevice(email, id, name string) (bool, error) {
+	ok, err := dbRenameDevice(email, id, name)
+	if err == nil && ok {
+		_ = recordEvent(email, auditDeviceRename, id)
+	}
+	return ok, err
 }
 func findDevice(email, id string) (*deviceRecord, error) { return dbFindDevice(email, id) }
 func touchDevice(email, id string)                       { dbTouchDevice(email, id) }

@@ -197,6 +197,7 @@ function adaptOverview(o) {
 const ACTIVITY_KINDS = {
   'device.approve':   { icon: 'shield-check', tone: 'success', verb: 'approved a device for' },
   'device.revoke':    { icon: 'user-x',       tone: 'danger',  verb: 'revoked a device for' },
+  'device.rename':    { icon: 'pencil',       tone: 'neutral', verb: 'renamed a device for' },
   'totp.enrol':       { icon: 'key-round',    tone: 'warning', verb: 'enrolled an authenticator' },
   'server.claim':     { icon: 'flag',         tone: 'primary', verb: 'claimed this server' },
   // target = "<from> → <to>" (or "rolled back <from> → <to>"); see the daemon's
