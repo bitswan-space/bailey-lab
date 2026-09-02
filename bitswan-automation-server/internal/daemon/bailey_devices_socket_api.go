@@ -9,10 +9,13 @@ import (
 
 // Socket-side admin API for Bailey device-trust, backing the
 // `bitswan bailey devices` CLI. These handlers are mounted on the daemon's
-// Unix-socket mux (setupRoutes) behind authMiddleware. Reaching that socket
-// already implies operator/root trust on the host, so — unlike the browser
-// approveHandler in mfa_pair.go — they do NOT require the caller to present an
-// already-trusted device. The daemon container is also the one process with
+// Unix-socket mux (setupRoutes) behind authMiddleware. Unlike the browser
+// approveHandler in mfa_pair.go they do NOT require the caller to present an
+// already-trusted device — but socket reachability is NOT the authority either:
+// the socket is mounted into first-party workspace containers, so both handlers
+// require the admin token on top of authMiddleware (#189 for the approve,
+// #234 for the pending list). See socketPrivilegedRoutes in server.go for the
+// full operator-only set. The daemon container is also the one process with
 // the bailey.db volume mounted, so it is the only place that sees the live
 // device store (the host's stale ~/.config/bitswan/bailey.db is a different
 // file and must never be touched directly).
@@ -100,6 +103,22 @@ type PendingDevice struct {
 func (s *Server) handleDevicesPending(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// #234: this response carries each pending request's 6-digit Code — a
+	// short-lived shared secret, and precisely the input an approval takes. #189
+	// gated USING an approval but left the codes readable by any socket peer, so
+	// a first-party container could still enumerate them; gate the read too, so
+	// no future gap in the approval path comes with the guessing step removed.
+	//
+	// Gated whole rather than redacting Code: the operator listing codes to
+	// approve one is the only caller (the host CLI's Client.ListPendingDevices,
+	// which always sends its bearer token), so a redacted response would serve
+	// nobody while quietly returning less than it appears to. Availability is
+	// unchanged — handleDeviceApprove already requires the same token, so a
+	// caller that cannot pass this gate could not have used the codes anyway.
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "listing pending device requests requires the automation-server admin token (run the bitswan CLI on the host, or pass the daemon token as a bearer token)", http.StatusForbidden)
 		return
 	}
 	_ = dbPurgeExpiredPendingPairs()

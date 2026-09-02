@@ -135,6 +135,46 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// socketPrivilegedRoutes is the operator-only set of the Unix-socket mux: the
+// routes whose handler requires the automation-server admin token *on top of*
+// authMiddleware, and must answer 403 to a socket peer that presents none.
+//
+// It exists because authMiddleware's original premise — "reaching the socket
+// implies operator/root trust on the host" — stopped holding once the socket was
+// mounted into first-party workspace containers. #128, #189 and #234 are that
+// same premise failing in three different handlers. Most routes on this mux are
+// *deliberately* open to those containers (socketWorkspaceCallableRoutes below),
+// so there is no blanket "socket handlers need the token" invariant to assert;
+// which side a route falls on is a real per-route decision, and this is where it
+// is written down instead of being re-derived from each handler.
+//
+// TestSocketPrivilegedRoutes drives every entry unauthenticated and requires a
+// 403, and checks each path still resolves on the mux setupRoutes builds.
+var socketPrivilegedRoutes = []string{
+	"/bailey/devices/approve", // #189: minting device trust
+	"/bailey/devices/pending", // #234: the live 6-digit approval codes
+	"/bailey/access/grant",    // #189: ACL mutation
+	"/bailey/access/revoke",   // #189: ACL mutation
+	"/bailey/access/list",     // #234: an endpoint's ACL + owner address
+}
+
+// socketWorkspaceCallableRoutes is the counterpart: socket routes that a
+// first-party workspace container (gitops, infra-driver) legitimately calls with
+// no bearer token, and which therefore must NOT be gated on the admin token.
+// Listed so the split is explicit — adding an admin-token gate to one of these
+// breaks a live caller, and the comment names it.
+//
+// NOTE: this is a declaration, not an enumeration of the mux — net/http gives no
+// way to list the patterns registered on a ServeMux, so a NEW route added to
+// setupRoutes without being classified here cannot be caught by a test. Wiring
+// setupRoutes from this data so the classification is unskippable is the
+// remaining half of the #226 review's mux note, and a wider change than #234.
+var socketWorkspaceCallableRoutes = []string{
+	"/bailey/role",  // gitops resolves a user's effectiveRole (utils.py)
+	"/memory/admit", // gitops gates a promote against the reserved budget
+	"/ingress",      // gitops adds/repoints/removes routes
+}
+
 // setupRoutes configures the HTTP routes
 func (s *Server) setupRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -212,9 +252,11 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// additionally demands the admin token — see backup_api.go).
 	mux.HandleFunc("/backup/", s.authMiddleware(s.handleBackup))
 
-	// Bailey device-trust admin (authenticated; socket-trusted). Backs the
-	// `bitswan bailey devices` CLI — approve a pending "trust this device"
-	// request by code, or list the pending requests.
+	// Bailey device-trust admin. Backs the `bitswan bailey devices` CLI —
+	// approve a pending "trust this device" request by code, or list the
+	// pending requests. Operator-only: BOTH handlers require the admin token
+	// on top of authMiddleware (socketPrivilegedRoutes), because the socket is
+	// reachable by first-party workspace containers.
 	mux.HandleFunc("/bailey/devices/approve", s.authMiddleware(s.handleDeviceApprove))
 	mux.HandleFunc("/bailey/devices/pending", s.authMiddleware(s.handleDevicesPending))
 
@@ -233,9 +275,11 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// promote against the reserved budget before deploying.
 	mux.HandleFunc("/memory/admit", s.authMiddleware(s.handleMemoryAdmit))
 
-	// Bailey endpoint access grants (authenticated; socket-trusted, CLI-only —
-	// deliberately not exposed on the public gate mux to keep the share UI
-	// least-privileged). Backs `bitswan bailey access {grant,revoke,list}`.
+	// Bailey endpoint access grants (CLI-only — deliberately not exposed on the
+	// public gate mux to keep the share UI least-privileged). Backs
+	// `bitswan bailey access {grant,revoke,list}`. Operator-only: all three
+	// handlers require the admin token on top of authMiddleware
+	// (socketPrivilegedRoutes).
 	mux.HandleFunc("/bailey/access/grant", s.authMiddleware(s.handleAccessGrant))
 	mux.HandleFunc("/bailey/access/revoke", s.authMiddleware(s.handleAccessRevoke))
 	mux.HandleFunc("/bailey/access/list", s.authMiddleware(s.handleAccessList))
