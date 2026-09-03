@@ -18,6 +18,11 @@ test('issue #418: creating a business process runs its setup deploy without a co
   page,
   context,
 }) => {
+  test.skip(
+    !process.env.E2E_REPRO_418,
+    'set E2E_REPRO_418=1 to run: it creates its own workspace and business process on the server ' +
+      'under test, which would show up in the walkthrough that shoots the handbook',
+  );
   test.setTimeout((10 + WORKSPACES_ON_ONE_DAEMON * 25) * 60_000);
 
   const serverConsole = page.frameLocator('iframe').last();
