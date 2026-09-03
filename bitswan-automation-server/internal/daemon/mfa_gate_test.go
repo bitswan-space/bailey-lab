@@ -74,12 +74,12 @@ func bodyLooksLikeSPA(w *httptest.ResponseRecorder) bool {
 	return strings.Contains(b, "<div id=\"root\"") || strings.Contains(b, "/assets/")
 }
 
-// TestMFAGate_UntrustedConsoleRedirectsToOnboard is the core assertion of the
+// TestMFAGate_UntrustedConsoleHandsOffToOnboard is the core assertion of the
 // two-endpoint contract: on a CLAIMED server, a signed-in user with no device
 // cookie making a top-level HTML GET on the CONSOLE host is 303'd to the public
 // onboarding host (NOT served any console surface, NOT sent to a Go gate page,
 // NOT silently paired).
-func TestMFAGate_UntrustedConsoleRedirectsToOnboard(t *testing.T) {
+func TestMFAGate_UntrustedConsoleHandsOffToOnboard(t *testing.T) {
 	markServerClaimed(t)
 	domain := writeTestConfig(t)
 	w := httptest.NewRecorder()
@@ -87,15 +87,12 @@ func TestMFAGate_UntrustedConsoleRedirectsToOnboard(t *testing.T) {
 	if pass {
 		t.Fatal("untrusted device passed the gate on the console host")
 	}
-	if w.Code != http.StatusSeeOther {
-		t.Errorf("status = %d, want 303", w.Code)
-	}
-	loc := w.Header().Get("Location")
+	loc := gateDestination(w)
 	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
-		t.Errorf("Location = %q, want redirect to the onboarding host", loc)
+		t.Errorf("destination = %q, want the onboarding host", loc)
 	}
 	if !strings.HasSuffix(loc, "/2fa-gate/api/device-grant") {
-		t.Errorf("Location = %q, want the onboarding device-grant endpoint", loc)
+		t.Errorf("destination = %q, want the onboarding device-grant endpoint", loc)
 	}
 	stashed := false
 	for _, c := range w.Result().Cookies() {
@@ -136,11 +133,11 @@ func TestMFAGate_OnboardAssetsServed(t *testing.T) {
 	}
 }
 
-// TestMFAGate_UntrustedAppHostRedirectsToOnboard verifies that an untrusted
-// top-level HTML GET on an APP host is 303'd to the onboarding host's
+// TestMFAGate_UntrustedAppHostHandsOffToOnboard verifies that an untrusted
+// top-level HTML GET on an APP host is handed off to the onboarding host's
 // device-grant endpoint, stashing the origin — NOT to the console and NOT to a
 // Go gate page.
-func TestMFAGate_UntrustedAppHostRedirectsToOnboard(t *testing.T) {
+func TestMFAGate_UntrustedAppHostHandsOffToOnboard(t *testing.T) {
 	markServerClaimed(t)
 	domain := writeTestConfig(t)
 	w := httptest.NewRecorder()
@@ -148,15 +145,12 @@ func TestMFAGate_UntrustedAppHostRedirectsToOnboard(t *testing.T) {
 	if pass {
 		t.Fatal("untrusted app-host request passed the gate")
 	}
-	if w.Code != http.StatusSeeOther {
-		t.Errorf("status = %d, want 303", w.Code)
-	}
-	loc := w.Header().Get("Location")
+	loc := gateDestination(w)
 	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
-		t.Errorf("Location = %q, want redirect to the onboarding host root", loc)
+		t.Errorf("destination = %q, want the onboarding host root", loc)
 	}
 	if !strings.HasSuffix(loc, "/2fa-gate/api/device-grant") {
-		t.Errorf("Location = %q, want the onboarding device-grant endpoint", loc)
+		t.Errorf("destination = %q, want the onboarding device-grant endpoint", loc)
 	}
 	stashed := false
 	for _, c := range w.Result().Cookies() {
@@ -197,12 +191,12 @@ func TestMFAGate_UntrustedNonHTMLGets401(t *testing.T) {
 	}
 }
 
-// TestMFAGate_UnclaimedRedirectsToOnboard verifies that on a fresh (unclaimed)
-// server an eligible signed-in user on the console host is 303'd to the
+// TestMFAGate_UnclaimedHandsOffToOnboard verifies that on a fresh (unclaimed)
+// server an eligible signed-in user on the console host is handed off to the
 // onboarding host (where the SPA reads gate-state can_claim and renders
 // BootstrapScene) — NOT served the console inline, NOT sent to a Go claim page,
 // and NOT silently auto-paired.
-func TestMFAGate_UnclaimedRedirectsToOnboard(t *testing.T) {
+func TestMFAGate_UnclaimedHandsOffToOnboard(t *testing.T) {
 	resetClaimState(t)
 	domain := writeTestConfig(t)
 	w := httptest.NewRecorder()
@@ -210,9 +204,9 @@ func TestMFAGate_UnclaimedRedirectsToOnboard(t *testing.T) {
 	if pass {
 		t.Fatal("unclaimed server passed an untrusted device through the gate")
 	}
-	loc := w.Header().Get("Location")
+	loc := gateDestination(w)
 	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
-		t.Errorf("Location = %q, want redirect to the onboarding host", loc)
+		t.Errorf("destination = %q, want the onboarding host", loc)
 	}
 	// And the gate must NOT have minted a device cookie (no silent TOFU).
 	for _, c := range w.Result().Cookies() {
@@ -239,7 +233,7 @@ func TestMFAGate_NeverForcesTOTP(t *testing.T) {
 			tc.setup(t)
 			w := httptest.NewRecorder()
 			enforceMFAGate(w, gateReq("app."+domain, "/", "u@example.com", tc.groups))
-			loc := w.Header().Get("Location")
+			loc := gateDestination(w)
 			if strings.Contains(loc, enrollPathSuffix) || strings.Contains(loc, challengePathSuffix) {
 				t.Errorf("gate forced a TOTP screen: Location = %q", loc)
 			}
@@ -320,12 +314,12 @@ func TestMFAGate_AdminOnClaimedServerTrustsLikeAnyone(t *testing.T) {
 	w := httptest.NewRecorder()
 	pass := enforceMFAGate(w, gateReq(serverConsoleHost(domain), "/", "admin@example.com", []string{"realm/admin"}))
 	if pass {
-		t.Fatal("admin on untrusted device passed the gate; want redirect to onboarding")
+		t.Fatal("admin on untrusted device passed the gate; want the onboarding handoff")
 	}
-	// An admin is NOT special: an untrusted admin device is redirected to the
+	// An admin is NOT special: an untrusted admin device is sent to the
 	// onboarding host exactly like any other user.
-	loc := w.Header().Get("Location")
+	loc := gateDestination(w)
 	if !strings.HasPrefix(loc, "https://"+serverConsoleOnboardHost(domain)+"/") {
-		t.Errorf("admin Location = %q, want redirect to the onboarding host", loc)
+		t.Errorf("admin destination = %q, want the onboarding host", loc)
 	}
 }

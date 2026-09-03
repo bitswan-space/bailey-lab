@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"html"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -307,6 +308,21 @@ func trustDanceExhausted(w http.ResponseWriter, r *http.Request) bool {
 
 func clearTrustLoop(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: trustLoopCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+}
+
+func writeDeviceTrustHandoff(w http.ResponseWriter, target string) {
+	esc := html.EscapeString(target)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8">` +
+		`<meta http-equiv="refresh" content="0;url=` + esc + `">` +
+		`<title>Checking this device</title>` +
+		`<div style="font:16px system-ui,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;line-height:1.5">` +
+		`<h1 style="font-size:1.25rem">Checking this device</h1>` +
+		`<p>Confirming this browser with your Bailey server. ` +
+		`<a href="` + esc + `">Continue</a> if this page doesn't move on by itself.</p>` +
+		`</div>`))
 }
 
 // writeTrustLoopError renders a plain, un-wrapped explanation when the dance

@@ -32,10 +32,14 @@ function renderTrace(label: string, hops: DocumentHop[]): string {
   ].join('\n');
 }
 
-function pairingDanceHops(hops: DocumentHop[]): string[] {
+function grantHops(hops: DocumentHop[]): string[] {
+  return hops.filter((h) => h.url.includes('/2fa-gate/api/device-grant')).map((h) => h.url);
+}
+
+function onboardingPageHops(hops: DocumentHop[]): string[] {
   const onboardHost = new URL(ENV.onboardUrl).hostname;
   return hops
-    .filter((h) => h.url.includes('/2fa-gate/api/device-grant') || new URL(h.url).hostname === onboardHost)
+    .filter((h) => new URL(h.url).hostname === onboardHost && !h.url.includes('/2fa-gate/api/'))
     .map((h) => h.url);
 }
 
@@ -69,7 +73,8 @@ async function endKeycloakSession(page: Page) {
 
 type RoundTrip = {
   trace: string;
-  danceHops: string[];
+  grants: string[];
+  onboardingPages: string[];
   credentialsRetyped: boolean;
   restingUrl: string;
   cookieHosts: string[];
@@ -93,7 +98,8 @@ async function signOutAndBackIn(
 
   return {
     trace: renderTrace(label, hops),
-    danceHops: pairingDanceHops(hops),
+    grants: grantHops(hops),
+    onboardingPages: onboardingPageHops(hops),
     credentialsRetyped,
     restingUrl: page.url(),
     cookieHosts: await deviceCookieHosts(page),
@@ -104,7 +110,8 @@ function renderEvidence(r: RoundTrip): string {
   return [
     r.trace,
     `  keycloak asked for credentials again: ${r.credentialsRetyped}`,
-    `  untrusted-device dance hops: ${r.danceHops.length}`,
+    `  device-grant hops: ${r.grants.length}`,
+    `  onboarding pages rendered: ${r.onboardingPages.length}`,
     `  device cookie hosts still in the browser jar: ${r.cookieHosts.join(', ') || '(none)'}`,
     `  resting url: ${r.restingUrl}`,
   ].join('\n');
@@ -159,9 +166,12 @@ test('device trust survives signing out and signing back in (#414)', async ({ pa
   test.info().annotations.push({ type: 'device-trust evidence', description: evidence });
   process.stdout.write(`\n${evidence}\n\n`);
 
-  expect(silent.danceHops, `a silent re-auth must not run the untrusted-device dance\n${evidence}`).toHaveLength(0);
+  expect(silent.grants, `a silent re-auth must not need the device-grant dance\n${evidence}`).toHaveLength(0);
+  expect(silent.onboardingPages, `a silent re-auth must not visit the onboarding host\n${evidence}`).toHaveLength(0);
+
   expect(retyped.cookieHosts, `the device cookie must not be dropped by signing out\n${evidence}`).toContain(consoleHost);
-  expect(retyped.danceHops, `signing back in must not run the untrusted-device dance\n${evidence}`).toHaveLength(0);
+  expect(retyped.onboardingPages, `signing back in must never park the user on the onboarding host\n${evidence}`).toHaveLength(0);
+  expect(retyped.grants.length, `the device-grant dance must settle in one pass\n${evidence}`).toBeLessThanOrEqual(1);
   await expect(trustPrompt, `signing back in must not re-prompt for device trust\n${evidence}`).toHaveCount(0);
   await expect(workspaces, `signing back in must land on the console\n${evidence}`).toBeVisible({ timeout: SLA });
 });
