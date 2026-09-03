@@ -80,7 +80,12 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .shot.dark{ background:#0a1826; border-color:rgba(255,255,255,.08) }
 .shotcap{ font-size:12px; font-style:italic; color:var(--muted); margin:0 0 26px }
 .shot .ph{ text-align:center; color:#9aa7b3; font-size:14px; font-weight:600; padding:20px }
-.two{ display:grid; grid-template-columns:1.1fr .9fr; gap:40px; margin-top:8px }
+.two{ display:grid; grid-template-columns:1.1fr .9fr; gap:40px; margin-top:8px;
+  /* Hug the content: without this the grid's default stretch pulls the
+     How-to box down to the height of whichever column is taller — usually
+     the prose — leaving a tall empty tail inside the box. start is the
+     idiom already used by .promise and .std li in this sheet. */
+  align-items:start }
 @media (max-width:680px){ .two{ grid-template-columns:1fr; gap:26px } .cover h1{font-size:54px} .chapter h2{font-size:34px} }
 .selltext p{ font-size:16.5px; color:#39454f; margin:0 0 16px } .selltext strong{ color:var(--ink) }
 .howto{ background:var(--paper2); border:1px solid var(--line); border-radius:12px; padding:26px 28px }
