@@ -133,9 +133,15 @@ test('issue #418: creating a BP runs its setup deploy without a compose failure'
         .last();
       const open = row.getByRole('button', { name: /^Open$/ }).first();
       const bpSwitcher = () => d.getByRole('button', { name: /^Process\b/ }).first();
+      // A workspace whose stack has just been created can take a while to serve
+      // its dashboard — its gitops may not be listening yet, and the dashboard
+      // retries the SSE stream (`connect ECONNREFUSED …:8079`) until it is. This
+      // is a repro harness, not an SLA test, so be patient and SAY what the tab
+      // showed if it never came up, rather than failing with a bare "never
+      // rendered" that reads like the bug under investigation.
       let ready = false;
-      for (let attempt = 0; attempt < 4 && !ready; attempt++) {
-        const popupP = context.waitForEvent('page', { timeout: 20_000 }).catch(() => null);
+      for (let attempt = 0; attempt < 6 && !ready; attempt++) {
+        const popupP = context.waitForEvent('page', { timeout: 30_000 }).catch(() => null);
         await open.click();
         const popup = await popupP;
         if (popup) dashPage = popup;
@@ -144,8 +150,18 @@ test('issue #418: creating a BP runs its setup deploy without a compose failure'
           .waitFor({ state: 'visible', timeout: SLA })
           .then(() => true)
           .catch(() => false);
+        if (!ready) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `  ${ws} dashboard attempt ${attempt + 1}: url=${dashPage.url()} ` +
+              `iframes=${await dashPage.locator('iframe').count().catch(() => -1)}`,
+          );
+        }
       }
-      expect(ready, `the ${ws} dashboard never rendered the BP switcher`).toBe(true);
+      expect(
+        ready,
+        `the ${ws} dashboard never rendered the BP switcher (tab at ${dashPage.url()})`,
+      ).toBe(true);
       await d.getByText(/Loading business processes/i).first()
         .waitFor({ state: 'hidden', timeout: SLA }).catch(() => {});
     });
@@ -201,11 +217,16 @@ test('issue #418: creating a BP runs its setup deploy without a compose failure'
         // whole progress log, so expand the failed entry and report that too —
         // the compose output is what makes this diagnosable.
         const activity = await activityDetail(d, bp);
+        // The compose output is the whole diagnosis and neither the toast nor a
+        // truncated Activity entry is guaranteed to carry it — the driver streams
+        // it, so read it from the driver's own log too.
+        const driver = driverLog(ws);
         await capture(dashPage, `repro-418-${slugish(bp)}-failed`).catch(() => {});
         throw new Error(
           `#418 reproduced: the setup deploy of "${bp}" in workspace "${ws}" failed.\n` +
             `toast: ${toastText}\n` +
-            (activity ? `activity log:\n${activity}\n` : ''),
+            (activity ? `activity log:\n${activity}\n` : '') +
+            (driver ? `infra-driver log:\n${driver}\n` : ''),
         );
       }
       await expect(ready, `the setup deploy of "${bp}" never reported ready`).toBeVisible({ timeout: SLA });
@@ -213,6 +234,23 @@ test('issue #418: creating a BP runs its setup deploy without a compose failure'
     });
   }
 });
+
+/**
+ * The workspace infra-driver's own log tail. It is the process that runs
+ * `docker compose up` and streams every line of its output, so when an apply
+ * fails this is where the reason ("no such image", "port is already allocated",
+ * "network … not found", a pull error) is written verbatim. Best-effort: an
+ * unreadable log just leaves the failure with the toast + Activity text.
+ */
+function driverLog(ws: string): string {
+  try {
+    const name = sh(`docker ps -a --format '{{.Names}}' | grep -m1 -- '${ws}-site-.*infra-driver' || true`).trim();
+    if (!name) return '';
+    return sh(`docker logs --tail 120 ${name} 2>&1 | tail -60`).trim().slice(0, 6000);
+  } catch {
+    return '';
+  }
+}
 
 /**
  * If the gate parked us on "Trust this device", read the 6-digit code off the
