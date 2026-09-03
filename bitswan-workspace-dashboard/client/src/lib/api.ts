@@ -315,8 +315,44 @@ async function postMultipart<T>(url: string, form: FormData): Promise<T> {
     headers: await authHeader(),
     body: form,
   });
-  if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+  if (!r.ok) await throwHttpError(url, r);
   return (await r.json()) as T;
+}
+
+export interface UploadLimit {
+  maxBytes: number;
+  maxBytesLabel: string;
+  reason: string;
+}
+
+/** The size a file would be reported as in an upload error. */
+export function formatByteSize(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded = value >= 100 || unit === 0 ? Math.round(value) : Number(value.toFixed(1));
+  return `${rounded} ${units[unit]}`;
+}
+
+/**
+ * Refuse files the server would reject anyway, before a byte leaves the
+ * browser. Every upload entry point goes through one of the `postMultipart`
+ * callers below, and each of those pre-flights here, so an oversized drop
+ * gets the same sentence wherever it was made.
+ */
+async function assertUploadFits(files: File[], limit: Promise<UploadLimit>): Promise<void> {
+  const { maxBytes, maxBytesLabel, reason } = await limit;
+  const oversized = files.filter((f) => f.size > maxBytes);
+  if (oversized.length === 0) return;
+  const names = oversized.map((f) => `${f.name} (${formatByteSize(f.size)})`).join(', ');
+  throw new Error(
+    `${names} ${oversized.length === 1 ? 'exceeds' : 'exceed'} the ${maxBytesLabel} ` +
+      `upload limit (${reason}). Nothing was uploaded.`,
+  );
 }
 
 /**
@@ -1037,7 +1073,14 @@ export const api = {
    *  optionally overrides the bundle's display name; the restored BP gets
    *  fresh process/deployment ids and its deploy is kicked off server-side
    *  (same response shape as createBusinessProcess). */
-  createBusinessProcessFromBundle: (body: { file: File; name?: string; copy?: string }) => {
+  uploadLimit: () => getJson<UploadLimit>('/api/upload-limit'),
+
+  createBusinessProcessFromBundle: async (body: {
+    file: File;
+    name?: string;
+    copy?: string;
+  }) => {
+    await assertUploadFits([body.file], api.uploadLimit());
     const form = new FormData();
     form.set('file', body.file, body.file.name);
     if (body.name) form.set('name', body.name);
@@ -1267,7 +1310,8 @@ export const api = {
     ),
   /** Firewall: upload a host's GDPR data-processing-agreement PDF (stored +
    *  versioned in the gitops repo). Returns the stored filename. */
-  uploadFirewallDpa: (bp: string, body: { stage: string; host: string; file: File }) => {
+  uploadFirewallDpa: async (bp: string, body: { stage: string; host: string; file: File }) => {
+    await assertUploadFits([body.file], api.uploadLimit());
     const form = new FormData();
     form.set('stage', body.stage);
     form.set('host', body.host);
@@ -1400,7 +1444,8 @@ export const api = {
         `/api/copies/${encodeURIComponent(name)}/files/content?path=${encodeURIComponent(p)}`,
         body,
       ),
-    upload: (name: string, p: string, files: File[]) => {
+    upload: async (name: string, p: string, files: File[]) => {
+      await assertUploadFits(files, api.copyFiles.uploadLimit(name, p));
       const form = new FormData();
       for (const f of files) form.append('files', f, f.name);
       return postMultipart<FileUploadResponse>(
@@ -1408,6 +1453,10 @@ export const api = {
         form,
       );
     },
+    uploadLimit: (name: string, p: string) =>
+      getJson<UploadLimit>(
+        `/api/copies/${encodeURIComponent(name)}/files/upload-limit?path=${encodeURIComponent(p)}`,
+      ),
     remove: (name: string, p: string) =>
       deleteEmpty(
         `/api/copies/${encodeURIComponent(name)}/files?path=${encodeURIComponent(p)}`,

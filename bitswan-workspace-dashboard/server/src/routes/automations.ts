@@ -4,9 +4,12 @@ import { openSse } from '../lib/sse.js';
 import { emailFromRequest, fwRoleFromRequest } from '../lib/user.js';
 import { isValidBpId } from '../services/workspace.js';
 import type { GitopsClient } from '../services/gitops.js';
+import { bufferedUploadLimit, tooLargeMessage } from '../services/upload-limits.js';
 
 export interface AutomationRoutesOptions {
   gitops: GitopsClient | null;
+  workspaceRoot: string;
+  uploadLimit?: typeof bufferedUploadLimit;
 }
 
 /**
@@ -17,7 +20,7 @@ export interface AutomationRoutesOptions {
  */
 export function registerAutomationRoutes(
   app: FastifyInstance,
-  { gitops }: AutomationRoutesOptions,
+  { gitops, workspaceRoot, uploadLimit = bufferedUploadLimit }: AutomationRoutesOptions,
 ): void {
   // Reject a malformed `:bp` path param before it can be forwarded to gitops
   // and reach a filesystem path / git cwd there (#130). Mirrors the isValidBpId
@@ -780,17 +783,32 @@ export function registerAutomationRoutes(
       if (!req.isMultipart()) {
         return reply.code(400).send({ error: 'expected multipart/form-data' });
       }
+      let limit;
+      try {
+        limit = await uploadLimit(workspaceRoot);
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'free-space probe failed');
+        return reply.code(500).send({ error: 'could not determine free disk space' });
+      }
       let stage = '';
       let host = '';
       let filename = '';
       let content: Buffer | null = null;
       let contentType = 'application/pdf';
+      let tooLarge = false;
       try {
-        for await (const part of req.parts()) {
+        for await (const part of req.parts({
+          limits: { fileSize: limit.maxBytes },
+          throwFileSizeLimit: false,
+        } as Parameters<typeof req.parts>[0])) {
           if (part.type === 'file' && part.fieldname === 'file') {
             filename = (part.filename ?? 'dpa.pdf').split('/').pop() || 'dpa.pdf';
             contentType = part.mimetype || contentType;
             content = await part.toBuffer();
+            if (part.file.truncated) {
+              content = null;
+              tooLarge = true;
+            }
           } else if (part.type === 'field') {
             if (part.fieldname === 'stage') stage = String(part.value);
             else if (part.fieldname === 'host') host = String(part.value);
@@ -799,6 +817,13 @@ export function registerAutomationRoutes(
       } catch (err) {
         app.log.warn({ err, bp: req.params.bp }, 'firewall dpa parse failed');
         return reply.code(400).send({ error: 'could not read upload' });
+      }
+      if (tooLarge) {
+        return reply.code(413).send({
+          error: tooLargeMessage([filename], limit),
+          rejected: [filename],
+          maxBytes: limit.maxBytes,
+        });
       }
       if (!stage || !host || !content) {
         return reply.code(400).send({ error: 'stage, host and file are required' });
