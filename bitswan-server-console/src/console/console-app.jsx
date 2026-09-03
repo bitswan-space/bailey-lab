@@ -279,7 +279,7 @@ const NAV = [
 // routing works end-to-end. A second path segment carries a view's open
 // "drawer" (the workspace being managed, the person whose devices you're
 // viewing) — e.g. /workspaces/acme, /users/jane@x.
-const ROUTES = ['workspaces', 'handbook', 'overview', 'resources', 'users', 'acl', 'updates', 'backups', 'devices', 'security'];
+const ROUTES = ['workspaces', 'handbook', 'overview', 'resources', 'users', 'acl', 'updates', 'backups', 'devices', 'security', 'sso'];
 
 function parseLocation() {
   const segs = (window.location.pathname || '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);

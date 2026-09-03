@@ -67,7 +67,10 @@ func validateSSOConfig(c ssoConfig) error {
 		return fmt.Errorf("a display name is required — it labels the button people click to sign in")
 	}
 	u, err := url.Parse(strings.TrimSpace(c.IssuerURL))
-	if err != nil || u.Scheme != "https" || u.Host == "" {
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("issuer URL must be an https URL")
+	}
+	if u.Scheme != "https" && !isLoopbackIssuerHost(u.Hostname()) {
 		return fmt.Errorf("issuer URL must be an https URL")
 	}
 	if strings.TrimSpace(c.ClientID) == "" {
@@ -85,6 +88,11 @@ func validateSSOConfig(c ssoConfig) error {
 		}
 	}
 	return nil
+}
+
+func isLoopbackIssuerHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	return h == "localhost" || h == "127.0.0.1" || h == "::1" || strings.HasSuffix(h, ".localhost")
 }
 
 func discoverSSOIssuer(issuer string) error {

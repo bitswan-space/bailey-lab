@@ -19,6 +19,8 @@ const (
 	dexProxyClientID = "bailey-protected-proxy"
 	dexConnectorAOC  = "aoc"
 	dexConnectorSSO  = "sso"
+	dexUID           = 1001
+	dexGID           = 1001
 )
 
 func dexHost(domain string) string {
@@ -124,6 +126,11 @@ func writeDexConfig(domain string, sso ssoConfig, proxySecret string) error {
 	}
 	if err := os.WriteFile(dir+"/config.yaml", []byte(cfg), 0600); err != nil {
 		return fmt.Errorf("write dex config: %w", err)
+	}
+	for _, path := range []string{dir, dir + "/config.yaml"} {
+		if err := os.Chown(path, dexUID, dexGID); err != nil {
+			return fmt.Errorf("hand %s to the broker's uid: %w", path, err)
+		}
 	}
 
 	composeYAML, err := dockercompose.CreateDexDockerComposeFile(dexPort)

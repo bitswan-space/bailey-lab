@@ -469,7 +469,10 @@ export const MANUAL = {
     {
       num: '21', eyebrow: 'Bring your own identity', title: 'Your own single sign-on',
       lede: 'Bailey can sign people in with your company’s own OpenID Connect provider, alongside Bitswan accounts. Your directory stays the source of truth for who works here; Bailey stays the source of truth for what they can do.',
-      slots: [{ id: 'sso-settings', label: 'Live capture', caption: 'Server Console · Single sign-on — your own provider, added alongside Bitswan accounts' }],
+      slots: [
+        { id: 'sso-settings', label: 'Live capture', caption: 'Server Console · Single sign-on — your own provider, added alongside Bitswan accounts' },
+        { id: 'sso-chooser', label: 'Live capture', caption: 'Sign-in · both ways in — your provider and a Bitswan account, so an outage at one never locks you out' },
+      ],
       sell: [
         'Out of the box, people sign in with a Bitswan account issued through the Automation Operations Centre. That suits a team adopting the platform, but an established organisation already has an identity provider, already offboards through it, and does not want a second place where staff accounts are created. <strong>Single sign-on</strong> lets an admin add that provider directly to this server: give it a display name, an issuer URL and a client, register the redirect URI it shows you, and your people sign in with the account they already have.',
         'Both ways in stay open. The sign-in page offers a choice, so Bitswan accounts — your operator’s, and anyone the AOC manages — keep working on the same server. That matters more than it sounds: a provider whose certificate has just expired must not be able to lock every administrator out of the machine that could fix it.',

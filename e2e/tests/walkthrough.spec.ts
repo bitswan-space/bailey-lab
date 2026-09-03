@@ -74,7 +74,7 @@
  * moment the product stops telling the operator what it's doing.
  */
 import { appendFileSync, writeFileSync } from 'node:fs';
-import { test, expect, capture, captureOverheadMs, oidcLogin, dashboard, ENV, type FrameOrPage } from '../fixtures/bitswan';
+import { test, expect, capture, captureOverheadMs, oidcLogin, dashboard, sh, ENV, type FrameOrPage } from '../fixtures/bitswan';
 import { BP, WORKSPACE, COMPANY, SECRETS, TEAMMATE, EGRESS_PROBES } from '../scenario';
 
 // ── Snappiness is a product requirement, not a test nicety ──────────────────
@@ -145,7 +145,7 @@ const timings: { name: string; seconds: number }[] = [];
 // redeployed, then the experiment's whole teardown). The CLICK a human actually
 // waits on (Advanced → the menu) is covered by the `advanced-menu` interactive
 // chapter.
-const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding.?agent|wake|first.?load|build|live-?dev|create-bp|supply-chain|cve|scan|flowchart|deps-|prod-rollback|experiment/i;
+const LONG_OP = /workspace|deploy|promote|sync|snapshot|backup|recover|disaster|coding.?agent|wake|first.?load|build|live-?dev|create-bp|supply-chain|cve|scan|flowchart|deps-|prod-rollback|experiment|sso-topology/i;
 function isInteractive(name: string): boolean {
   return !LONG_OP.test(name);
 }
@@ -3330,6 +3330,103 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await marekCtx?.close().catch(() => {});
       marekCtx = null;
       marekPage = null;
+    }
+  });
+
+  // ---- External OIDC provider: the login topology actually switches -------
+  //
+  // Runs LAST on purpose. Enabling a second provider re-points oauth2-proxy at
+  // the Dex broker, which changes the token issuer and invalidates every
+  // session signed by Keycloak — including the operator's. Anything after this
+  // would be running as a logged-out user.
+  //
+  // The "customer" provider is a second realm on the same disposable Keycloak.
+  // That is a real, independent OIDC issuer as far as Bailey and Dex are
+  // concerned: its own discovery document, its own client, its own users.
+  await chapter('sso-topology-switch', async () => {
+    const kc = ENV.keycloakUrl;
+    const acmeIssuer = `${kc}/realms/acme`;
+    const acmeSecret = 'acme-dex-secret';
+
+    const kcAdmin = (args: string) =>
+      sh(`docker exec bitswan-e2e-keycloak /opt/keycloak/bin/kcadm.sh ${args}`);
+    kcAdmin(`config credentials --server http://localhost:8088 --realm master --user admin --password admin`);
+    try { kcAdmin(`create realms -s realm=acme -s enabled=true`); } catch { /* already there */ }
+    try {
+      kcAdmin(`create clients -r acme -s clientId=bailey-dex -s enabled=true -s protocol=openid-connect`
+        + ` -s publicClient=false -s standardFlowEnabled=true -s secret=${acmeSecret}`
+        + ` -s 'redirectUris=["https://auth.${ENV.domain}/callback"]'`);
+    } catch { /* already there */ }
+
+    const proxyIssuer = () =>
+      sh(`docker inspect bitswan-protected-proxy --format '{{range .Config.Env}}{{println .}}{{end}}'`)
+        .split('\n').find((l) => l.startsWith('OAUTH2_PROXY_OIDC_ISSUER_URL=')) || '';
+
+    expect(proxyIssuer(), 'before: the proxy talks straight to Keycloak').toContain('/realms/bitswan');
+    expect(sh('docker ps --format "{{.Names}}"'), 'before: no broker').not.toContain('bitswan-dex');
+
+    await c.getByRole('button', { name: /Single sign-on/i }).first().click();
+    await expect(c.getByRole('heading', { name: /Single sign-on/i }).first()).toBeVisible({ timeout: SLA });
+
+    await c.getByPlaceholder(/Acme single sign-on/i).first().fill('Acme single sign-on');
+    await c.getByPlaceholder(/login\.acme\.example/i).first().fill(acmeIssuer);
+    await c.getByPlaceholder(/^bailey$/i).first().fill('bailey-dex');
+    await c.getByPlaceholder(/Paste the client secret/i).first().fill(acmeSecret);
+
+    await c.getByRole('button', { name: /^Test$/ }).first().click();
+    await expect(c.getByText(/Discovery document looks good/i).first()).toBeVisible({ timeout: SLA });
+
+    await c.getByRole('button', { name: /Enable single sign-on/i }).first().click();
+    await expect(c.getByText(/Single sign-on enabled/i).first()).toBeVisible({ timeout: PROGRESS });
+
+    // The switch itself: a broker is running and the proxy now trusts it.
+    await expect(async () => {
+      expect(sh('docker ps --format "{{.Names}}"'), 'the broker must be running').toContain('bitswan-dex');
+      expect(proxyIssuer(), 'the proxy must now trust the broker').toContain(`https://auth.${ENV.domain}`);
+    }).toPass({ timeout: PROGRESS });
+
+    // Both ways in are offered. A fresh browser gets Dex's chooser, and it must
+    // carry BOTH the customer's provider and the Bitswan account — a server
+    // that only offered the customer's IdP could be locked shut by an outage
+    // at that IdP.
+    const visitor = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
+    try {
+      const vp = await visitor.newPage();
+      await vp.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
+      // The proxy really re-pointed if an unauthenticated visit now rests on
+      // the broker's host rather than Keycloak's.
+      await expect(async () => {
+        expect(new URL(vp.url()).hostname, 'unauthenticated visitors reach the broker').toBe(`auth.${ENV.domain}`);
+      }).toPass({ timeout: PROGRESS });
+      await expect(vp.getByText(/Log in with Acme single sign-on/i).first()).toBeVisible({ timeout: PROGRESS });
+      await expect(vp.getByText(/Log in with Bitswan account/i).first()).toBeVisible({ timeout: SLA });
+      await capture(vp, 'sso-chooser');
+    } finally {
+      await visitor.close().catch(() => {});
+    }
+
+    // And it reverts cleanly: disabling tears the broker back down and returns
+    // the proxy to Keycloak, so a server that tried SSO and backed out is not
+    // left on a half-migrated topology.
+    await c.getByRole('button', { name: /^Disable$/ }).first().click();
+    await expect(c.getByText(/Single sign-on disabled/i).first()).toBeVisible({ timeout: PROGRESS });
+    await expect(async () => {
+      expect(sh('docker ps --format "{{.Names}}"'), 'the broker must be gone').not.toContain('bitswan-dex');
+      expect(proxyIssuer(), 'the proxy must be back on Keycloak').toContain('/realms/bitswan');
+    }).toPass({ timeout: PROGRESS });
+
+    // And sign-in works again on the stock path, which is the assertion that
+    // actually matters: a server that backed out of SSO must not be left
+    // unreachable.
+    const after = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
+    try {
+      const ap = await after.newPage();
+      await ap.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
+      await expect(async () => {
+        expect(new URL(ap.url()).hostname, 'back to signing in against Keycloak').toContain('keycloak');
+      }).toPass({ timeout: PROGRESS });
+    } finally {
+      await after.close().catch(() => {});
     }
   });
 

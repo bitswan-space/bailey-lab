@@ -151,3 +151,33 @@ func TestBuildDexConfig_SurvivesAnUnreachableAOC(t *testing.T) {
 		t.Error("no AOC client means no AOC connector, not a half-written one")
 	}
 }
+
+func TestValidateSSOConfig_AllowsPlainHTTPOnlyOnLoopback(t *testing.T) {
+	base := ssoConfig{DisplayName: "Dev IdP", ClientID: "bailey", ClientSecret: "s3cret"}
+
+	ok := []string{
+		"http://keycloak.bs-e2e.localhost:8088/realms/acme",
+		"http://localhost:8088/realms/acme",
+		"http://127.0.0.1:8088/realms/acme",
+	}
+	for _, issuer := range ok {
+		c := base
+		c.IssuerURL = issuer
+		if err := validateSSOConfig(c); err != nil {
+			t.Errorf("%s rejected: %v", issuer, err)
+		}
+	}
+
+	bad := []string{
+		"http://id.acme.example",
+		"http://notlocalhost.example/realms/acme",
+		"http://localhost.evil.example",
+	}
+	for _, issuer := range bad {
+		c := base
+		c.IssuerURL = issuer
+		if err := validateSSOConfig(c); err == nil {
+			t.Errorf("%s accepted over plain http, want rejected", issuer)
+		}
+	}
+}
