@@ -556,9 +556,16 @@ func CreateDexDockerComposeFile(port string) (string, error) {
 		"restart":        "always",
 		"container_name": "bitswan-dex",
 		"networks":       []string{"bitswan_network"},
-		"command":        []string{"dex", "serve", "/etc/dex/config.yaml"},
-		"volumes": []string{
-			"./config.yaml:/etc/dex/config.yaml:ro",
+		"entrypoint":     []string{"/usr/local/bin/dex"},
+		"command":        []string{"serve", "/etc/dex/config.yaml"},
+		"volumes": []interface{}{
+			map[string]interface{}{
+				"type":      "volume",
+				"source":    "bitswan",
+				"target":    "/etc/dex",
+				"read_only": true,
+				"volume":    map[string]interface{}{"subpath": "dex"},
+			},
 			"bitswan-dex-data:/var/dex",
 		},
 		"expose": []string{port},
@@ -571,6 +578,7 @@ func CreateDexDockerComposeFile(port string) (string, error) {
 		},
 		"volumes": map[string]interface{}{
 			"bitswan-dex-data": map[string]interface{}{},
+			"bitswan":          map[string]interface{}{"external": true},
 		},
 	}
 

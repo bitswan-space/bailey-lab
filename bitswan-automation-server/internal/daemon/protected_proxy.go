@@ -88,7 +88,6 @@ func provisionProtectedProxy() error {
 	if brokered {
 		env["OAUTH2_PROXY_OIDC_GROUPS_CLAIM"] = "groups"
 		env["OAUTH2_PROXY_REDIRECT_URL"] = dexProxyRedirectURL(domain)
-		env["OAUTH2_PROXY_SKIP_PROVIDER_BUTTON"] = "false"
 		env["OAUTH2_PROXY_SCOPE"] = "openid email profile groups offline_access"
 	}
 

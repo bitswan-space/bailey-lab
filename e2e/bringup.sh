@@ -169,7 +169,7 @@ mark "[2/7] daemon + traefik ingress"
 # non-interactive setup keeps the first deploy from stalling a user on a
 # registry pull. Best-effort — a miss just falls back to a click-time pull.
 ( if [ "${E2E_SKIP_WORKSPACE_IMAGES:-0}" = "1" ]; then exit 0; fi
-  for img in postgres:16 dxflrs/garage:v2.3.0 rclone/rclone:1.68 couchdb:3.3 node:24-alpine golang:1.25-alpine; do
+  for img in postgres:16 dxflrs/garage:v2.3.0 rclone/rclone:1.68 couchdb:3.3 node:24-alpine golang:1.25-alpine ghcr.io/dexidp/dex:v2.41.1; do
     docker pull "$img" >/dev/null 2>&1 || true
   done
   # Prebuild the BP-template frontend + backend base images so their EXPENSIVE
