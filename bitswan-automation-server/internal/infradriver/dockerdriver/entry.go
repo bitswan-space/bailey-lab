@@ -25,11 +25,18 @@ type fwKey struct {
 	ctx, stage, slot string
 }
 
-// workerPortKey identifies one non-exposed worker's resolved listen port within
-// a (ctx, stage, slot) scope.
+// workerPortKey identifies one worker's resolved listen ports within a
+// (ctx, stage, slot) scope.
 type workerPortKey struct {
 	ctx, stage, slot, name string
 }
+
+type workerPortAssignment struct {
+	app int
+	ui  int
+}
+
+const frontendUIPort = 5173
 
 // computeFirewallScope ports the firewall pre-pass in generate_docker_compose:
 // which (ctx, stage, slot) groups route their workers through a per-group egress
@@ -107,8 +114,8 @@ func fwActive(scope map[fwKey]*fwGroup, ctx, stage, slot string) *fwGroup {
 
 // computeWorkerHosts ports the BITSWAN_WORKER_HOSTS pre-pass: a `name=host:port`
 // list per (ctx, stage, slot) for every non-exposed worker, plus the listen
-// port resolved for each worker (keyed by ctx/stage/slot/name) so the service
-// builder can inject it as PORT.
+// ports resolved for each worker (keyed by ctx/stage/slot/name) so the service
+// builder can inject them as PORT / BITSWAN_UI_PORT.
 //
 // Workers in a firewalled group all share their gateway's single network
 // namespace (network_mode: service:<gw>), so two that both bind the declared
@@ -118,30 +125,35 @@ func fwActive(scope map[fwKey]*fwGroup, ctx, stage, slot string) *fwGroup {
 // distinct port: keep its declared port when free, else the next free one.
 // Non-firewalled workers each own their netns and keep their declared port. The
 // resolved port is advertised in BITSWAN_WORKER_HOSTS and injected as PORT so
-// the routing entry and the actual listen port stay in sync.
-func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fwScope map[fwKey]*fwGroup) (map[fwKey][]string, map[workerPortKey]int) {
+// the routing entry, the ingress upstream and the actual listen port stay in
+// sync.
+func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fwScope map[fwKey]*fwGroup) (map[fwKey][]string, map[workerPortKey]workerPortAssignment) {
 	out := map[fwKey][]string{}
-	ports := map[workerPortKey]int{}
+	ports := map[workerPortKey]workerPortAssignment{}
 	usedByScope := map[fwKey]map[int]bool{}
-	reserve := func(key fwKey, port int) {
+	take := func(key fwKey, port int) int {
 		used := usedByScope[key]
 		if used == nil {
 			used = map[int]bool{}
 			usedByScope[key] = used
 		}
+		for used[port] {
+			port++
+		}
 		used[port] = true
+		return port
 	}
 
-	// Pass 1 — reserve the fixed listen port of every EXPOSED worker that shares
-	// an enforce gateway's netns (security finding F1, path 3). An exposed
-	// frontend's listen port is fixed by its image (the shim hard-codes :8080)
-	// and cannot be reassigned, so it must claim its port before non-exposed
-	// peers pick collision-free ones. Exposed workers are reached via ingress,
-	// not BITSWAN_WORKER_HOSTS, so they are NOT added to `out`; their port is
-	// recorded so the ingress route (buildServiceEntry) stays in sync. Only
-	// enforce scopes firewall exposed workers — dev/live-dev keep the frontend
-	// in its own netns (monitor egress is open by design; no reason to disturb
-	// the live-dev preview's networking).
+	// Pass 1 — resolve both ports of every EXPOSED worker that shares an enforce
+	// gateway's netns (security finding F1, path 3): the port its shim binds and
+	// the port its UI server binds behind that shim. They go first so the first
+	// frontend in the scope keeps the declared port an operator sees on the
+	// ingress. Exposed workers are reached via ingress, not BITSWAN_WORKER_HOSTS,
+	// so they are NOT added to `out`; their ports are recorded so the injected
+	// PORT, the ingress route and the actual listeners stay in sync. Only enforce
+	// scopes firewall exposed workers — dev/live-dev keep the frontend in its own
+	// netns (monitor egress is open by design; no reason to disturb the live-dev
+	// preview's networking).
 	for _, depID := range sortedDepIDs(deployments) {
 		conf := deployments[depID]
 		if conf == nil {
@@ -160,8 +172,9 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 				continue
 			}
 			key := fwKey{depCtx, stage, sd.slot}
-			reserve(key, cfg.Port)
-			ports[workerPortKey{depCtx, stage, sd.slot, name}] = cfg.Port
+			app := take(key, cfg.Port)
+			ui := take(key, frontendUIPort)
+			ports[workerPortKey{depCtx, stage, sd.slot, name}] = workerPortAssignment{app: app, ui: ui}
 		}
 	}
 
@@ -188,19 +201,11 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 			if fw != nil {
 				host = fw.gw
 				// Shared netns — resolve a collision-free port within the scope.
-				used := usedByScope[key]
-				if used == nil {
-					used = map[int]bool{}
-					usedByScope[key] = used
-				}
-				for used[port] {
-					port++
-				}
-				used[port] = true
+				port = take(key, port)
 			} else {
 				host = makeHostnameLabel(c.workspaceName, name, depCtx, stage, sd.slot)
 			}
-			ports[workerPortKey{depCtx, stage, sd.slot, name}] = port
+			ports[workerPortKey{depCtx, stage, sd.slot, name}] = workerPortAssignment{app: port}
 			out[key] = append(out[key], fmt.Sprintf("%s=%s:%d", name, host, port))
 		}
 	}
@@ -269,7 +274,7 @@ func memPolicy(conf *Deployment) string {
 	return "on-demand"
 }
 
-func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot string, db int, workerHosts map[fwKey][]string, workerPorts map[workerPortKey]int, fwScope map[fwKey]*fwGroup) (map[string]interface{}, string, *infradriver.Route, bool, error) {
+func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot string, db int, workerHosts map[fwKey][]string, workerPorts map[workerPortKey]workerPortAssignment, fwScope map[fwKey]*fwGroup) (map[string]interface{}, string, *infradriver.Route, bool, error) {
 	depStage := conf.StageOrProduction()
 	depAutomationName := conf.AutomationNameOr(depID)
 	depCtx := conf.Context
@@ -369,15 +374,18 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	if wh := workerHosts[fwKey{depCtx, depStage, slot}]; len(wh) > 0 {
 		env["BITSWAN_WORKER_HOSTS"] = strings.Join(wh, ",")
 	}
-	// A non-exposed worker listens on the port resolved in the computeWorkerHosts
-	// pre-pass (its declared port, or a collision-free one when it shares a
-	// firewall gateway's netns with peers). Inject it as PORT — worker templates
-	// honour it (uvicorn --port "$PORT", the go-worker's PORT env) — so the
-	// advertised BITSWAN_WORKER_HOSTS entry and the actual listen port stay in
-	// sync.
-	if !cfg.Expose {
-		if p, ok := workerPorts[workerPortKey{depCtx, depStage, slot, depAutomationName}]; ok {
-			env["PORT"] = strconv.Itoa(p)
+	// A worker listens on the ports resolved in the computeWorkerHosts pre-pass
+	// (its declared ports, or collision-free ones when it shares a firewall
+	// gateway's netns with peers). Inject them as PORT / BITSWAN_UI_PORT — every
+	// template honours them (uvicorn --port "$PORT", the go-worker's PORT env,
+	// the frontend image's shim + UI server) — so the advertised
+	// BITSWAN_WORKER_HOSTS entry, the ingress upstream and the actual listeners
+	// stay in sync.
+	assigned, hasAssignedPorts := workerPorts[workerPortKey{depCtx, depStage, slot, depAutomationName}]
+	if hasAssignedPorts {
+		env["PORT"] = strconv.Itoa(assigned.app)
+		if assigned.ui != 0 {
+			env["BITSWAN_UI_PORT"] = strconv.Itoa(assigned.ui)
 		}
 	}
 	if c.workspaceName != "" {
@@ -667,6 +675,9 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 	expose := cfg.Expose
 	port := cfg.Port
+	if hasAssignedPorts {
+		port = assigned.app
+	}
 
 	// ---- exposed automation: route + url env + intended_exposed ----
 	var route *infradriver.Route
