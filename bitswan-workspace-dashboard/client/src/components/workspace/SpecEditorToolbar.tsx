@@ -56,8 +56,6 @@ import {
   toggleList,
 } from './spec-editor-commands';
 import {
-  ATTACHMENT_MAX_BYTES,
-  ATTACHMENT_MAX_MB,
   listSpecAttachments,
   notifySpecAttachmentsChanged,
   uploadSpecAttachments,
@@ -182,11 +180,9 @@ export function SpecEditorToolbar({
     const rejection = rejected[0]?.errors[0]?.code;
     if (rejection) {
       setImageUploadError(
-        rejection === 'file-too-large'
-          ? `That image is larger than the ${ATTACHMENT_MAX_MB} MB upload limit.`
-          : rejection === 'too-many-files'
-            ? 'One image at a time, please.'
-            : 'That file is not an image.',
+        rejection === 'too-many-files'
+          ? 'One image at a time, please.'
+          : 'That file is not an image.',
       );
       return;
     }
@@ -203,7 +199,6 @@ export function SpecEditorToolbar({
     onDrop: handleImageDrop,
     accept: { 'image/*': [] },
     multiple: false,
-    maxSize: ATTACHMENT_MAX_BYTES,
     // Same as the attachments panel: the drop target is the whole surface,
     // clicking is left to an explicit button (the popover holds a text
     // input, which a click-anywhere dropzone would fight over).

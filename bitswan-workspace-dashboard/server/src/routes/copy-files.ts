@@ -5,10 +5,12 @@ import { isValidCopyName } from '../services/workspace.js';
 import {
   deleteCopyFile,
   ensureCopyDir,
+  formatByteSize,
   readCopyFile,
   readCopyTree,
   searchCopyFiles,
   statCopyFile,
+  uploadLimitBytes,
   writeCopyFile,
   type FileEtag,
 } from '../services/copy-files.js';
@@ -17,6 +19,7 @@ import type { GitopsClient } from '../services/gitops.js';
 export interface CopyFilesRoutesOptions {
   workspaceRoot: string;
   gitops: GitopsClient | null;
+  uploadLimitBytes?: (dir: string) => Promise<number>;
 }
 
 /**
@@ -27,7 +30,11 @@ export interface CopyFilesRoutesOptions {
  */
 export function registerCopyFilesRoutes(
   app: FastifyInstance,
-  { workspaceRoot, gitops }: CopyFilesRoutesOptions,
+  {
+    workspaceRoot,
+    gitops,
+    uploadLimitBytes: uploadLimit = uploadLimitBytes,
+  }: CopyFilesRoutesOptions,
 ): void {
   app.get<{ Params: { name: string } }>(
     '/api/copies/:name/files',
@@ -177,9 +184,20 @@ export function registerCopyFilesRoutes(
     if (!req.isMultipart()) {
       return reply.code(400).send({ error: 'expected multipart/form-data' });
     }
-    const written: { name: string; size: number }[] = [];
+    let maxBytes: number;
     try {
-      for await (const part of req.parts()) {
+      maxBytes = await uploadLimit(targetDir);
+    } catch (err) {
+      app.log.warn({ err, name: req.params.name }, 'free-space probe failed');
+      return reply.code(500).send({ error: 'could not determine free disk space' });
+    }
+    const written: { name: string; size: number }[] = [];
+    const rejected: string[] = [];
+    try {
+      for await (const part of req.parts({
+        limits: { fileSize: maxBytes },
+        throwFileSizeLimit: false,
+      } as Parameters<typeof req.parts>[0])) {
         if (part.type !== 'file') continue;
         // `part.filename` is the client-supplied name; reduce to basename
         // to defeat any `../foo` games and keep the upload inside the
@@ -197,6 +215,11 @@ export function registerCopyFilesRoutes(
           await fs.unlink(tmp).catch(() => undefined);
           throw e;
         }
+        if (part.file.truncated) {
+          await fs.unlink(tmp).catch(() => undefined);
+          rejected.push(name);
+          continue;
+        }
         await fs.rename(tmp, dest);
         const st = await fs.stat(dest);
         written.push({ name, size: st.size });
@@ -205,7 +228,42 @@ export function registerCopyFilesRoutes(
       app.log.warn({ err, name: req.params.name }, 'upload failed');
       return reply.code(500).send({ error: String(err) });
     }
+    if (rejected.length > 0) {
+      return reply.code(413).send({
+        error: `${rejected.join(', ')} exceeded the ${formatByteSize(maxBytes)} upload limit (80% of the free disk space on this workspace). Nothing was saved for ${rejected.length === 1 ? 'it' : 'them'}.`,
+        rejected,
+        maxBytes,
+        written,
+      });
+    }
     return { written };
+  });
+
+  app.get<{
+    Params: { name: string };
+    Querystring: { path?: string };
+  }>('/api/copies/:name/files/upload-limit', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!isValidCopyName(req.params.name)) {
+      return reply.code(400).send({ error: 'invalid copy' });
+    }
+    let targetDir: string;
+    try {
+      targetDir = await ensureCopyDir({
+        copy: req.params.name,
+        path: req.query.path ?? '',
+        workspaceRoot,
+      });
+    } catch (err) {
+      return reply.code(400).send({ error: String(err) });
+    }
+    try {
+      const maxBytes = await uploadLimit(targetDir);
+      return { maxBytes, maxBytesLabel: formatByteSize(maxBytes) };
+    } catch (err) {
+      app.log.warn({ err, name: req.params.name }, 'free-space probe failed');
+      return reply.code(500).send({ error: 'could not determine free disk space' });
+    }
   });
 
   app.delete<{

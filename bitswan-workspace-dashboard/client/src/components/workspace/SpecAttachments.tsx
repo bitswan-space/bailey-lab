@@ -35,15 +35,17 @@ export interface AttachmentRow {
   path: string;
 }
 
-/**
- * Per-file upload cap. Mirrors the server's multipart `fileSize` limit
- * (server/src/server.ts) so the entry points can reject an oversized file
- * with a readable message instead of letting the request fail mid-stream.
- */
-export const ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
-
-/** `ATTACHMENT_MAX_BYTES` as MiB, for user-facing messages. */
-export const ATTACHMENT_MAX_MB = ATTACHMENT_MAX_BYTES / (1024 * 1024);
+export function formatByteSize(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded = value >= 100 || unit === 0 ? Math.round(value) : Number(value.toFixed(1));
+  return `${rounded} ${units[unit]}`;
+}
 
 // Mounted panels register here so an upload made from somewhere else (the
 // editor toolbar's insert-image popover, a pasted screenshot) shows up in
@@ -64,12 +66,21 @@ export function notifySpecAttachmentsChanged(): void {
  * A file whose name already exists is overwritten (the server writes by
  * basename), same as dropping it on the panel.
  */
-export function uploadSpecAttachments(
+export async function uploadSpecAttachments(
   copy: string,
   bpId: string,
   files: File[],
 ): Promise<FileUploadResponse> {
-  return api.copyFiles.upload(copy, `${bpId}/attachments`, files);
+  const dir = `${bpId}/attachments`;
+  const { maxBytes, maxBytesLabel } = await api.copyFiles.uploadLimit(copy, dir);
+  const oversized = files.filter((f) => f.size > maxBytes);
+  if (oversized.length > 0) {
+    const names = oversized.map((f) => `${f.name} (${formatByteSize(f.size)})`).join(', ');
+    throw new Error(
+      `${names} ${oversized.length === 1 ? 'exceeds' : 'exceed'} the ${maxBytesLabel} upload limit — 80% of the free disk space on this workspace.`,
+    );
+  }
+  return api.copyFiles.upload(copy, dir, files);
 }
 
 // eslint-disable-next-line no-restricted-syntax -- undefined = folder not in tree yet (no attachments uploaded)

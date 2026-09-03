@@ -315,7 +315,7 @@ async function postMultipart<T>(url: string, form: FormData): Promise<T> {
     headers: await authHeader(),
     body: form,
   });
-  if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+  if (!r.ok) await throwHttpError(url, r);
   return (await r.json()) as T;
 }
 
@@ -1408,6 +1408,10 @@ export const api = {
         form,
       );
     },
+    uploadLimit: (name: string, p: string) =>
+      getJson<FileUploadLimitResponse>(
+        `/api/copies/${encodeURIComponent(name)}/files/upload-limit?path=${encodeURIComponent(p)}`,
+      ),
     remove: (name: string, p: string) =>
       deleteEmpty(
         `/api/copies/${encodeURIComponent(name)}/files?path=${encodeURIComponent(p)}`,
@@ -1802,6 +1806,11 @@ export type FileSaveResponse =
 
 export interface FileUploadResponse {
   written: { name: string; size: number }[];
+}
+
+export interface FileUploadLimitResponse {
+  maxBytes: number;
+  maxBytesLabel: string;
 }
 
 export type ReqStatus = 'pending' | 'pass' | 'fail' | 'retest' | 'proposed';
