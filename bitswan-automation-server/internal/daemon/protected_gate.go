@@ -513,6 +513,13 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == gatePathPrefix+"/api/people/directory":
 		handleBaileyPeopleDirectory(w, r, email)
 
+	case r.URL.Path == gatePathPrefix+"/api/org-invite":
+		if !callerIsAdmin(email) {
+			writeJSONErrorStatus(w, "only admins can invite people to the organization", http.StatusForbidden)
+			return
+		}
+		handleBaileyOrgInvite(w, r, email)
+
 	// Host-scoped device-trust SSO dance (mfa_device_grant.go). These live under
 	// the gate prefix — not /bailey/api — because gateHandler serves the gate
 	// prefix IN-PROCESS on every host, while /bailey/* is only reachable where

@@ -124,6 +124,8 @@ const shareModalCSS = `
   .bailey-share-footer button:hover { opacity: .9; }
   .bailey-share-error { padding: 0 24px 8px; color: var(--bl-destructive); font-size: 13px; display: none; }
   .bailey-share-error.shown { display: block; }
+  .bailey-org-invite { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 24px 10px; padding: 10px 12px; background: var(--bl-surface, #FAFAFA); border: 1px solid var(--bl-border, #E4E4E7); border-radius: 10px; }
+  .bailey-org-invite-msg { font-size: 12.5px; color: var(--bl-fg, #18181B); flex: 1 1 auto; line-height: 17px; }
   .bailey-share-empty { padding: 8px 24px 12px; color: var(--bl-muted-fg); font-size: 13px; }
 
   /* --- Inherited workspace access (#251) --------------------------------
@@ -295,6 +297,8 @@ func shareModalHTML() string {
     <div class="bailey-share-picker" id="bailey-share-picker"></div>
 
     <div class="bailey-share-error" id="bailey-share-error"></div>
+
+    <div class="bailey-org-invite" id="bailey-org-invite" style="display:none;"></div>
 
     <div class="bailey-share-section-title" id="bailey-share-requests-title" style="display:none;">Pending access requests</div>
     <div class="bailey-share-list" id="bailey-share-requests" style="display:none;"></div>
@@ -501,6 +505,7 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     renderPublic(data);
   }
   var magicCreateURL = '/2fa-gate/api/magic-link/create';
+  var orgInviteURL = '/2fa-gate/api/org-invite';
   var magicRevokeURL = '/2fa-gate/api/magic-link/revoke';
   var publicCreateURL = '/2fa-gate/api/public/create';
   var publicRevokeURL = '/2fa-gate/api/public/revoke';
@@ -832,8 +837,33 @@ func shareModalJS(host, callerEmail, apiURL string) string {
     add(pType, v, role).then(function(){
       $('bailey-share-input').value = '';
       renderPicker();
+      if (pType === 'email') offerOrgInvite(v);
     });
   };
+  function offerOrgInvite(addr) {
+    if (!lastData || !lastData.can_invite_to_org) return;
+    var box = $('bailey-org-invite');
+    if (!box) return;
+    box.style.display = '';
+    box.innerHTML = '';
+    var msg = el('span', {class:'bailey-org-invite-msg',
+      text: addr + ' needs an account before they can sign in. Invite them to the organization?'});
+    var go = el('button', {class:'bailey-linkbtn', type:'button', text:'Send invitation'});
+    go.onclick = function() {
+      go.disabled = true; go.textContent = 'Sending\u2026';
+      fetch(orgInviteURL, {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({email: addr, role: 'member'})
+      })
+        .then(function(r){ if(!r.ok) return readErr(r).then(function(m){throw new Error(m);}); return r.json(); })
+        .then(function(){ box.innerHTML = ''; box.appendChild(el('span', {class:'bailey-org-invite-msg', text:'Invitation emailed to ' + addr + '.'})); })
+        .catch(function(e){ box.innerHTML = ''; box.appendChild(el('span', {class:'bailey-org-invite-msg', text:'Could not invite ' + addr + ': ' + e})); });
+    };
+    var no = el('button', {class:'bailey-linkbtn', type:'button', text:'Not now',
+      onclick:function(){ box.style.display='none'; box.innerHTML=''; }});
+    box.appendChild(msg); box.appendChild(go); box.appendChild(no);
+  }
   window.__baileyMagicConfirm = function(){ $('bailey-magic-confirm').classList.add('open'); };
   window.__baileyMagicCancel = function(){ $('bailey-magic-confirm').classList.remove('open'); };
   window.__baileyMagicCreate = function() {
