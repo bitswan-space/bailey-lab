@@ -156,6 +156,7 @@ func compile(wctx infradriver.WorkspaceContext, bs *Bitswan) (composeYAML string
 		// (re)creates or restarts it. Absent (nil) = active. This is what lets an
 		// evicted instance's container be removed and stay gone until woken.
 		if conf.Active != nil && !*conf.Active {
+			routes = append(routes, c.routesKeptWhileAsleep(depID, conf, deployments)...)
 			continue
 		}
 		for _, sd := range c.slotDBPairs(conf) {
@@ -335,6 +336,30 @@ func sortedDepIDs(m map[string]*Deployment) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func (c *compileState) routesKeptWhileAsleep(depID string, conf *Deployment, deployments map[string]*Deployment) []infradriver.Route {
+	automationName := conf.AutomationNameOr(depID)
+	depStage := conf.StageOrProduction()
+	var out []infradriver.Route
+	for _, sd := range c.slotDBPairs(conf) {
+		slotConf := c.effectiveSlotConf(depID, conf, sd.slot, deployments)
+		cfg := c.resolveAutomationConfig(slotConf)
+		if !cfg.Expose || cfg.Port == 0 {
+			continue
+		}
+		isLiveSlot := sd.slot == "" || sd.slot == c.liveSlotFor(slotConf)
+		isDRSlot := sd.slot != "" && sd.slot == c.drSlotFor(slotConf)
+		if !isLiveSlot && !isDRSlot {
+			continue
+		}
+		roleStage := depStage
+		if isDRSlot {
+			roleStage = "dr"
+		}
+		out = append(out, c.workspaceRoute(automationName, slotConf.Context, depStage, cfg.Port, sd.slot, roleStage))
+	}
 	return out
 }
 
