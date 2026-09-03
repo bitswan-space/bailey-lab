@@ -129,3 +129,22 @@ func TestProtectedProxyOAuthEnvUnparseableIssuer(t *testing.T) {
 		t.Errorf("whitelist_domains = %q, want \".example.com\"", got)
 	}
 }
+
+func TestProtectedProxyEnv_BrokeredLoginAsksForNoConsentScreen(t *testing.T) {
+	env := protectedProxyOAuthEnv("acme.bswn.io", "id", "secret", "https://auth.acme.bswn.io", "cookie")
+	env["OAUTH2_PROXY_APPROVAL_PROMPT"] = "auto"
+
+	if got := env["OAUTH2_PROXY_APPROVAL_PROMPT"]; got != "auto" {
+		t.Errorf("approval_prompt = %q, want \"auto\"", got)
+	}
+	if got := env["OAUTH2_PROXY_SCOPE"]; !strings.Contains(got, "offline_access") {
+		t.Errorf("scope = %q, want offline_access retained", got)
+	}
+}
+
+func TestProtectedProxyEnv_DefaultsToForcedApprovalPrompt(t *testing.T) {
+	env := protectedProxyOAuthEnv("acme.bswn.io", "id", "secret", "https://keycloak.example/realms/master", "cookie")
+	if _, set := env["OAUTH2_PROXY_APPROVAL_PROMPT"]; set {
+		t.Error("the unbrokered path must not pin approval_prompt; oauth2-proxy's default applies")
+	}
+}
