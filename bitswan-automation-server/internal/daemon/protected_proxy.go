@@ -40,19 +40,30 @@ func provisionProtectedProxy() error {
 		return fmt.Errorf("no domain configured — register with the AOC first")
 	}
 
-	aocClient, err := aoc.NewAOCClient()
-	if err != nil {
-		return fmt.Errorf("AOC not configured: %w", err)
-	}
-	// The shared protected client. Fetching it here also registers the
-	// bailey callback URI; per-endpoint callbacks are added as routes appear.
-	client, err := aocClient.GetOrCreateOAuthClient("bitswan-protected",
-		"https://bailey."+domain+"/oauth2/callback")
-	if err != nil {
-		return fmt.Errorf("fetch protected OAuth client from AOC: %w", err)
-	}
-	if client.ClientID == "" || client.ClientSecret == "" || client.IssuerURL == "" {
-		return fmt.Errorf("AOC returned an incomplete protected OAuth client")
+	var clientID, clientSecret, issuerURL string
+	brokered := ssoActive()
+	if brokered {
+		secret, err := loadOrCreateDexProxySecret()
+		if err != nil {
+			return err
+		}
+		clientID, clientSecret, issuerURL = dexProxyClientID, secret, dexIssuerURL(domain)
+	} else {
+		aocClient, err := aoc.NewAOCClient()
+		if err != nil {
+			return fmt.Errorf("AOC not configured: %w", err)
+		}
+		// The shared protected client. Fetching it here also registers the
+		// bailey callback URI; per-endpoint callbacks are added as routes appear.
+		client, err := aocClient.GetOrCreateOAuthClient("bitswan-protected",
+			"https://bailey."+domain+"/oauth2/callback")
+		if err != nil {
+			return fmt.Errorf("fetch protected OAuth client from AOC: %w", err)
+		}
+		if client.ClientID == "" || client.ClientSecret == "" || client.IssuerURL == "" {
+			return fmt.Errorf("AOC returned an incomplete protected OAuth client")
+		}
+		clientID, clientSecret, issuerURL = client.ClientID, client.ClientSecret, client.IssuerURL
 	}
 
 	homeDir := os.Getenv("HOME")
@@ -73,7 +84,13 @@ func provisionProtectedProxy() error {
 		return err
 	}
 
-	env := protectedProxyOAuthEnv(domain, client.ClientID, client.ClientSecret, client.IssuerURL, cookieSecret)
+	env := protectedProxyOAuthEnv(domain, clientID, clientSecret, issuerURL, cookieSecret)
+	if brokered {
+		env["OAUTH2_PROXY_OIDC_GROUPS_CLAIM"] = "groups"
+		env["OAUTH2_PROXY_REDIRECT_URL"] = dexProxyRedirectURL(domain)
+		env["OAUTH2_PROXY_SKIP_PROVIDER_BUTTON"] = "false"
+		env["OAUTH2_PROXY_SCOPE"] = "openid email profile groups offline_access"
+	}
 
 	composeYAML, err := dockercompose.CreateProtectedProxyDockerComposeFile(env)
 	if err != nil {
