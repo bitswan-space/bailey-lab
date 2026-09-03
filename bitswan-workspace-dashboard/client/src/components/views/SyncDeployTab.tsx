@@ -3,12 +3,14 @@ import {
   Rocket,
   ArrowDownToLine,
   CheckCircle2,
+  RotateCcw,
   SlidersHorizontal,
   Terminal,
   TriangleAlert,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
+import { useLastDeploy } from '@/hooks/useLastDeploy';
 import { DiffTab } from '@/components/diff/DiffTab';
 import { CopyHistoryView } from '@/components/views/CopyHistoryView';
 import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
@@ -17,9 +19,10 @@ import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
 import { api, errorMessage, type BpDivergence } from '@/lib/api';
 import { deployReadiness } from '@/lib/deployReadiness';
-import { watchDeployTask } from '@/lib/deployBp';
+import { deployBpWithToast, watchDeployTask } from '@/lib/deployBp';
 import { useUrlEnum } from '@/lib/urlState';
 import { PublishOverMainDialog } from '@/components/workspace/PublishOverMainDialog';
+import { DeployFailureNotice } from '@/components/workspace/DeployFailureNotice';
 
 interface SyncDeployTabProps {
   bp: BusinessProcess;
@@ -101,6 +104,8 @@ export function SyncDeployTab({
     error: changedError,
   } = useCopyStatus(wt.name, editNonce);
   const [busy, setBusy] = useState(false);
+  const [deployAttempts, setDeployAttempts] = useState(0);
+  const { lastDeploy } = useLastDeploy(bp.name, 'dev', undefined, deployAttempts);
   // The Advanced way out of a blocked Deploy: publish this copy's version even
   // though main moved on. Confirmation lives in its own dialog, which reads
   // live whose commits it would supersede.
@@ -139,6 +144,7 @@ export function SyncDeployTab({
     changed,
     changedUnknown: changedLoading || !!changedError,
     bpDir: bp.name,
+    lastDeploy,
   });
   const bpChanged = readiness.bpChanged as typeof changed;
   const adds = bpChanged.reduce((a, c) => a + c.adds, 0);
@@ -221,8 +227,28 @@ export function SyncDeployTab({
       }
     } finally {
       setBusy(false);
+      setDeployAttempts((n) => n + 1);
     }
   }, [wt.name, bp.name, onDeployed]);
+
+  const runRetryDeploy = useCallback(async () => {
+    setBusy(true);
+    setDeployLog([]);
+    try {
+      const outcome = await deployBpWithToast({
+        bp: bp.name,
+        stage: 'dev',
+        loading: `Deploying ${bp.displayName} to dev…`,
+        success: `${bp.displayName} deployed to dev`,
+        failurePrefix: `Deploy of ${bp.displayName} to dev failed again`,
+        onLog: setDeployLog,
+      });
+      if (outcome === 'completed') onDeployed();
+    } finally {
+      setBusy(false);
+      setDeployAttempts((n) => n + 1);
+    }
+  }, [bp.name, bp.displayName, onDeployed]);
 
   // Publishing over main. `expectedMain` is the tip the dialog described: if
   // main moved in between, gitops 409s rather than superseding commits the
@@ -395,6 +421,22 @@ export function SyncDeployTab({
               </Button>
             )}
           </div>
+        ) : readiness.retryOnly ? (
+          <div className="flex max-w-64 shrink-0 flex-col items-end gap-2 text-right">
+            <span className="text-[13px] font-medium text-red-700">
+              Published to main, but the last deploy failed.
+            </span>
+            <Button
+              size="lg"
+              className="shrink-0 bg-red-700 text-white hover:bg-red-800"
+              disabled={busy}
+              title="Run the deploy again — no commits, nothing published"
+              onClick={() => void runRetryDeploy()}
+            >
+              <RotateCcw className="size-4" aria-hidden />
+              {busy ? 'Retrying…' : 'Retry deploy'}
+            </Button>
+          </div>
         ) : actionable ? (
           <Button
             size="lg"
@@ -428,6 +470,10 @@ export function SyncDeployTab({
           </div>
         )}
       </div>
+
+      {readiness.lastDeployFailed && lastDeploy && (
+        <DeployFailureNotice lastDeploy={lastDeploy} stageLabel="Development" />
+      )}
 
       <PublishOverMainDialog
         open={publishOverOpen}

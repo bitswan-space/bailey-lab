@@ -107,3 +107,58 @@ test('the BP filter matches the directory and its contents, not its prefix', () 
     [BP, `${BP}/backend/main.go`],
   );
 });
+
+test('a business process published to main but never successfully deployed still offers Deploy', () => {
+  const r = deployReadiness({
+    divergence: level,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    lastDeploy: { status: 'failed', cause: 'disk_full', error: 'No space left on device' },
+  });
+  assert.equal(r.upToDate, false);
+  assert.equal(r.actionable, true);
+  assert.equal(r.lastDeployFailed, true);
+  assert.equal(r.retryOnly, true);
+  assert.equal(r.blockedByBehind, false);
+});
+
+test('a failed deploy with commits still to publish is not retry-only', () => {
+  const r = deployReadiness({
+    divergence: { ahead_bp: 2, behind_bp: 0 },
+    changed: [{ path: `${BP}/README.md` }],
+    changedUnknown: false,
+    bpDir: BP,
+    lastDeploy: { status: 'failed', cause: 'disk_full' },
+  });
+  assert.equal(r.lastDeployFailed, true);
+  assert.equal(r.retryOnly, false);
+  assert.equal(r.actionable, true);
+});
+
+test('a last deploy that succeeded leaves the up-to-date reading alone', () => {
+  const r = deployReadiness({
+    divergence: level,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    lastDeploy: { status: 'completed' },
+  });
+  assert.equal(r.lastDeployFailed, false);
+  assert.equal(r.upToDate, true);
+  assert.equal(r.retryOnly, false);
+});
+
+test('a business process with no recorded deploy outcome is neither failed nor blocked', () => {
+  for (const lastDeploy of [null, undefined]) {
+    const r = deployReadiness({
+      divergence: level,
+      changed: [],
+      changedUnknown: false,
+      bpDir: BP,
+      lastDeploy,
+    });
+    assert.equal(r.lastDeployFailed, false, String(lastDeploy));
+    assert.equal(r.upToDate, true, String(lastDeploy));
+  }
+});

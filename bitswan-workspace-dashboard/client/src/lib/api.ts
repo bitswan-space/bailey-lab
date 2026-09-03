@@ -568,6 +568,22 @@ export interface BpHistory {
   history: BpHistoryEntry[];
 }
 
+export interface BpLastDeploy {
+  bp: string;
+  stage: string;
+  // eslint-disable-next-line no-restricted-syntax
+  copy: string | null;
+  // eslint-disable-next-line no-restricted-syntax
+  status: 'completed' | 'failed' | null;
+  // eslint-disable-next-line no-restricted-syntax
+  error?: string | null;
+  // eslint-disable-next-line no-restricted-syntax
+  cause?: string | null;
+  // eslint-disable-next-line no-restricted-syntax
+  step?: string | null;
+  at?: string;
+}
+
 /** One freeze/unfreeze/policy governance event in the staging gate's history
  *  (persisted in bitswan.yaml under staging_gate[bp].log). `event` discriminates
  *  the kind and `detail` is the human-readable summary. */
@@ -1144,6 +1160,10 @@ export const api = {
       { verdict, ...(note ? { note } : {}) },
     ),
   /** Per-stage deployment history for a business process (newest-first). */
+  bpLastDeploy: (bp: string, stage: string, copy?: string) =>
+    getJson<BpLastDeploy>(
+      `/api/automations/business-processes/${encodeURIComponent(bp)}/last-deploy?stage=${encodeURIComponent(stage)}${copy ? `&copy=${encodeURIComponent(copy)}` : ''}`,
+    ),
   bpHistory: (bp: string, stage: string) =>
     getJson<BpHistory>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/history?stage=${encodeURIComponent(stage)}`,

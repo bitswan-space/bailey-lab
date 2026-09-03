@@ -212,6 +212,33 @@ export function registerAutomationRoutes(
     },
   );
 
+  app.get<{
+    Params: { bp: string };
+    Querystring: { stage?: string; copy?: string };
+  }>(
+    '/api/automations/business-processes/:bp/last-deploy',
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+      try {
+        const r = await gitops.bpLastDeploy(
+          req.params.bp,
+          req.query.stage || 'dev',
+          req.query.copy,
+        );
+        if (!r.ok) {
+          return reply
+            .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+            .send({ error: 'gitops error', status: r.status, body: r.body });
+        }
+        return r.body;
+      } catch (err) {
+        app.log.warn({ err, bp: req.params.bp }, 'bp last-deploy failed');
+        return reply.code(502).send({ error: 'gitops unreachable' });
+      }
+    },
+  );
+
   // Deployments → Secrets: read the BP's shared key names + per-stage values.
   app.get<{ Params: { bp: string } }>(
     '/api/automations/business-processes/:bp/secrets',
