@@ -183,7 +183,7 @@ func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 	// there) mints a single-use grant and bounces back to this host's
 	// device-claim to set its own cookie. See mfa_device_grant.go.
 	rememberOrigin(w, r)
-	http.Redirect(w, r, onboardDeviceGrantURL(), http.StatusSeeOther)
+	writeDeviceTrustHandoff(w, onboardDeviceGrantURL())
 	return false
 }
 

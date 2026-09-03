@@ -62,6 +62,7 @@ echo "    (dnsmasq upstream = $DNS_UPSTREAM)"
 mkdir -p /etc/dnsmasq.d
 cat > /etc/dnsmasq.d/localhost.conf <<EOF
 address=/.localhost/127.0.0.1
+address=/.test/127.0.0.1
 listen-address=127.0.0.1
 no-resolv
 server=$DNS_UPSTREAM
