@@ -5,15 +5,20 @@ import { isValidCopyName } from '../services/workspace.js';
 import {
   deleteCopyFile,
   ensureCopyDir,
-  formatByteSize,
   readCopyFile,
   readCopyTree,
   searchCopyFiles,
   statCopyFile,
-  uploadLimitBytes,
   writeCopyFile,
   type FileEtag,
 } from '../services/copy-files.js';
+import {
+  FREE_DISK_REASON,
+  bufferedUploadLimit,
+  describeLimit,
+  tooLargeMessage,
+  uploadLimitBytes,
+} from '../services/upload-limits.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface CopyFilesRoutesOptions {
@@ -230,7 +235,7 @@ export function registerCopyFilesRoutes(
     }
     if (rejected.length > 0) {
       return reply.code(413).send({
-        error: `${rejected.join(', ')} exceeded the ${formatByteSize(maxBytes)} upload limit (80% of the free disk space on this workspace). Nothing was saved for ${rejected.length === 1 ? 'it' : 'them'}.`,
+        error: tooLargeMessage(rejected, describeLimit(maxBytes, FREE_DISK_REASON)),
         rejected,
         maxBytes,
         written,
@@ -258,10 +263,19 @@ export function registerCopyFilesRoutes(
       return reply.code(400).send({ error: String(err) });
     }
     try {
-      const maxBytes = await uploadLimit(targetDir);
-      return { maxBytes, maxBytesLabel: formatByteSize(maxBytes) };
+      return describeLimit(await uploadLimit(targetDir), FREE_DISK_REASON);
     } catch (err) {
       app.log.warn({ err, name: req.params.name }, 'free-space probe failed');
+      return reply.code(500).send({ error: 'could not determine free disk space' });
+    }
+  });
+
+  app.get('/api/upload-limit', async (_req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      return await bufferedUploadLimit(workspaceRoot);
+    } catch (err) {
+      app.log.warn({ err }, 'free-space probe failed');
       return reply.code(500).send({ error: 'could not determine free disk space' });
     }
   });

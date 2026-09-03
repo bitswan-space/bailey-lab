@@ -6,7 +6,11 @@ import { after, before, describe, it } from 'node:test';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyMultipart from '@fastify/multipart';
 import { registerCopyFilesRoutes } from './copy-files.js';
-import { formatByteSize, uploadLimitBytes } from '../services/copy-files.js';
+import {
+  FREE_DISK_REASON,
+  formatByteSize,
+  uploadLimitBytes,
+} from '../services/upload-limits.js';
 
 const PRODUCTION_MULTIPART_FILE_SIZE_LIMIT = 5 * 1024 * 1024;
 const PRODUCTION_MULTIPART_FILE_COUNT_LIMIT = 16;
@@ -185,6 +189,7 @@ describe('spec attachment uploads are bounded by free disk space, not a fixed 5 
     assert.deepEqual(JSON.parse(res.body), {
       maxBytes: INJECTED_LIMIT,
       maxBytesLabel: '2 MB',
+      reason: FREE_DISK_REASON,
     });
   });
 });
