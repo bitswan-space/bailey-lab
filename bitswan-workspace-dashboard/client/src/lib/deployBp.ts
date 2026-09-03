@@ -150,6 +150,8 @@ export async function deployBpWithToast(opts: {
   success: string;
   failurePrefix: string;
   onProgress?: (message: string) => void;
+  onError?: (message: string) => void;
+  onLog?: (log: string[]) => void;
 }): Promise<BpDeployOutcome> {
   const toastId = `bp-deploy-${opts.copy ?? 'main'}-${opts.bp}`;
   toast.loading(opts.loading, { id: toastId, duration: Infinity });
@@ -186,6 +188,8 @@ export async function deployBpWithToast(opts: {
     success: opts.success,
     failurePrefix: opts.failurePrefix,
     onProgress: opts.onProgress,
+    onError: opts.onError,
+    onLog: opts.onLog,
   });
 }
 

@@ -265,6 +265,7 @@ async def create_process(
         members = automation_service.members_for_bp(slug, copy=body.copy, stage=stage)
         res = await spawn_set_deploy(
             label=slug,
+            bp=slug,
             members=members,
             stage=stage,
             copy=body.copy,
@@ -385,6 +386,7 @@ async def create_process_from_bundle(
         members = automation_service.members_for_bp(slug, copy=copy, stage=stage)
         res = await spawn_set_deploy(
             label=slug,
+            bp=slug,
             members=members,
             stage=stage,
             copy=copy,

@@ -26,7 +26,7 @@ Design rules shared by both flows:
 import logging
 import os
 
-from app.services import bp_databases, bp_git, git_server
+from app.services import bp_databases, bp_git, deploy_outcome, git_server
 from app.services.bp_secrets import delete_bp_secret_files
 from app.services.firewall_service import delete_bp_attempt_logs
 from app.services.process_service import process_service
@@ -285,6 +285,8 @@ async def delete_business_process(slug: str, deleted_by: str | None, service) ->
     # 3. Shared egress gateways (guarded on the fresh yaml, post-pop).
     await _remove_gateways(service, read_bitswan_yaml(service.gitops_dir), groups)
     _unlink_lru_markers(service, (ctx for ctx, _ in groups))
+    for _stage in ("dev", "staging", "production", "live-dev"):
+        deploy_outcome.clear(slug, _stage)
 
     # 4. Push the emptied slice so the driver reconcile prunes routes (and any
     #    container step 1 missed).
@@ -396,6 +398,8 @@ async def delete_copy(name: str, deleted_by: str | None, service) -> dict:
     # 3. Gateways (guarded) + LRU markers.
     await _remove_gateways(service, read_bitswan_yaml(service.gitops_dir), groups)
     _unlink_lru_markers(service, (ctx for ctx, _ in groups))
+    for bp in affected_bps:
+        deploy_outcome.clear(bp, "live-dev", name)
 
     # 4. Push the slice of each BP this copy actually deployed in, so the driver
     #    prunes the copy's routes and containers there.

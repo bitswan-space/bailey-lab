@@ -51,7 +51,7 @@ MEM_MB="${E2E_VM_MEMORY_MB:-8192}"
 BRIDGE="${E2E_VM_BRIDGE:-virbr0}"
 VM_IP="${E2E_VM_IP:-192.168.122.50}"
 VM_GW="${E2E_VM_GW:-192.168.122.1}"
-VM_MAC="52:54:00:e2:e0:01"
+VM_MAC="${E2E_VM_MAC:-52:54:00:e2:e0:01}"
 KEEP="${KEEP:-0}"; [ "${1:-}" = "--keep" ] && KEEP=1
 
 [ -e /dev/kvm ] || { echo "ERROR: /dev/kvm not present — enable virtualization."; exit 1; }
@@ -315,7 +315,7 @@ if [ -f "$WORK/base-images.tar" ]; then
   mark "guest: seed base images"
 fi
 
-$SSH "$VM" "env $PROXY_ENV bash /repo/e2e/local-vm/run-e2e.sh" || RC=$? || true
+$SSH "$VM" "env $PROXY_ENV bash ${E2E_GUEST_SCRIPT:-/repo/e2e/local-vm/run-e2e.sh}" || RC=$? || true
 # NB: no aggregate mark here — run-e2e's time is captured in full, step by step,
 # in the guest timeline (bringup builds + npm ci + playwright + walkthrough +
 # manual). Marking it again would double-count it in the merged total below.

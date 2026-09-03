@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.deploy_manager import DeployStatus, DeployStep, deploy_manager
 from app.event_broadcaster import event_broadcaster
+from app.services import deploy_outcome
 from app.services.automation_service import AutomationService, make_hostname_label
 from app.services.git_server import validate_bp_name
 from app.dependencies import get_automation_service
@@ -102,6 +103,18 @@ async def get_bp_history(
     """Deployment history for one BP stage (newest-first; `current` = live).
     Derived from the git log of bitswan.yaml."""
     return await automation_service.bp_history(bp, stage)
+
+
+@router.get("/business-processes/{bp}/last-deploy")
+async def get_bp_last_deploy(
+    bp: ValidBp,
+    stage: str = Query("dev"),
+    copy: str | None = Query(None),
+):
+    outcome = deploy_outcome.read(bp, stage, copy)
+    if outcome is None:
+        return {"bp": bp, "stage": stage, "copy": copy, "status": None}
+    return outcome
 
 
 @router.get("/business-processes/{bp}/diff")
@@ -1109,6 +1122,7 @@ async def _run_bp_deploy_with_progress(
             step=DeployStep.DONE,
             message="Business process deployed successfully",
         )
+        deploy_outcome.record(bp, stage, copy, "completed")
         await _broadcast_task()
     except Exception as exc:
         logger.exception("BP deploy failed for %s (task %s)", bp, task_id)
@@ -1120,6 +1134,15 @@ async def _run_bp_deploy_with_progress(
             status=DeployStatus.FAILED,
             error=error_detail,
             message="Business process deployment failed",
+        )
+        task = deploy_manager.get_task(task_id)
+        deploy_outcome.record(
+            bp,
+            stage,
+            copy,
+            "failed",
+            error=error_detail,
+            step=task.step.value if task and task.step else None,
         )
         await _broadcast_task()
     finally:

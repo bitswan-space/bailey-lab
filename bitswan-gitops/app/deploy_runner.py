@@ -20,6 +20,7 @@ import logging
 
 from app.deploy_manager import DeployStatus, DeployStep, deploy_manager
 from app.event_broadcaster import event_broadcaster
+from app.services import deploy_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ async def _run_set_deploy_with_progress(
     commit_subject: str | None,
     deployed_by: str | None = None,
     prune_scope: bool = False,
+    bp: str | None = None,
 ):
     """Background coroutine driving `deploy_source_set` with progress
     broadcasting. Mirrors `_run_bp_deploy_with_progress`; on terminal status
@@ -95,6 +97,8 @@ async def _run_set_deploy_with_progress(
             step=DeployStep.DONE,
             message=f"{label} deployed successfully",
         )
+        if bp:
+            deploy_outcome.record(bp, stage, copy, "completed")
         await _broadcast_task()
     except Exception as exc:
         logger.exception("Set deploy failed for %s (task %s)", label, task_id)
@@ -107,6 +111,16 @@ async def _run_set_deploy_with_progress(
             error=error_detail,
             message=f"{label} deployment failed",
         )
+        if bp:
+            task = deploy_manager.get_task(task_id)
+            deploy_outcome.record(
+                bp,
+                stage,
+                copy,
+                "failed",
+                error=error_detail,
+                step=task.step.value if task and task.step else None,
+            )
         await _broadcast_task()
 
 
@@ -119,6 +133,7 @@ async def spawn_set_deploy(
     service=None,
     deployed_by: str | None = None,
     prune_scope: bool = False,
+    bp: str | None = None,
 ) -> dict:
     """Reserve the deployable members under one task and spawn the background
     set deploy. Never raises.
@@ -199,6 +214,7 @@ async def spawn_set_deploy(
                 # concurrent deploy would have its live deployment retired out
                 # from under it (#378).
                 prune_scope=prune_scope and not skipped,
+                bp=bp,
             )
         )
         return {
