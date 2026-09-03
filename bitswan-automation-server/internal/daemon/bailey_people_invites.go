@@ -43,6 +43,50 @@ import (
 // AOC without a network; production resolves to *aoc.AOCClient.
 type aocInviteClient interface {
 	ListOrgUsers() ([]aoc.OrgUser, error)
+	InviteToOrg(email, invitedBy, role string) (*aoc.OrgInviteResult, error)
+}
+
+func handleBaileyOrgInvite(w http.ResponseWriter, r *http.Request, by string) {
+	var req struct {
+		Email string `json:"email"`
+		Role  string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	email := strings.TrimSpace(strings.ToLower(req.Email))
+	role := strings.TrimSpace(req.Role)
+	if role == "" {
+		role = roleMember
+	}
+	if email == "" || !strings.Contains(email, "@") {
+		writeJSONCodeError(w, "a valid email address is required", "invalid_email", http.StatusBadRequest)
+		return
+	}
+	if role != roleMember && role != roleAdmin {
+		writeJSONCodeError(w, "role must be member or admin", "invalid_role", http.StatusBadRequest)
+		return
+	}
+
+	client, err := newAOCInviteClient()
+	if err != nil {
+		writeJSONCodeError(w, "This server is not connected to an AOC, so it cannot invite new people.", "no_aoc", http.StatusBadGateway)
+		return
+	}
+	result, err := client.InviteToOrg(email, by, role)
+	if err != nil {
+		writeJSONCodeError(w, err.Error(), "invite_failed", http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":              true,
+		"email":           result.Email,
+		"account_created": result.AccountCreated,
+		"role":            result.Role,
+	})
 }
 
 var newAOCInviteClient = func() (aocInviteClient, error) {

@@ -219,6 +219,7 @@ func handleShareAPI(w http.ResponseWriter, r *http.Request, email string, groups
 			"can_mint_magic_link": canMint,
 			"magic_links":         mlOut,
 			"can_make_public":     canPub,
+			"can_invite_to_org":   callerIsAdmin(email),
 			"is_public":           isPublic,
 			"public_url":          publicURL,
 			// nil when the endpoint has no workspace membership surface; the

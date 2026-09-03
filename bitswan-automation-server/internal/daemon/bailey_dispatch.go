@@ -277,6 +277,11 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleBaileyInviteResend(w, r, email)
 			return
 		}
+	case "/bailey/api/people/org-invite":
+		if r.Method == http.MethodPost {
+			handleBaileyOrgInvite(w, r, email)
+			return
+		}
 	case "/bailey/api/people/role":
 		if r.Method == http.MethodPost {
 			handleSetUserRole(w, r, email)
