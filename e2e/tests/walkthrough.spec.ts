@@ -410,6 +410,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     [/Server overview/i, 'server-overview', /Server overview|Overview/i],
     [/Resource management/i, 'resource-management', /Resource management/i],
     [/Endpoint access/i, 'endpoint-access', /Endpoint access/i],
+    [/Single sign-on/i, 'sso-settings', /Single sign-on/i],
     [/Your devices/i, 'devices', /devices/i],
   ] as const) {
     await chapter(slot, async () => {
