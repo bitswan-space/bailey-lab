@@ -114,6 +114,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: frontend-shop
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_UI_PORT: "5173"
             BITSWAN_URL_PREFIX: https://ws2-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-blue.example.com
@@ -123,6 +124,7 @@ services:
             KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
             KEYCLOAK_REALM: testrealm
             KEYCLOAK_URL: https://keycloak.example.com
+            PORT: "8080"
         image: internal/ws2-shop-frontend:shafsum
         labels:
             gitops.automation_name: frontend
@@ -160,6 +162,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: shop
             BITSWAN_DEPLOYMENT_ID: frontend-shop@green
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_UI_PORT: "5173"
             BITSWAN_URL_PREFIX: https://ws2-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws2-{name}-8d90-green.example.com
@@ -169,6 +172,7 @@ services:
             KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
             KEYCLOAK_REALM: testrealm
             KEYCLOAK_URL: https://keycloak.example.com
+            PORT: "8080"
         image: internal/ws2-shop-frontend:shafsum
         labels:
             gitops.automation_name: frontend
