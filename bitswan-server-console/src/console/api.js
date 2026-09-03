@@ -341,6 +341,7 @@ export const Api = {
   // platform sends it — redeeming the link trusts a device, so an emailed
   // link would make a mailbox enough to earn device trust (#369).
   invite: (email, role) => postJSON('/bailey/api/people/invite', { email, role }),
+  orgInvite: (email, role) => postJSON('/bailey/api/people/org-invite', { email, role }),
   // Outstanding (unconsumed) invites, expired ones included (flagged).
   invites: () => getJSON('/bailey/api/people/invites'),
   revokeInvite: (email) => postJSON('/bailey/api/people/invites/revoke', { email }),

@@ -23,8 +23,18 @@ import (
 // --- test doubles --------------------------------------------------------
 
 type fakeAOCClient struct {
-	users   []aoc.OrgUser
-	listErr error
+	users     []aoc.OrgUser
+	listErr   error
+	inviteErr error
+	invited   []string
+}
+
+func (f *fakeAOCClient) InviteToOrg(email, invitedBy, role string) (*aoc.OrgInviteResult, error) {
+	if f.inviteErr != nil {
+		return nil, f.inviteErr
+	}
+	f.invited = append(f.invited, email)
+	return &aoc.OrgInviteResult{Email: email, AccountCreated: true, Role: role}, nil
 }
 
 func (f *fakeAOCClient) ListOrgUsers() ([]aoc.OrgUser, error) {
