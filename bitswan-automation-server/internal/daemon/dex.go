@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
@@ -78,6 +81,12 @@ func buildDexConfig(domain string, aocClient *aoc.OAuthClientResponse, sso ssoCo
 
 	cfg := map[string]any{
 		"issuer": dexIssuerURL(domain),
+		"frontend": map[string]any{
+			"issuer":  "Bitswan Bailey",
+			"dir":     "/etc/dex/web",
+			"theme":   dexThemeName,
+			"logoURL": "theme/logo.svg",
+		},
 		"storage": map[string]any{
 			"type":   "sqlite3",
 			"config": map[string]any{"file": "/var/dex/dex.db"},
@@ -127,13 +136,15 @@ func writeDexConfig(domain string, sso ssoConfig, proxySecret string) error {
 	if err := os.WriteFile(dir+"/config.yaml", []byte(cfg), 0600); err != nil {
 		return fmt.Errorf("write dex config: %w", err)
 	}
-	for _, path := range []string{dir, dir + "/config.yaml"} {
-		if err := os.Chown(path, dexUID, dexGID); err != nil {
-			return fmt.Errorf("hand %s to the broker's uid: %w", path, err)
-		}
+	if _, err := writeDexWebTheme(dir); err != nil {
+		return err
+	}
+	if err := chownTree(dir, dexUID, dexGID); err != nil {
+		return fmt.Errorf("hand the broker's files to its uid: %w", err)
 	}
 
-	composeYAML, err := dockercompose.CreateDexDockerComposeFile(dexPort)
+	sum := sha256.Sum256([]byte(cfg))
+	composeYAML, err := dockercompose.CreateDexDockerComposeFile(dexPort, hex.EncodeToString(sum[:]))
 	if err != nil {
 		return fmt.Errorf("render dex compose: %w", err)
 	}
@@ -141,6 +152,15 @@ func writeDexConfig(domain string, sso ssoConfig, proxySecret string) error {
 		return fmt.Errorf("write dex compose: %w", err)
 	}
 	return nil
+}
+
+func chownTree(root string, uid, gid int) error {
+	return filepath.Walk(root, func(path string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chown(path, uid, gid)
+	})
 }
 
 func aocProtectedOAuthClient(domain string) (*aoc.OAuthClientResponse, error) {

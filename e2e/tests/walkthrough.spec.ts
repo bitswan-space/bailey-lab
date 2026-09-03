@@ -3398,8 +3398,9 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await expect(async () => {
         expect(new URL(vp.url()).hostname, 'unauthenticated visitors reach the broker').toBe(`auth.${ENV.domain}`);
       }).toPass({ timeout: PROGRESS });
-      await expect(vp.getByText(/Log in with Acme single sign-on/i).first()).toBeVisible({ timeout: PROGRESS });
-      await expect(vp.getByText(/Log in with Bitswan account/i).first()).toBeVisible({ timeout: SLA });
+      await expect(vp.getByText(/Sign in to Bitswan Bailey/i).first()).toBeVisible({ timeout: PROGRESS });
+      await expect(vp.getByText(/Acme single sign-on/i).first()).toBeVisible({ timeout: SLA });
+      await expect(vp.getByText(/Bitswan account/i).first()).toBeVisible({ timeout: SLA });
       await capture(vp, 'sso-chooser');
     } finally {
       await visitor.close().catch(() => {});
