@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -205,7 +206,10 @@ func serveHTTP(ctx context.Context, listen, gitDir, deployReposDir, token string
 		server.GitProjectRoot = filepath.Dir(deployReposDir)
 		// Provision a per-BP deploy repo on demand (a BP created after startup
 		// can't be pushed to until its bare repo exists). Idempotent.
+		var provisionRepo sync.Mutex
 		server.EnsureDeployRepo = func(bp string) error {
+			provisionRepo.Lock()
+			defer provisionRepo.Unlock()
 			return ensureDeployRepoAt(deployRepoDirFor(deployReposDir, bp), bp, cf)
 		}
 		label = filepath.Base(deployReposDir)
