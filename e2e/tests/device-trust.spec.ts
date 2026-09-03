@@ -1,14 +1,15 @@
 import { test, expect, ENV, oidcLogin } from '../fixtures/bitswan';
-import type { Page } from '@playwright/test';
+import type { Page, Request } from '@playwright/test';
 
 const SLA = 90_000;
 const DEVICE_COOKIE = '_bailey_device';
 
 type DocumentHop = { url: string; carriedDeviceCookie: boolean };
+type HopTrace = { hops: DocumentHop[]; stop: () => void };
 
-function traceDocumentNavigations(page: Page): DocumentHop[] {
+function traceDocumentNavigations(page: Page): HopTrace {
   const hops: DocumentHop[] = [];
-  page.on('request', (req) => {
+  const onRequest = (req: Request) => {
     if (req.resourceType() !== 'document') return;
     req
       .allHeaders()
@@ -19,13 +20,23 @@ function traceDocumentNavigations(page: Page): DocumentHop[] {
         });
       })
       .catch(() => {});
-  });
-  return hops;
+  };
+  page.on('request', onRequest);
+  return { hops, stop: () => page.off('request', onRequest) };
 }
 
 function renderTrace(label: string, hops: DocumentHop[]): string {
-  const rows = hops.map((h) => `  ${h.carriedDeviceCookie ? 'HAS ' : 'NONE'}  ${h.url}`);
-  return [`${label} — device cookie per document request:`, ...rows].join('\n');
+  return [
+    `${label} — device cookie per document request:`,
+    ...hops.map((h) => `  ${h.carriedDeviceCookie ? 'HAS ' : 'NONE'}  ${h.url}`),
+  ].join('\n');
+}
+
+function pairingDanceHops(hops: DocumentHop[]): string[] {
+  const onboardHost = new URL(ENV.onboardUrl).hostname;
+  return hops
+    .filter((h) => h.url.includes('/2fa-gate/api/device-grant') || new URL(h.url).hostname === onboardHost)
+    .map((h) => h.url);
 }
 
 async function deviceCookieHosts(page: Page): Promise<string[]> {
@@ -35,15 +46,68 @@ async function deviceCookieHosts(page: Page): Promise<string[]> {
     .sort();
 }
 
-async function signInThroughKeycloak(page: Page): Promise<boolean> {
+async function fillKeycloakFormIfShown(page: Page): Promise<boolean> {
   const username = page.locator('#username, input[name="username"]').first();
-  const appeared = await username
+  const shown = await username
     .waitFor({ state: 'visible', timeout: 15_000 })
     .then(() => true)
     .catch(() => false);
-  if (appeared) await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
+  if (shown) await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
   else await page.waitForLoadState('networkidle').catch(() => {});
-  return appeared;
+  return shown;
+}
+
+async function endKeycloakSession(page: Page) {
+  await page.goto(ENV.keycloakUrl + '/realms/bitswan/protocol/openid-connect/logout');
+  const confirmLogout = page
+    .locator('#kc-logout, input[name="confirmLogout"], button[name="confirmLogout"]')
+    .or(page.getByRole('button', { name: /^\s*(Sign out|Log ?out|Yes)\s*$/i }))
+    .first();
+  if (await confirmLogout.isVisible({ timeout: 10_000 }).catch(() => false)) await confirmLogout.click();
+  await page.waitForLoadState('networkidle').catch(() => {});
+}
+
+type RoundTrip = {
+  trace: string;
+  danceHops: string[];
+  credentialsRetyped: boolean;
+  restingUrl: string;
+  cookieHosts: string[];
+};
+
+async function signOutAndBackIn(
+  page: Page,
+  label: string,
+  opts: { endIdpSession: boolean },
+  settle: () => Promise<void>,
+): Promise<RoundTrip> {
+  await page.goto(ENV.baileyUrl + '/bailey/signout');
+  await page.waitForLoadState('networkidle').catch(() => {});
+  if (opts.endIdpSession) await endKeycloakSession(page);
+
+  const { hops, stop } = traceDocumentNavigations(page);
+  await page.goto(ENV.baileyUrl + '/');
+  const credentialsRetyped = await fillKeycloakFormIfShown(page);
+  await settle();
+  stop();
+
+  return {
+    trace: renderTrace(label, hops),
+    danceHops: pairingDanceHops(hops),
+    credentialsRetyped,
+    restingUrl: page.url(),
+    cookieHosts: await deviceCookieHosts(page),
+  };
+}
+
+function renderEvidence(r: RoundTrip): string {
+  return [
+    r.trace,
+    `  keycloak asked for credentials again: ${r.credentialsRetyped}`,
+    `  untrusted-device dance hops: ${r.danceHops.length}`,
+    `  device cookie hosts still in the browser jar: ${r.cookieHosts.join(', ') || '(none)'}`,
+    `  resting url: ${r.restingUrl}`,
+  ].join('\n');
 }
 
 test('device trust survives signing out and signing back in (#414)', async ({ page }) => {
@@ -51,6 +115,14 @@ test('device trust survives signing out and signing back in (#414)', async ({ pa
   const console_ = page.frameLocator('iframe').last();
   const trustPrompt = page.getByRole('heading', { name: /Trust this device/i });
   const workspaces = console_.getByRole('heading', { name: /Workspaces/i });
+  const consoleHost = new URL(ENV.baileyUrl).hostname;
+
+  const settle = async () => {
+    await Promise.race([
+      workspaces.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+      trustPrompt.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+    ]);
+  };
 
   await test.step('pair this device: sign in and claim the server', async () => {
     await page.goto(ENV.onboardUrl + '/');
@@ -69,62 +141,27 @@ test('device trust survives signing out and signing back in (#414)', async ({ pa
         : null;
     if (claim) await claim.click();
     await expect(workspaces).toBeVisible({ timeout: SLA });
-    expect(await deviceCookieHosts(page), 'pairing must leave a device cookie').toContain(
-      new URL(ENV.baileyUrl).hostname,
-    );
+    expect(await deviceCookieHosts(page), 'pairing must leave a device cookie').toContain(consoleHost);
   });
 
-  await test.step('a reload on the same host still sees a trusted device', async () => {
-    const hops = traceDocumentNavigations(page);
-    await page.goto(ENV.baileyUrl + '/');
-    await expect(workspaces, renderTrace('same-host reload', hops)).toBeVisible({ timeout: SLA });
-    await expect(trustPrompt).toHaveCount(0);
+  let silent!: RoundTrip;
+  await test.step('sign out of Bailey only, and let the live IdP session sign us back in', async () => {
+    silent = await signOutAndBackIn(page, 'silent re-auth', { endIdpSession: false }, settle);
+    await expect(workspaces).toBeVisible({ timeout: SLA });
   });
 
-  const hops = traceDocumentNavigations(page);
-
-  await test.step('sign out through the product, then end the Keycloak session', async () => {
-    await page.goto(ENV.baileyUrl + '/bailey/signout');
-    await page.waitForLoadState('networkidle').catch(() => {});
-    await page.goto(ENV.keycloakUrl + '/realms/bitswan/protocol/openid-connect/logout');
-    const confirmLogout = page
-      .locator('#kc-logout, input[name="confirmLogout"], button[name="confirmLogout"]')
-      .or(page.getByRole('button', { name: /^\s*(Sign out|Log ?out|Yes)\s*$/i }))
-      .first();
-    if (await confirmLogout.isVisible({ timeout: 10_000 }).catch(() => false)) await confirmLogout.click();
-    await page.waitForLoadState('networkidle').catch(() => {});
+  let retyped!: RoundTrip;
+  await test.step('sign out of Bailey and the IdP, then sign back in for real', async () => {
+    retyped = await signOutAndBackIn(page, 'sign-out → credentials → sign-in', { endIdpSession: true }, settle);
   });
 
-  let credentialsRetyped = false;
-  const signInHops = traceDocumentNavigations(page);
-  await test.step('sign back in', async () => {
-    await page.goto(ENV.baileyUrl + '/');
-    credentialsRetyped = await signInThroughKeycloak(page);
-    await Promise.race([
-      workspaces.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-      trustPrompt.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
-    ]);
-  });
-
-  const hostsAfter = await deviceCookieHosts(page);
-  const consoleHost = new URL(ENV.baileyUrl).hostname;
-  const onboardHost = new URL(ENV.onboardUrl).hostname;
-  const bouncedToPairing = signInHops
-    .filter((h) => h.url.includes('/2fa-gate/api/device-grant') || new URL(h.url).hostname === onboardHost)
-    .map((h) => h.url);
-  const trace = renderTrace('sign-out → sign-in', hops);
-  const evidence = [
-    trace,
-    `  keycloak asked for credentials again: ${credentialsRetyped}`,
-    `  device cookie hosts still in the browser jar: ${hostsAfter.join(', ') || '(none)'}`,
-    `  resting url: ${page.url()}`,
-    `  untrusted-device dance hops during sign-in: ${bouncedToPairing.length}`,
-  ].join('\n');
+  const evidence = `${renderEvidence(silent)}\n\n${renderEvidence(retyped)}`;
   test.info().annotations.push({ type: 'device-trust evidence', description: evidence });
   process.stdout.write(`\n${evidence}\n\n`);
 
-  expect(hostsAfter, `the device cookie must not be dropped by signing out\n${evidence}`).toContain(consoleHost);
-  expect(bouncedToPairing, `signing back in must not run the untrusted-device dance\n${evidence}`).toHaveLength(0);
+  expect(silent.danceHops, `a silent re-auth must not run the untrusted-device dance\n${evidence}`).toHaveLength(0);
+  expect(retyped.cookieHosts, `the device cookie must not be dropped by signing out\n${evidence}`).toContain(consoleHost);
+  expect(retyped.danceHops, `signing back in must not run the untrusted-device dance\n${evidence}`).toHaveLength(0);
   await expect(trustPrompt, `signing back in must not re-prompt for device trust\n${evidence}`).toHaveCount(0);
   await expect(workspaces, `signing back in must land on the console\n${evidence}`).toBeVisible({ timeout: SLA });
 });
