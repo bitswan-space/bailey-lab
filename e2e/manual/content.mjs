@@ -173,7 +173,7 @@ export const MANUAL = {
     },
     {
       num: '07', eyebrow: 'Say what it does', title: 'Describe the process',
-      lede: 'Before code, intent. Each business process carries a living specification — what it does, for whom, and the rules it must keep.',
+      lede: 'Before code, intent. Each business process carries a living specification — typically what it does, for whom, and the rules it must keep.',
       slots: [
         { id: 'description', caption: 'Invoice Processing · the README spec, with the flowchart of the invoice lifecycle drawn into it' },
         { id: 'flowchart-editor', label: 'Live capture', caption: 'Flowchart editor · drawing the invoice flow node-by-node, no diagram syntax to learn' },
