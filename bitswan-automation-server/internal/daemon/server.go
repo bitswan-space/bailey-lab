@@ -156,6 +156,8 @@ var socketPrivilegedRoutes = []string{
 	"/bailey/access/grant",    // #189: ACL mutation
 	"/bailey/access/revoke",   // #189: ACL mutation
 	"/bailey/access/list",     // #234: an endpoint's ACL + owner address
+	"/bailey/sso/disable",
+	"/bailey/sso/status",
 }
 
 // socketWorkspaceCallableRoutes is the counterpart: socket routes that a
@@ -259,6 +261,9 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// reachable by first-party workspace containers.
 	mux.HandleFunc("/bailey/devices/approve", s.authMiddleware(s.handleDeviceApprove))
 	mux.HandleFunc("/bailey/devices/pending", s.authMiddleware(s.handleDevicesPending))
+
+	mux.HandleFunc("/bailey/sso/status", s.authMiddleware(s.handleSSOStatus))
+	mux.HandleFunc("/bailey/sso/disable", s.authMiddleware(s.handleSSODisable))
 
 	// Bailey authoritative role lookup (authenticated; socket-trusted). Lets a
 	// trusted backend (gitops, on behalf of the dashboard shim that already

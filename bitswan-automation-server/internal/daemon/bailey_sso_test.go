@@ -572,3 +572,177 @@ func TestBuildDexConfig_AsksEveryUpstreamForARefreshableSession(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildDexConfig_SSOOnlyLeavesNothingToChooseFrom(t *testing.T) {
+	aocClient := &aoc.OAuthClientResponse{
+		ClientID: "bitswan-protected", ClientSecret: "kc-secret",
+		IssuerURL: "https://keycloak.example/realms/master",
+	}
+	sso := ssoConfig{
+		DisplayName: "Acme SSO", IssuerURL: "https://id.acme.example",
+		ClientID: "bailey", ClientSecret: "s3cret", SSOOnly: true,
+	}
+
+	raw, err := buildDexConfig("acme.bswn.io", aocClient, sso, "proxy-secret")
+	if err != nil {
+		t.Fatalf("buildDexConfig: %v", err)
+	}
+
+	scopes := dexConnectorScopes(t, raw)
+	if _, ok := scopes[dexConnectorAOC]; ok {
+		t.Error("sso_only must drop the Bitswan-account connector, or people can still bypass the customer's provider")
+	}
+	if len(scopes) != 1 {
+		t.Fatalf("got %d connectors, want exactly 1 so Dex skips the chooser", len(scopes))
+	}
+}
+
+func TestHandleSSOSet_SSOOnlyCannotOutliveSSOItself(t *testing.T) {
+	ssoTestStore(t)
+	writeTestConfig(t)
+	orig := applyLoginTopology
+	applyLoginTopology = func() error { return nil }
+	t.Cleanup(func() { applyLoginTopology = orig })
+
+	w := httptest.NewRecorder()
+	body := `{"enabled":false,"sso_only":true,"display_name":"Acme SSO"}`
+	handleSSOSet(w, httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body)), "ada@example.com")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+
+	stored, err := getSSOConfig()
+	if err != nil {
+		t.Fatalf("getSSOConfig: %v", err)
+	}
+	if stored.SSOOnly {
+		t.Error("sso_only stored against a disabled provider would silently remove Bitswan sign-in the next time SSO is enabled")
+	}
+	if !strings.Contains(w.Body.String(), `"sso_only":false`) {
+		t.Errorf("the response must show the normalized value, got %s", w.Body.String())
+	}
+}
+
+func TestDisableSSO_IsTheWayBackInAfterLockout(t *testing.T) {
+	ssoTestStore(t)
+	writeTestConfig(t)
+
+	reconciled := 0
+	orig := applyLoginTopology
+	applyLoginTopology = func() error { reconciled++; return nil }
+	t.Cleanup(func() { applyLoginTopology = orig })
+
+	locked := ssoConfig{
+		Enabled: true, SSOOnly: true, DisplayName: "Acme SSO",
+		IssuerURL: "https://id.acme.example", ClientID: "bailey", ClientSecret: "s3cret",
+	}
+	if err := setSSOConfig(locked, "ada@example.com"); err != nil {
+		t.Fatalf("setSSOConfig: %v", err)
+	}
+
+	changed, err := disableSSO("host-cli")
+	if err != nil {
+		t.Fatalf("disableSSO: %v", err)
+	}
+	if !changed {
+		t.Error("disabling a live provider must report that it changed something")
+	}
+	if reconciled != 1 {
+		t.Errorf("login topology reconciled %d times, want 1 — the proxy has to be pointed back at the AOC", reconciled)
+	}
+	if ssoActive() {
+		t.Error("still active after the escape hatch ran")
+	}
+	stored, _ := getSSOConfig()
+	if stored.SSOOnly {
+		t.Error("sso_only must be cleared too, or the next enable locks everyone out again")
+	}
+	if stored.ClientSecret != "s3cret" {
+		t.Error("the escape hatch should keep the configuration so an admin can re-enable it once the provider is back")
+	}
+
+	changed, err = disableSSO("host-cli")
+	if err != nil {
+		t.Fatalf("second disableSSO: %v", err)
+	}
+	if changed {
+		t.Error("disabling twice must be a no-op, not a second reconcile")
+	}
+	if reconciled != 1 {
+		t.Errorf("reconciled %d times after a no-op disable, want 1", reconciled)
+	}
+}
+
+func TestHandleSSOStatusAndDisable_OverTheOperatorSocket(t *testing.T) {
+	ssoTestStore(t)
+	writeTestConfig(t)
+	orig := applyLoginTopology
+	applyLoginTopology = func() error { return nil }
+	t.Cleanup(func() { applyLoginTopology = orig })
+
+	s := &Server{token: tSockAdminTok}
+	locked := ssoConfig{
+		Enabled: true, SSOOnly: true, DisplayName: "Acme SSO",
+		IssuerURL: "https://id.acme.example", ClientID: "bailey", ClientSecret: "s3cret",
+	}
+	if err := setSSOConfig(locked, "ada@example.com"); err != nil {
+		t.Fatalf("setSSOConfig: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	s.handleSSOStatus(w, jsonReq(http.MethodGet, "/bailey/sso/status", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"enabled":true`, `"sso_only":true`, `"Acme SSO"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("status body missing %s: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "s3cret") {
+		t.Error("the operator status must not print the client secret")
+	}
+
+	w = httptest.NewRecorder()
+	s.handleSSODisable(w, jsonReq(http.MethodPost, "/bailey/sso/disable", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("disable = %d body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"changed":true`) {
+		t.Errorf("disable body = %s", w.Body.String())
+	}
+	if ssoActive() {
+		t.Error("still active after the operator disabled it")
+	}
+
+	w = httptest.NewRecorder()
+	s.handleSSOStatus(w, jsonReq(http.MethodPost, "/bailey/sso/status", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST status = %d, want 405", w.Code)
+	}
+	w = httptest.NewRecorder()
+	s.handleSSODisable(w, jsonReq(http.MethodGet, "/bailey/sso/disable", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET disable = %d, want 405", w.Code)
+	}
+}
+
+func TestDisableSSO_SurfacesAFailedReconcile(t *testing.T) {
+	ssoTestStore(t)
+	writeTestConfig(t)
+	orig := applyLoginTopology
+	applyLoginTopology = func() error { return fmt.Errorf("broker would not stop") }
+	t.Cleanup(func() { applyLoginTopology = orig })
+
+	if err := setSSOConfig(ssoConfig{
+		Enabled: true, SSOOnly: true, DisplayName: "Acme SSO",
+		IssuerURL: "https://id.acme.example", ClientID: "bailey", ClientSecret: "s3cret",
+	}, "ada@example.com"); err != nil {
+		t.Fatalf("setSSOConfig: %v", err)
+	}
+
+	if _, err := disableSSO("host-cli"); err == nil {
+		t.Fatal("a reconcile that failed must not be reported as a successful recovery")
+	}
+}

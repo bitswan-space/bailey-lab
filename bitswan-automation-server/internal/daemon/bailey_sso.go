@@ -21,6 +21,7 @@ type ssoRoleMapping struct {
 
 type ssoConfig struct {
 	Enabled      bool             `json:"enabled"`
+	SSOOnly      bool             `json:"sso_only"`
 	DisplayName  string           `json:"display_name"`
 	IssuerURL    string           `json:"issuer_url"`
 	ClientID     string           `json:"client_id"`
@@ -146,6 +147,7 @@ func ssoRoleForGroups(c ssoConfig, groups []string) string {
 
 type ssoConfigDTO struct {
 	Enabled      bool             `json:"enabled"`
+	SSOOnly      bool             `json:"sso_only"`
 	DisplayName  string           `json:"display_name"`
 	IssuerURL    string           `json:"issuer_url"`
 	ClientID     string           `json:"client_id"`
@@ -181,6 +183,7 @@ func writeSSOConfigDTO(w http.ResponseWriter) {
 	}
 	writeJSON(w, ssoConfigDTO{
 		Enabled:      c.Enabled,
+		SSOOnly:      c.SSOOnly,
 		DisplayName:  c.DisplayName,
 		IssuerURL:    c.IssuerURL,
 		ClientID:     c.ClientID,
@@ -209,6 +212,7 @@ func handleSSOSet(w http.ResponseWriter, r *http.Request, by string) {
 		req.ClientSecret = existing.ClientSecret
 	}
 	req.IssuerURL = strings.TrimRight(strings.TrimSpace(req.IssuerURL), "/")
+	req.SSOOnly = req.SSOOnly && req.Enabled
 
 	if req.Enabled {
 		if err := validateSSOConfig(req); err != nil {
@@ -272,4 +276,70 @@ func applySSORoleMapping(email string, groups []string) {
 	if err := dbSetUserRole(email, role, "sso:"+c.DisplayName); err == nil {
 		_ = recordEvent("sso:"+c.DisplayName, "sso.role.map", email+" -> "+role)
 	}
+}
+
+func disableSSO(by string) (bool, error) {
+	c, err := getSSOConfig()
+	if err != nil {
+		return false, err
+	}
+	if !c.Enabled && !c.SSOOnly {
+		return false, nil
+	}
+	c.Enabled = false
+	c.SSOOnly = false
+	if err := setSSOConfig(c, by); err != nil {
+		return false, err
+	}
+	if err := applyLoginTopology(); err != nil {
+		return false, err
+	}
+	_ = recordEvent(by, "sso.disable", c.IssuerURL)
+	return true, nil
+}
+
+func (s *Server) handleSSODisable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "turning single sign-on off requires the automation-server admin token (run the bitswan CLI on the host)", http.StatusForbidden)
+		return
+	}
+	changed, err := disableSSO("host-cli")
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	c, err := getSSOConfig()
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"changed": changed, "display_name": c.DisplayName, "issuer_url": c.IssuerURL})
+}
+
+func (s *Server) handleSSOStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.callerHasAdminToken(r) {
+		writeJSONError(w, "reading the single sign-on configuration requires the automation-server admin token (run the bitswan CLI on the host)", http.StatusForbidden)
+		return
+	}
+	c, err := getSSOConfig()
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"enabled":      c.Enabled,
+		"sso_only":     c.SSOOnly,
+		"display_name": c.DisplayName,
+		"issuer_url":   c.IssuerURL,
+		"updated_at":   c.UpdatedAt,
+		"updated_by":   c.UpdatedBy,
+	})
 }
