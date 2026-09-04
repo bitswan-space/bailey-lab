@@ -150,6 +150,14 @@ docker logs "$MOCK_CLAUDE_CTR" 2>&1 | tail -2
 export ANTHROPIC_BASE_URL="http://${MOCK_CLAUDE_CTR}:${MOCK_CLAUDE_PORT}"
 export ANTHROPIC_API_KEY="sk-ant-e2e-mock-0000000000000000000000000000000000"
 export ANTHROPIC_AUTH_TOKEN="sk-ant-e2e-mock-0000000000000000000000000000000000"
+
+CLAUDE_EXTENSION_DIR="$REPO_ROOT/bitswan-workspace-dashboard/.claude-extension"
+if [ -d "$CLAUDE_EXTENSION_DIR" ]; then
+  export BITSWAN_CLAUDE_EXTENSION_DIR="$CLAUDE_EXTENSION_DIR"
+  echo "=== agent chat: mounting the unpacked Claude Code extension from $CLAUDE_EXTENSION_DIR ==="
+else
+  echo "=== agent chat: no unpacked extension at $CLAUDE_EXTENSION_DIR — the Coding Agent chapter will fail ==="
+fi
 mark "[1c/7] mock Anthropic API"
 
 # Pin the daemon to THIS checkout's images so workspaces it creates via the
@@ -168,6 +176,7 @@ sudo env \
   ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
   ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_AUTH_TOKEN" \
+  BITSWAN_CLAUDE_EXTENSION_DIR="${BITSWAN_CLAUDE_EXTENSION_DIR:-}" \
   "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status

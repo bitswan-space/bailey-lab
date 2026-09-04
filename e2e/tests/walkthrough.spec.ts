@@ -1291,13 +1291,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // The composer only renders once the extension reports an authenticated
     // Claude. bringup wires the mock Anthropic endpoint into the dashboard as
     // well as the agent container, so that is env-credential auth and needs no
-    // sign-in; a login screen here means that wiring broke, and saying so beats
-    // a bare timeout on the composer.
-    await expect
-      .poll(panelText, { timeout: 5 * 60_000, intervals: [1000, 2000, 5000] })
-      .not.toMatch(/How do you want to log in|Claude\.ai Subscription/i);
+    // sign-in — and when it is missing the panel sits on its login screen, so
+    // say that instead of timing out anonymously on the composer.
     const composer = panel.locator('[contenteditable="true"], [role="textbox"]').first();
-    await composer.waitFor({ state: 'visible', timeout: 3 * 60_000 });
+    const composerReady = await composer
+      .waitFor({ state: 'visible', timeout: 5 * 60_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!composerReady) {
+      throw new Error(`the agent chat never offered a composer; the panel says: ${(await panelText()).slice(0, 240)}`);
+    }
     await capture(dashPage, 'coding-agent');
 
     // Ask the agent something and hard-assert the answer. The reply text is the
