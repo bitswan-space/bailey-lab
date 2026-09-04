@@ -223,10 +223,50 @@ Until then this spike is single-identity per workspace, and
 `CLAUDE_CONFIG_DIR` is set to one mounted directory so at least a container
 recreate does not sign the user out.
 
+## Per-user hosts, and the rest of the webview contract
+
+The per-user extension host is now built: `vscode-host/worker.ts` is forked per
+(user, copy, bp) with `CLAUDE_CONFIG_DIR=<config root>/<email slug>`, and the
+parent (`services/vscode-sidebar.ts`) speaks a small IPC protocol to it —
+`open` / `toExt` / `close` in, `ready` / `opened` / `toWebview` / `openExternal`
+out. Verified in the deployed workspace: the forked worker and the `claude` it
+spawns both carry the slug directory, and the directory is created on the host
+mount. Idle hosts with no attached webview are reaped after 30 minutes, so an
+abandoned tab does not hold a Node process and a CLI forever.
+
+Hosting the panel also needs three parts of the webview contract that are easy
+to miss because the panel renders without them:
+
+- **The theme-kind class.** VS Code puts `vscode-light` / `vscode-dark` on the
+  webview `body` and the bundle reads it (`isDark = !body.classList.contains
+  ('vscode-light')`), so with no class the panel silently chooses dark: dark
+  welcome art on our light background, and every `.vscode-light`-scoped rule
+  (including the button borders) inert. We stamp the class plus
+  `data-vscode-theme-kind`.
+- **Asset URIs, and the race behind them.** The panel asks the extension for
+  `get_asset_uris` only after `init` resolves, and it renders the login view in
+  that same turn — so over a websocket + IPC hop the answer lands ~60ms after
+  the `<img>` has already mounted with `src=""`, and nothing re-renders it
+  (that context's signals do not drive this view). The panel therefore has to
+  have the map *before* it asks: the worker pre-fetches it at open time, the
+  page inlines it as `window.__bitswanAssetUris`, the injected bridge answers
+  the request locally, and the inlined bundle's `assetUris` signal is seeded
+  with it. The seed is a regex over the bundle text and fails open — a bundle
+  that no longer matches loses the welcome art, nothing else.
+- **`env.openExternal`.** Swallowing it makes every external link and the whole
+  OAuth hand-off dead. It is relayed out of the host, but the reliable open is
+  the one the bridge does synchronously when it sees the panel's own `open_url`
+  request, because that is still inside the click's user activation. The iframe
+  carries `allow-popups-to-escape-sandbox` so the opened tab is not itself
+  sandboxed, and a blocked popup falls back to a clickable link in the panel.
+
+`ExtensionContext.globalState` / `workspaceState` are now files under the user's
+config directory instead of an in-memory map, so onboarding flags and experiment
+gates survive a restart — and `showTerminalBanner` defaults to false, since this
+deployment has no terminal to fall back to.
+
 ## What is not done
 
-- **No dashboard UI.** The next step is serving `html` + the two assets and
-  bridging `postMessage` over the existing websocket.
 - **Rendering isolation is an open question.** VS Code runs webview HTML in a
   sandboxed frame for a reason: this is extension-authored HTML with
   `enableScripts: true`, and putting it straight into the dashboard's DOM would

@@ -3,7 +3,17 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { emailFromRequest } from '../lib/user.js';
 import { isValidBpId, isValidCopyName } from '../services/workspace.js';
-import { extensionPath, latestSidebar, openSidebar, pageFor, sidebarEnabled } from '../services/vscode-sidebar.js';
+import {
+  ASSET_BASE_PLACEHOLDER,
+  extensionPath,
+  openSidebar,
+  pageFor,
+  sidebarEnabled,
+  startSidebarHostReaper,
+  type SidebarOpen,
+} from '../services/vscode-sidebar.js';
+
+const pendingOpens = new Map<string, SidebarOpen>();
 
 const PREFIX = '/api/coding-agent/sidebar';
 
@@ -38,6 +48,8 @@ export function registerVscodeSidebarRoutes(
   app: FastifyInstance,
   { workspaceRoot }: VscodeSidebarRoutesOptions,
 ): void {
+  startSidebarHostReaper(app);
+
   app.get(`${PREFIX}/status`, async (_req, reply) => {
     reply.header('Cache-Control', 'no-store');
     return { available: sidebarEnabled() };
@@ -54,10 +66,12 @@ export function registerVscodeSidebarRoutes(
       if (!email) return reply.code(403).send({ error: 'no verified identity' });
 
       try {
-        const instance = await openSidebar({ email, ...s, workspaceRoot });
-        const html = pageFor(instance, {
+        const opened = await openSidebar({ email, ...s, workspaceRoot });
+        pendingOpens.set(`${email} ${s.copy} ${s.bp}`, opened);
+        const html = pageFor(opened.html, {
           assetBase: `${PREFIX}/asset`,
           extensionDir: extensionPath()!,
+          assetUris: opened.assetUris,
         });
         reply.header('Content-Type', 'text/html; charset=utf-8');
         return reply.send(html);
@@ -87,10 +101,6 @@ export function registerVscodeSidebarRoutes(
     try {
       const buf = await fs.promises.readFile(abs);
       reply.header('Content-Type', MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream');
-      // The sidebar runs in a sandboxed frame with no `allow-same-origin`, so it
-      // has an opaque origin and every asset fetch is cross-origin. These are
-      // static files from the extension bundle, not user data, so serving them
-      // to an opaque origin is what the isolation costs.
       reply.header('Access-Control-Allow-Origin', '*');
       return reply.send(buf);
     } catch {
@@ -108,17 +118,32 @@ export function registerVscodeSidebarRoutes(
         socket.close(1008, 'unavailable');
         return;
       }
-      let instance;
-      try {
-        instance = await latestSidebar({ email, ...s, workspaceRoot });
-      } catch (err) {
-        app.log.warn({ err, ...s }, 'sidebar bridge activate failed');
-        socket.close(1011, 'activate failed');
-        return;
+      const key = `${email} ${s.copy} ${s.bp}`;
+      let opened = pendingOpens.get(key);
+      if (!opened) {
+        try {
+          opened = await openSidebar({ email, ...s, workspaceRoot });
+          pendingOpens.set(key, opened);
+        } catch (err) {
+          app.log.warn({ err, ...s }, 'sidebar bridge open failed');
+          socket.close(1011, 'open failed');
+          return;
+        }
       }
+      const attached = opened;
 
-      const off = instance.view.onWebviewMessage((message) => {
-        if (socket.readyState === 1) socket.send(JSON.stringify(message));
+      const assetBase = `${req.protocol}://${req.headers.host}${PREFIX}/asset`;
+      const off = attached.onToWebview((message) => {
+        if (socket.readyState !== 1) return;
+        const text = JSON.stringify(message).split(ASSET_BASE_PLACEHOLDER).join(assetBase);
+        if (process.env.SIDEBAR_TRACE === '1') {
+          const m = message as { type?: string; response?: { type?: string } };
+          app.log.info(
+            { kind: m?.response?.type ?? m?.type ?? '?', bytes: text.length, head: text.slice(0, 300) },
+            'sidebar->webview',
+          );
+        }
+        socket.send(text);
       });
       socket.on('message', (raw: Buffer | string) => {
         let parsed: unknown;
@@ -139,9 +164,13 @@ export function registerVscodeSidebarRoutes(
             'sidebar<-webview',
           );
         }
-        instance.view.sendFromWebview(parsed);
+        attached.sendToExtension(parsed);
       });
-      socket.on('close', () => off.dispose());
+      socket.on('close', () => {
+        off();
+        attached.close();
+        if (pendingOpens.get(key) === attached) pendingOpens.delete(key);
+      });
     },
   );
 }
