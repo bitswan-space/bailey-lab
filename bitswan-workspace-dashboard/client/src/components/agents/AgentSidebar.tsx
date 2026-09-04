@@ -10,27 +10,6 @@ interface AgentSidebarProps {
 const FRAME_KEY = '__bitswanSidebar';
 const HOST_KEY = '__bitswanHost';
 
-/**
- * The Claude Code VS Code sidebar, hosted by the dashboard's own partial
- * `vscode` API (server/src/vscode-host).
- *
- * The frame carries `allow-same-origin`. An opaque-origin sandbox was the first
- * choice and it does not work: the webview reads `localStorage` (which throws
- * outright without the flag) and fetches extension resources at runtime, and
- * from an opaque origin those requests carry no SameSite cookies so the Bailey
- * gate answers 302. Both are load-bearing for the panel.
- *
- * The honest consequence: because this document is served from the dashboard's
- * own origin, `allow-same-origin` leaves the extension's bundle same-origin with
- * the dashboard. The isolation VS Code gets comes from serving webviews on a
- * SEPARATE origin, which needs its own routed hostname here — see
- * docs/spike-vscode-shim.md. Until that exists this is a spike, not a shipping
- * posture.
- *
- * This component still owns the websocket and relays over `postMessage`, which
- * is the shape VS Code uses anyway — a webview never talks to the extension
- * host directly.
- */
 export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const [ready, setReady] = useState(false);
@@ -62,7 +41,10 @@ export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
         outbound.splice(0).forEach((m) => socket?.send(m));
       });
       socket.addEventListener('error', () => setFailed(true));
-      socket.addEventListener('close', () => setReady(false));
+      socket.addEventListener('close', () => {
+        setReady(false);
+        setFailed(true);
+      });
       socket.addEventListener('message', (ev) => {
         let payload: unknown;
         try {
@@ -89,7 +71,7 @@ export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
         key={src}
         title="Claude Code"
         src={src}
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"
         className="h-full w-full border-0 bg-white"
       />
       {!ready && (

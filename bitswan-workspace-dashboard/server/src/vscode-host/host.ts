@@ -1,5 +1,6 @@
 import Module from 'node:module';
 import { createRequire } from 'node:module';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,28 +42,58 @@ function proxiedApi(api: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
-function memoryMemento() {
-  const store = new Map<string, unknown>();
+
+function fileMemento(file: string, defaults: Record<string, unknown> = {}) {
+  let store: Record<string, unknown>;
+  try {
+    store = { ...defaults, ...(JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>) };
+  } catch {
+    store = { ...defaults };
+  }
+  const flush = () => {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(store, null, 1));
+      fs.renameSync(tmp, file);
+    } catch {
+      return;
+    }
+  };
   return {
-    keys: () => [...store.keys()],
-    get: (k: string, fallback?: unknown) => (store.has(k) ? store.get(k) : fallback),
+    keys: () => Object.keys(store),
+    get: (k: string, fallback?: unknown) => (k in store ? store[k] : fallback),
     update: async (k: string, v: unknown) => {
-      if (v === undefined) store.delete(k);
-      else store.set(k, v);
+      if (v === undefined) delete store[k];
+      else store[k] = v;
+      flush();
     },
     setKeysForSync: () => undefined,
   };
 }
 
-function extensionContext(extensionDir: string, storageRoot: string, api: Record<string, unknown>) {
+function workspaceSlug(workspaceFolder: string): string {
+  return crypto.createHash('sha256').update(workspaceFolder).digest('hex').slice(0, 12);
+}
+
+function extensionContext(
+  extensionDir: string,
+  storageRoot: string,
+  api: Record<string, unknown>,
+  workspaceFolder: string,
+) {
   const Uri = api.Uri as { file: (p: string) => unknown };
   return {
     subscriptions: [] as { dispose(): unknown }[],
     extensionPath: extensionDir,
     extensionUri: Uri.file(extensionDir),
     extensionMode: 1,
-    globalState: memoryMemento(),
-    workspaceState: memoryMemento(),
+    globalState: fileMemento(path.join(storageRoot, 'global-state.json'), {
+      showTerminalBanner: false,
+    }),
+    workspaceState: fileMemento(
+      path.join(storageRoot, `workspace-state-${workspaceSlug(workspaceFolder)}.json`),
+    ),
     secrets: {
       get: async () => undefined,
       store: async () => undefined,
@@ -109,9 +140,14 @@ export async function activateExtension(opts: {
     return originalLoad.call(this, request, parent, isMain);
   };
 
+  const configDir = process.env.CLAUDE_CONFIG_DIR;
   const storageRoot =
-    opts.storageRoot ?? fs.mkdtempSync(path.join(os.tmpdir(), 'bitswan-vscode-host-'));
-  const ctx = extensionContext(opts.extensionPath, storageRoot, api);
+    opts.storageRoot ??
+    (configDir
+      ? path.join(configDir, 'vscode-host')
+      : fs.mkdtempSync(path.join(os.tmpdir(), 'bitswan-vscode-host-')));
+  fs.mkdirSync(storageRoot, { recursive: true, mode: 0o700 });
+  const ctx = extensionContext(opts.extensionPath, storageRoot, api, opts.workspaceFolder);
 
   try {
     const requireFromHost = createRequire(import.meta.url);

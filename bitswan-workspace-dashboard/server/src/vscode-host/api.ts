@@ -139,6 +139,7 @@ export interface WebviewViewProviderRegistration {
 
 export interface HostState {
   workspaceFolder: string;
+  onOpenExternal?: (url: string) => void;
   configuration: Map<string, unknown>;
   commands: Map<string, (...args: unknown[]) => unknown>;
   webviewViewProviders: WebviewViewProviderRegistration[];
@@ -219,22 +220,26 @@ export function buildVscodeApi(state: HostState): Record<string, unknown> {
     createOutputChannel: (name: string) => {
       recordTouch('window.createOutputChannel', 'call', true);
       const noop = () => undefined;
+      const trace = process.env.SIDEBAR_TRACE === '1';
+      const emit = (level: string) => (...args: unknown[]) => {
+        if (trace) console.error(`[${name}] ${level}`, ...args.map((a) => String(a).slice(0, 600)));
+      };
       return {
         name,
         logLevel: 2,
         onDidChangeLogLevel: new ShimEventEmitter<unknown>().event,
-        append: noop,
-        appendLine: noop,
+        append: emit('append'),
+        appendLine: emit('info'),
         clear: noop,
         show: noop,
         hide: noop,
         replace: noop,
         dispose: noop,
-        trace: noop,
-        debug: noop,
-        info: noop,
-        warn: noop,
-        error: noop,
+        trace: emit('trace'),
+        debug: emit('debug'),
+        info: emit('info'),
+        warn: emit('warn'),
+        error: emit('error'),
       };
     },
     activeTextEditor: undefined,
@@ -304,10 +309,6 @@ export function buildVscodeApi(state: HostState): Record<string, unknown> {
       recordTouch('workspace.applyEdit', 'call', true);
       return false;
     },
-    // A real filesystem, not stubs. The extension writes pasted images through
-    // workspace.fs before handing the path to the CLI; no-op writes are why an
-    // attached image reached the model but the agent then reported it "isn't on
-    // disk" and offered to hand-author an SVG instead.
     fs: {
       readFile: async (uri: UriLike) => new Uint8Array(await nodeFs.readFile(fsPathOf(uri))),
       writeFile: async (uri: UriLike, content: Uint8Array) => {
@@ -360,7 +361,12 @@ export function buildVscodeApi(state: HostState): Record<string, unknown> {
       readText: async () => '',
       writeText: async () => undefined,
     },
-    openExternal: async () => true,
+    openExternal: async (uri: unknown) => {
+      const url = String((uri as { toString?: () => string })?.toString?.() ?? uri ?? '');
+      recordTouch('env.openExternal', 'call', true);
+      state.onOpenExternal?.(url);
+      return true;
+    },
   };
 
   return {
