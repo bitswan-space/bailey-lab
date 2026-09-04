@@ -27,8 +27,15 @@ test('inserting a flowchart and saving it does not fail', async ({ page }) => {
   await page.keyboard.press('Control+End');
   await page.keyboard.press('Enter');
 
-  await d.getByRole('button', { name: /Insert flowchart/i }).first().click({ timeout: 30_000 });
+  // The toolbar button and the editor's own Mod-Alt-F both open the editor;
+  // the shortcut does not depend on the toolbar's current layout.
+  const insert = d.getByRole('button', { name: /Insert flowchart/i }).first();
   const modal = d.locator('[role="dialog"]').first();
+  if (await insert.isVisible().catch(() => false)) {
+    await insert.click({ timeout: 30_000 });
+  } else {
+    await page.keyboard.press('Control+Alt+f');
+  }
   await modal.waitFor({ timeout: 30_000 });
   for (const label of [/Add process/i, /Add decision/i]) {
     await modal.getByRole('button', { name: label }).first().click({ timeout: 15_000 }).catch(() => {});
