@@ -155,3 +155,28 @@ def test_stage_source_commit_needs_one_answer(tmp_path):
     assert svc.stage_source_commit("invoices", "staging") == "aaaa"
     # Mid-promotion, members disagree: there is no single version to audit.
     assert svc.stage_source_commit("invoices", "production") is None
+
+
+def test_a_missing_agent_is_started_when_the_state_is_read(env, monkeypatch):
+    """The container is disposable and the audit is not: opening the tab with a
+    frozen image and no agent brings it back, and says why when it will not."""
+    starts = []
+    monkeypatch.setattr(mod, "audit_agent_state", lambda *a: {"running": False})
+    monkeypatch.setattr(
+        mod,
+        "start_audit_agent",
+        lambda *a: starts.append(a) or {"running": False, "reason": "no such image"},
+    )
+    state = env.audit_env_state("invoices")
+    assert starts, "a frozen image with no agent must be started"
+    assert state["agent"]["reason"] == "no such image"
+
+
+def test_a_running_agent_is_left_alone(env, monkeypatch):
+    monkeypatch.setattr(mod, "audit_agent_state", lambda *a: {"running": True})
+    monkeypatch.setattr(
+        mod,
+        "start_audit_agent",
+        lambda *a: (_ for _ in ()).throw(AssertionError("started twice")),
+    )
+    assert env.audit_env_state("invoices")["agent"] == {"running": True}

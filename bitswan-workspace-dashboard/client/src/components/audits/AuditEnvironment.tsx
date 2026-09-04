@@ -154,7 +154,9 @@ export function AuditEnvironment({ bp, canAudit }: { bp: string; canAudit: boole
           ) : (
             <> · production has nothing deployed</>
           )}
-          {env.agent?.running === false ? <> · agent not running</> : null}
+          {env.agent?.running === false ? (
+            <> · agent not running{env.agent.reason ? `: ${env.agent.reason}` : ''}</>
+          ) : null}
         </div>
       </div>
       <div className="min-h-0 flex-1">

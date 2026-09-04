@@ -2365,7 +2365,14 @@ class AutomationService:
         )
         env["frozen_by"] = rec.get("frozen_by")
         env["frozen_at"] = rec.get("frozen_at")
-        env["agent"] = audit_agent_state(self.workspace_name, bp, sha)
+        agent = audit_agent_state(self.workspace_name, bp, sha)
+        # An audit agent that is not there while the image is still frozen is
+        # brought back — the container is disposable, the audit is not — and if
+        # it will not come up, this is where the reason becomes visible instead
+        # of dying in a log line at freeze time.
+        if env.get("ready") and not agent.get("running"):
+            agent = start_audit_agent(self.workspace_name, bp, sha)
+        env["agent"] = agent
         return env
 
     def _frozen_sha_or_409(self, bp: str) -> str:

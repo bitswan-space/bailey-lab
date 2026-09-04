@@ -2624,6 +2624,18 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await dashPage.keyboard.press('Enter');
     await capture(dashPage, 'audit-source');
     await d.getByRole('button', { name: /^Report$/ }).first().click();
+    // Say what the audit environment reports before pressing the button: when
+    // the agent has not come up, its own reason is the only thing that explains
+    // an empty report, and it is not on screen.
+    console.log(
+      '  audit env      :',
+      await dashPage
+        .evaluate(async () => {
+          const r = await fetch('/api/audits/invoice-processing/env', { credentials: 'include' });
+          return `${r.status} ${(await r.text()).slice(0, 400)}`;
+        })
+        .catch((e: unknown) => `unreadable: ${String(e).slice(0, 120)}`),
+    );
     await d.getByRole('button', { name: /Draft with the agent/i }).first().click();
     // The mock Claude endpoint answers, so the agent always writes something —
     // an empty report here means the audit agent never ran.
