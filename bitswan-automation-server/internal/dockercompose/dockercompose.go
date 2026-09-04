@@ -550,7 +550,7 @@ const protectedProxyTemplatesSubpath = "protected-proxy/templates"
 //
 // env is the full OAUTH2_PROXY_* map; it's rendered sorted for deterministic
 // output so the daemon can compare against the on-disk file to detect drift.
-func CreateDexDockerComposeFile(port, configHash string) (string, error) {
+func CreateDexDockerComposeFile(port, configHash string, extraHosts []string) (string, error) {
 	service := map[string]interface{}{
 		"image":          "ghcr.io/dexidp/dex:v2.41.1",
 		"restart":        "always",
@@ -570,6 +570,9 @@ func CreateDexDockerComposeFile(port, configHash string) (string, error) {
 		},
 		"expose":      []string{port},
 		"environment": []string{"BITSWAN_DEX_CONFIG_HASH=" + configHash},
+	}
+	if len(extraHosts) > 0 {
+		service["extra_hosts"] = extraHosts
 	}
 
 	compose := map[string]interface{}{

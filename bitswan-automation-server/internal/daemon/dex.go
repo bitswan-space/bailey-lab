@@ -144,7 +144,7 @@ func writeDexConfig(domain string, sso ssoConfig, proxySecret string) error {
 	}
 
 	sum := sha256.Sum256([]byte(cfg))
-	composeYAML, err := dockercompose.CreateDexDockerComposeFile(dexPort, hex.EncodeToString(sum[:]))
+	composeYAML, err := dockercompose.CreateDexDockerComposeFile(dexPort, hex.EncodeToString(sum[:]), dexExtraHosts())
 	if err != nil {
 		return fmt.Errorf("render dex compose: %w", err)
 	}
@@ -152,6 +152,20 @@ func writeDexConfig(domain string, sso ssoConfig, proxySecret string) error {
 		return fmt.Errorf("write dex compose: %w", err)
 	}
 	return nil
+}
+
+func dexExtraHosts() []string {
+	raw := strings.TrimSpace(os.Getenv("BITSWAN_EXTRA_HOSTS"))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if h := strings.TrimSpace(part); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 func chownTree(root string, uid, gid int) error {
