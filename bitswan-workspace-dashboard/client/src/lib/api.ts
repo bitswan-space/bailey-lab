@@ -80,7 +80,7 @@ function sleep(ms: number): Promise<void> {
 async function getJson<T>(url: string): Promise<T> {
   const r = await getOnce(url);
   if (!r.ok) await throwHttpError(url, r);
-  return (await r.json()) as T;
+  return jsonBody<T>(url, r);
 }
 
 /**
@@ -128,7 +128,7 @@ async function getJsonOr404<T>(url: string): Promise<T | null> {
   // `throwHttpError` name it.
   if (r.status === 404 && !isEdgeUnavailable(r)) return null;
   if (!r.ok) await throwHttpError(url, r);
-  return (await r.json()) as T;
+  return jsonBody<T>(url, r);
 }
 
 // Turn a non-2xx response into an Error that carries the server's own message
@@ -175,7 +175,7 @@ export function errorMessage(err: unknown): string {
 // (Chromium reports `net::ERR_NETWORK_CHANGED`) even though the upstream call
 // usually succeeded. A short backoff is enough for the new connection to be
 // ready.
-async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+async function sendOnce(url: string, init: RequestInit): Promise<Response> {
   let refreshedToken = false;
   let retriedEdge = false;
   for (let attempt = 0; ; attempt++) {
@@ -206,16 +206,48 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
         await sleep(EDGE_RETRY_DELAYS_MS[0] ?? 300);
         continue;
       }
-      // Same as the GET helpers: carry the server's own message, never a bare
-      // "returned 502". Every mutating call (deploy, sync, merge, delete)
-      // reports failures through here, and a status code alone tells the user
-      // nothing about what actually went wrong.
-      if (!r.ok) await throwHttpError(url, r);
       return r;
     } catch (err) {
       if (attempt === 1 || !isTransientNetworkError(err)) throw err;
       await new Promise((r) => setTimeout(r, 200));
     }
+  }
+}
+
+/**
+ * A write with the same edge/session handling as `sendOnce`, plus the GET
+ * helpers' contract that a non-2xx carries the server's own message — never a
+ * bare "returned 502". Every mutating call (deploy, sync, merge, delete)
+ * reports failures through here, and a status code alone tells the user
+ * nothing about what actually went wrong.
+ */
+async function fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+  const r = await sendOnce(url, init);
+  if (!r.ok) await throwHttpError(url, r);
+  return r;
+}
+
+/**
+ * Read a response body as JSON, and say what arrived when it isn't.
+ *
+ * Every route this app calls answers in JSON, so a body that will not parse
+ * came from something in front of the dashboard — Traefik's plain-text page
+ * during a route reconfigure, a proxy's own error, a login page. Handing the
+ * parser's message ("Unexpected non-whitespace character after JSON at
+ * position 4") to the user names none of that; it reads like corruption in
+ * their own document. Report the status, the content type and what the body
+ * actually said instead.
+ */
+async function jsonBody<T>(url: string, r: Response): Promise<T> {
+  const text = await r.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const type = r.headers.get('content-type') ?? 'no content-type';
+    const snippet = text.trim().slice(0, 120) || '(empty body)';
+    throw new Error(
+      `${url} answered HTTP ${r.status} with a body that is not JSON (${type}): ${snippet}`,
+    );
   }
 }
 
@@ -229,7 +261,7 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return (await r.json()) as T;
+  return jsonBody<T>(url, r);
 }
 
 async function deleteEmpty(url: string): Promise<void> {
@@ -242,7 +274,7 @@ async function delJson<T>(url: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return (await r.json()) as T;
+  return jsonBody<T>(url, r);
 }
 
 async function putJson<T>(url: string, body: unknown): Promise<T> {
@@ -251,7 +283,7 @@ async function putJson<T>(url: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return (await r.json()) as T;
+  return jsonBody<T>(url, r);
 }
 
 async function patchJson<T>(url: string, body: unknown): Promise<T> {
@@ -260,7 +292,7 @@ async function patchJson<T>(url: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return (await r.json()) as T;
+  return jsonBody<T>(url, r);
 }
 
 /**
@@ -269,16 +301,14 @@ async function patchJson<T>(url: string, body: unknown): Promise<T> {
  * throwing. Callers narrow the return via the union type.
  */
 async function putJsonAllow4xx<T>(url: string, body: unknown): Promise<T> {
-  const r = await fetch(url, {
+  const r = await sendOnce(url, {
     method: 'PUT',
-    credentials: 'include',
-    cache: 'no-store',
-    headers: { 'Content-Type': 'application/json', ...(await authHeader()) },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   // Parse JSON regardless of status — the body carries the structured
   // error shape (binary / too-large / conflict / …).
-  return (await r.json()) as T;
+  return jsonBody<T>(url, r);
 }
 
 /**
@@ -288,15 +318,10 @@ async function putJsonAllow4xx<T>(url: string, body: unknown): Promise<T> {
  * `status`.
  */
 async function deleteAllow4xx<T>(url: string): Promise<T & { status: number }> {
-  const r = await fetch(url, {
-    method: 'DELETE',
-    credentials: 'include',
-    cache: 'no-store',
-    headers: { ...(await authHeader()) },
-  });
+  const r = await sendOnce(url, { method: 'DELETE' });
   let body: unknown = {};
   try {
-    body = await r.json();
+    body = await jsonBody<T>(url, r);
   } catch {
     // non-JSON error body
   }
@@ -309,14 +334,17 @@ async function deleteAllow4xx<T>(url: string): Promise<T & { status: number }> {
  */
 async function postMultipart<T>(url: string, form: FormData): Promise<T> {
   const r = await fetch(url, {
+    ...FETCH_BASE,
     method: 'POST',
-    credentials: 'include',
-    cache: 'no-store',
     headers: await authHeader(),
     body: form,
   });
-  if (!r.ok) throw new Error(`${url} returned ${r.status}`);
-  return (await r.json()) as T;
+  if (isSessionGone(r)) {
+    notifySessionExpired();
+    throw new SessionExpiredError();
+  }
+  if (!r.ok) await throwHttpError(url, r);
+  return jsonBody<T>(url, r);
 }
 
 /**
