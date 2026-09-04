@@ -1435,6 +1435,38 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /**
+   * The audit environment a frozen staging stage gets: the audited source, the
+   * diff promoting it would apply to production, and the report. One passthrough
+   * for the whole surface — gitops owns the environment, the dashboard only
+   * carries the auditor's identity to it.
+   */
+  async auditEnv(
+    bp: string,
+    path: string,
+    init?: { method?: string; body?: unknown; query?: Record<string, string> },
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const qs = init?.query ? `?${new URLSearchParams(init.query)}` : '';
+    const url =
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}` +
+      `/audit-env${path}${qs}`;
+    const r = await fetch(url, {
+      method: init?.method ?? 'GET',
+      headers: {
+        ...this.authHeaders(),
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(init?.body ? { body: JSON.stringify(init.body) } : {}),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /** `PUT .../staging-gate/policy` — set required auditor sign-offs (0 = off). */
   async setAuditPolicy(
     bp: string,

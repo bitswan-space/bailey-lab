@@ -233,16 +233,11 @@ interface Host {
 
 const hosts = new Map<string, Host>();
 
-function hostKey(opts: { email: string; copy: string; bp: string }): string {
-  return `${opts.email} ${opts.copy} ${opts.bp}`;
+function hostKey(opts: { email: string; workspaceFolder: string }): string {
+  return `${opts.email} ${opts.workspaceFolder}`;
 }
 
-function spawnHost(opts: {
-  email: string;
-  copy: string;
-  bp: string;
-  workspaceRoot: string;
-}): Host {
+function spawnHost(opts: { email: string; workspaceFolder: string }): Host {
   const ext = extensionPath();
   if (!ext) throw new Error('CLAUDE_EXTENSION_PATH is not set');
 
@@ -256,7 +251,7 @@ function spawnHost(opts: {
       ...process.env,
       CLAUDE_EXTENSION_PATH: ext,
       CLAUDE_CONFIG_DIR: configDir,
-      SIDEBAR_WORKSPACE_FOLDER: path.join(opts.workspaceRoot, 'copies', opts.copy, opts.bp),
+      SIDEBAR_WORKSPACE_FOLDER: opts.workspaceFolder,
     },
   });
 
@@ -307,12 +302,7 @@ function spawnHost(opts: {
   return host;
 }
 
-function hostFor(opts: {
-  email: string;
-  copy: string;
-  bp: string;
-  workspaceRoot: string;
-}): Host {
+function hostFor(opts: { email: string; workspaceFolder: string }): Host {
   const key = hostKey(opts);
   const existing = hosts.get(key);
   if (existing && existing.child.exitCode === null && !existing.child.killed) {
@@ -326,9 +316,7 @@ function hostFor(opts: {
 
 export async function openSidebar(opts: {
   email: string;
-  copy: string;
-  bp: string;
-  workspaceRoot: string;
+  workspaceFolder: string;
 }): Promise<SidebarOpen> {
   const host = hostFor(opts);
   await host.ready;

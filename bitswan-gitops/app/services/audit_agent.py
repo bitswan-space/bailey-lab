@@ -82,6 +82,16 @@ def stop_audit_agent(workspace: str, bp: str, sha: str) -> dict:
         return {"running": False, "reason": str(e)[:200]}
 
 
+def draft_audit_report(workspace: str, bp: str, sha: str, prompt: str) -> dict:
+    """Ask the daemon to run the agent over the audit environment and leave the
+    answer in report.md. Raises on failure: the auditor pressed a button and is
+    owed the reason it did nothing."""
+    return _post(
+        "/audit-agent/draft",
+        {"workspace": workspace, "bp": bp, "sha": sha, "prompt": prompt},
+    )
+
+
 def audit_agent_state(workspace: str, bp: str, sha: str | None) -> dict:
     if not workspace or not sha:
         return {"running": False, "reason": "staging is not frozen"}

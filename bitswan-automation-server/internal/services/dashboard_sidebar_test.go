@@ -85,3 +85,23 @@ func TestExtensionDirVisible(t *testing.T) {
 		t.Error("empty, relative and missing paths are not visible")
 	}
 }
+
+// The auditor's chat and the audit agent's report are read and written through
+// this mount, and the audit agent container mounts the same subpath.
+func TestTheDashboardSeesTheAuditEnvironments(t *testing.T) {
+	out := composeFor(t, "")
+	for _, want := range []string{"workspaces/finance/audits", "/workspace/audits"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("compose is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTheAuditsRootIsToldToTheSidebar(t *testing.T) {
+	ext := t.TempDir()
+	t.Setenv("BITSWAN_CLAUDE_EXTENSION_DIR", ext)
+	out := composeFor(t, "")
+	if !strings.Contains(out, "AUDITS_ROOT=/workspace/audits") {
+		t.Errorf("the audit chat needs to know where the environments are:\n%s", out)
+	}
+}

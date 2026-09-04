@@ -98,6 +98,11 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			// deliberately NOT mounted any more — it was only ever read to
 			// extract conversation titles, a feature that is gone.)
 			wsVolume("coding-agent-sessions", "/workspace/agent-sessions", true),
+			// The audit environments a frozen staging stage gets. Writable: the
+			// audit agent's report is written through this mount, and the
+			// audited source under it is the copy gitops extracted, not a
+			// checkout anything deploys from.
+			wsVolume("audits", "/workspace/audits", false),
 		},
 	}
 
@@ -124,6 +129,7 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
 			"CLAUDE_EXTENSION_PATH="+extensionPathInContainer,
 			"SIDEBAR_CONFIG_ROOT=/claude-config",
+			"AUDITS_ROOT=/workspace/audits",
 		)
 		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
 			wsVolume("claude-configs", "/claude-config", false))

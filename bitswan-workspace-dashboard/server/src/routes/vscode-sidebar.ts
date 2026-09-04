@@ -66,7 +66,10 @@ export function registerVscodeSidebarRoutes(
       if (!email) return reply.code(403).send({ error: 'no verified identity' });
 
       try {
-        const opened = await openSidebar({ email, ...s, workspaceRoot });
+        const opened = await openSidebar({
+          email,
+          workspaceFolder: path.join(workspaceRoot, 'copies', s.copy, s.bp),
+        });
         pendingOpens.set(`${email} ${s.copy} ${s.bp}`, opened);
         const html = pageFor(opened.html, {
           assetBase: `${PREFIX}/asset`,
@@ -122,7 +125,10 @@ export function registerVscodeSidebarRoutes(
       let opened = pendingOpens.get(key);
       if (!opened) {
         try {
-          opened = await openSidebar({ email, ...s, workspaceRoot });
+          opened = await openSidebar({
+            email,
+            workspaceFolder: path.join(workspaceRoot, 'copies', s.copy, s.bp),
+          });
           pendingOpens.set(key, opened);
         } catch (err) {
           app.log.warn({ err, ...s }, 'sidebar bridge open failed');

@@ -43,6 +43,7 @@ from app.services import audit_env
 from app.services import bp_secrets
 from app.services.audit_agent import (
     audit_agent_state,
+    draft_audit_report,
     start_audit_agent,
     stop_audit_agent,
 )
@@ -2424,6 +2425,19 @@ class AutomationService:
     def audit_env_report(self, bp: str) -> dict:
         validate_bp_name(bp)
         return audit_env.read_report(bp, self._frozen_sha_or_409(bp))
+
+    def draft_audit_env_report(
+        self, bp: str, prompt: str | None, by: str | None
+    ) -> dict:
+        """Have the temporary audit agent write the report for the frozen image."""
+        validate_bp_name(bp)
+        self._require_staging_gate_role(by, "run the audit agent")
+        sha = self._frozen_sha_or_409(bp)
+        if not os.path.isdir(audit_env.source_dir(bp, sha)):
+            raise HTTPException(
+                status_code=409, detail="the audited source is not materialized yet"
+            )
+        return draft_audit_report(self.workspace_name, bp, sha, prompt or "")
 
     def write_audit_env_report(self, bp: str, content: str, by: str | None) -> dict:
         validate_bp_name(bp)

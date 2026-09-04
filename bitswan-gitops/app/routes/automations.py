@@ -375,6 +375,25 @@ async def put_bp_audit_report_route(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class AuditDraftRequest(BaseModel):
+    prompt: str | None = None
+    by: str | None = None
+
+
+@router.post("/business-processes/{bp}/audit-env/draft")
+async def post_bp_audit_draft_route(
+    bp: ValidBp,
+    body: AuditDraftRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Have the audit agent read the audited source and the production diff and
+    write the report (admin/auditor only)."""
+    try:
+        return automation_service.draft_audit_env_report(bp, body.prompt, body.by)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/business-processes/{bp}/staging-gate/audits")
 async def post_bp_audit_route(
     bp: ValidBp,
