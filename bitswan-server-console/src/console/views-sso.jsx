@@ -184,7 +184,7 @@ function SSOView({ ctx }) {
             </SBtn>
           )}
           <span style={{ fontSize: 11.5, color: SC.muted }}>
-            Saving restarts the sign-in service; people already signed in stay signed in.
+            Saving changes where this server checks identities, so everyone — including you — signs in again.
           </span>
         </div>
       </SCard>

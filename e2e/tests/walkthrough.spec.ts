@@ -3377,7 +3377,6 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await expect(c.getByText(/Discovery document looks good/i).first()).toBeVisible({ timeout: SLA });
 
     await c.getByRole('button', { name: /Enable single sign-on/i }).first().click();
-    await expect(c.getByText(/Single sign-on enabled/i).first()).toBeVisible({ timeout: PROGRESS });
 
     // The switch itself: a broker is running and the proxy now trusts it.
     await expect(async () => {
@@ -3409,8 +3408,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // And it reverts cleanly: disabling tears the broker back down and returns
     // the proxy to Keycloak, so a server that tried SSO and backed out is not
     // left on a half-migrated topology.
+    await page.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
+    await page.getByText(/Bitswan account/i).first().click();
+    await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
+    await expect(c.getByRole('heading', { name: /Workspaces/i }).first()).toBeVisible({ timeout: PROGRESS });
+
+    await c.getByRole('button', { name: /Single sign-on/i }).first().click();
+    await expect(c.getByRole('heading', { name: /Single sign-on/i }).first()).toBeVisible({ timeout: SLA });
     await c.getByRole('button', { name: /^Disable$/ }).first().click();
-    await expect(c.getByText(/Single sign-on disabled/i).first()).toBeVisible({ timeout: PROGRESS });
     await expect(async () => {
       expect(sh('docker ps --format "{{.Names}}"'), 'the broker must be gone').not.toContain('bitswan-dex');
       expect(proxyIssuer(), 'the proxy must be back on Keycloak').toContain('/realms/bitswan');
