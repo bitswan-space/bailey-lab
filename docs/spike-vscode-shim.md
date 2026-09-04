@@ -192,6 +192,37 @@ Both were **my** bugs, not the product's:
    the sidebar asks for login. The dev host now always sets an isolated
    `CLAUDE_CONFIG_DIR` so this cannot flatter a result again.
 
+
+## Requirement: one Claude account per user, not per workspace
+
+Joe signs in as Joe, Sally as Sally, in the same workspace. Today the hosted
+sidebar does not do this, and the reason is not a path — it is process shape.
+
+The extension reads `CLAUDE_CONFIG_DIR` from the environment at activation, and
+the `claude` process it spawns inherits it. The dashboard activates the
+extension **in its own Node process**, and `process.env` is global to that
+process: setting it per request cannot work, because the CLI is spawned later
+and would pick up whichever value was written last. Two people in one workspace
+would share — or clobber — one identity, and the credential store is the thing
+being shared.
+
+So the fix is a **child extension host per user**: spawn
+`node vscode-host/<worker>.js` per (user, copy, bp) with `CLAUDE_CONFIG_DIR` set
+in that child's env, and bridge its messages to the websocket instead of calling
+`activateExtension` in-process. That is also how VS Code is arranged — the
+extension host is a separate process — so it is the shape to grow into rather
+than a workaround.
+
+The per-user directory name should come from the same place the terminal path
+already takes it: `agent-session-wrapper` sanitises the gate-verified email
+(lowercase, non-alphanumerics to `_`, truncated, plus 8 hex of its sha256) so
+that an RFC-valid local part containing `/` or `..` cannot escape. Reuse that
+derivation rather than inventing a second one, and key the host cache on it.
+
+Until then this spike is single-identity per workspace, and
+`CLAUDE_CONFIG_DIR` is set to one mounted directory so at least a container
+recreate does not sign the user out.
+
 ## What is not done
 
 - **No dashboard UI.** The next step is serving `html` + the two assets and
