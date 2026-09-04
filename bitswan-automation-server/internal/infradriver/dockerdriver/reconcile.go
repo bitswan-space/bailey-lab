@@ -325,10 +325,18 @@ func composeUpServices(ctx context.Context, wctx infradriver.WorkspaceContext, c
 		return fmt.Errorf("docker compose up: %w", err)
 	}
 	scanner := bufio.NewScanner(stdout)
+	composeErrLine := ""
 	for scanner.Scan() {
-		report("compose_up", scanner.Text())
+		line := scanner.Text()
+		if composeErrLine == "" && docker.AddressPoolsExhausted(line) {
+			composeErrLine = line
+		}
+		report("compose_up", line)
 	}
 	if err := cmd.Wait(); err != nil {
+		if composeErrLine != "" {
+			return docker.NewAddressPoolsExhaustedError("docker compose up", composeErrLine, err)
+		}
 		return fmt.Errorf("docker compose up failed: %w", err)
 	}
 	return nil

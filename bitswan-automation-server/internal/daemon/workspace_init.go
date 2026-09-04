@@ -102,12 +102,16 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 	}
 
 	// Init bitswan network
-	docker.EnsureDockerNetwork("bitswan_network", verbose)
+	if _, err := docker.EnsureDockerNetwork("bitswan_network", verbose); err != nil {
+		return err
+	}
 	// Dedicated per-workspace agent↔gitops bridge. The coding agent joins ONLY
 	// this network (never bitswan_network), so it can reach gitops's
 	// authenticated API/git but nothing else on the control-plane inner ring.
 	// Created up front because the gitops compose now declares it as external.
-	docker.EnsureDockerNetwork(workspaceName+"-agent", verbose)
+	if _, err := docker.EnsureDockerNetwork(workspaceName+"-agent", verbose); err != nil {
+		return err
+	}
 
 	// Ensure the global ingress proxy is running.
 	// initIngress is idempotent: it returns early if Traefik is already running.
