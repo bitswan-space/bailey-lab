@@ -235,18 +235,24 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
  * during a route reconfigure, a proxy's own error, a login page. Handing the
  * parser's message ("Unexpected non-whitespace character after JSON at
  * position 4") to the user names none of that; it reads like corruption in
- * their own document. Report the status, the content type and what the body
- * actually said instead.
+ * their own document.
+ *
+ * A router page is exactly what `isEdgeUnavailable` describes, so it gets the
+ * same sentence the read path already uses. Anything else reports the status,
+ * the content type and what the body said — and NOT the url: these messages
+ * are rendered to the user, and a url carries the business process's directory
+ * name into a screen that must show its title.
  */
 async function jsonBody<T>(url: string, r: Response): Promise<T> {
   const text = await r.text();
   try {
     return JSON.parse(text) as T;
   } catch {
+    if (isEdgeUnavailable(r)) throw new EdgeUnavailableError(r.status);
     const type = r.headers.get('content-type') ?? 'no content-type';
     const snippet = text.trim().slice(0, 120) || '(empty body)';
     throw new Error(
-      `${url} answered HTTP ${r.status} with a body that is not JSON (${type}): ${snippet}`,
+      `the dashboard answered HTTP ${r.status} with a body that is not JSON (${type}): ${snippet}`,
     );
   }
 }
