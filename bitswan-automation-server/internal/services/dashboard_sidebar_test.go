@@ -67,3 +67,21 @@ func TestAgentSidebarPrefersTheDevSourceTree(t *testing.T) {
 		t.Errorf("the read-only mount is redundant once the dev tree carries one:\n%s", out)
 	}
 }
+
+func TestAgentSidebarIgnoresAnExtensionDirThatIsNotThere(t *testing.T) {
+	t.Setenv("BITSWAN_CLAUDE_EXTENSION_DIR", "/does/not/exist/claude-extension")
+	out := composeFor(t, "")
+	if strings.Contains(out, "CLAUDE_EXTENSION_PATH") {
+		t.Errorf("a path that resolves nowhere must not switch the sidebar on:\n%s", out)
+	}
+}
+
+func TestExtensionDirVisible(t *testing.T) {
+	if !ExtensionDirVisible(t.TempDir()) {
+		t.Error("a directory that exists is visible")
+	}
+	if ExtensionDirVisible("") || ExtensionDirVisible("relative/path") ||
+		ExtensionDirVisible("/no/such/extension") {
+		t.Error("empty, relative and missing paths are not visible")
+	}
+}
