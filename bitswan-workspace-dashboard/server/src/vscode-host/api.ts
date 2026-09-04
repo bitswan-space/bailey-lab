@@ -410,7 +410,18 @@ export async function resolveWebviewView(
     asWebviewUri: (uri: { path?: string; fsPath?: string }) => {
       const p = uri.path ?? uri.fsPath ?? '';
       const rel = path.relative(opts.extensionPath, p) || path.basename(p);
-      return ShimUri.parse(`${opts.resourceBase}/${rel.split(path.sep).join('/')}`);
+      const target = `${opts.resourceBase}/${rel.split(path.sep).join('/')}`;
+      if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return ShimUri.parse(target);
+      return {
+        scheme: '',
+        authority: '',
+        path: target,
+        query: '',
+        fragment: '',
+        fsPath: target,
+        toString: () => target,
+        toJSON: () => target,
+      };
     },
     postMessage: async (message: unknown) => {
       toWebview.fire(message);
