@@ -38,7 +38,6 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { useSessions } from '@/components/agents/SessionProvider';
 import { FlowchartEditorModal } from '@/components/workspace/FlowchartEditorModal';
 import {
   ATTACHMENT_MAX_BYTES,
@@ -274,7 +273,6 @@ function serializeDoc(state: EditorState): string {
  * the coding agent sees everything the user authored.
  */
 export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: SpecificationTabProps) {
-  const { sendPrompt } = useSessions();
   const [editorState, setEditorState] = useState<EditorState>();
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' });
   const [save, setSave] = useState<SaveState>({ kind: 'clean' });
@@ -605,7 +603,6 @@ export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: Specificat
   // session, or seeding a fresh one — and flip to the Coding Agent tab.
   const onBuildAutomation = () => {
     void doSave(false);
-    void sendPrompt(copy, bp.name, 'automation');
     onShowAgents();
   };
 
