@@ -467,7 +467,39 @@ export const MANUAL = {
       ],
     },
     {
-      num: '21', eyebrow: 'Let the right people in', title: 'Sharing an endpoint',
+      num: '21', eyebrow: 'Bring your own identity', title: 'Your own single sign-on',
+      lede: 'Bailey can sign people in with your company’s own OpenID Connect provider, alongside Bitswan accounts. Your directory stays the source of truth for who works here; Bailey stays the source of truth for what they can do.',
+      slots: [
+        { id: 'sso-settings', label: 'Live capture', caption: 'Server Console · Single sign-on — your own provider, added alongside Bitswan accounts' },
+        { id: 'sso-chooser', label: 'Live capture', caption: 'Sign-in · both ways in — your provider and a Bitswan account, unless you close the second door on purpose' },
+      ],
+      sell: [
+        'Out of the box, people sign in with a Bitswan account issued through the Automation Operations Centre. That suits a team adopting the platform, but an established organisation already has an identity provider, already offboards through it, and does not want a second place where staff accounts are created. <strong>Single sign-on</strong> lets an admin add that provider directly to this server: give it a display name, an issuer URL and a client, register the redirect URI it shows you, and your people sign in with the account they already have.',
+        'By default both ways in stay open. The sign-in page offers a choice, so Bitswan accounts — your operator’s, and anyone the AOC manages — keep working on the same server. That matters more than it sounds: a provider whose certificate has just expired must not be able to lock every administrator out of the machine that could fix it.',
+        'Some organisations need the second door shut. If every person who should reach this server is already in your directory, a Bitswan account is an account outside your joiner/leaver process — and an auditor will ask about it. Turning <strong>Bitswan accounts</strong> off makes your provider the only way in: there is then just one connector, so nobody is even asked to choose, and sign-in goes straight to your provider. Do it with your eyes open — see the note below on getting back in.',
+        'Because your directory already holds everyone who should have access, <strong>you will not need the email invitations</strong>. Nobody has to be invited into an organisation they are already in. Offboarding follows the same logic: disable someone centrally and their way in closes here too, with no separate list to remember.',
+        'Your automations keep working across the change. An app deployed here verifies the identity on each request against whatever actually signed it, so once your provider is in front, that is what it checks — and the group memberships your directory publishes arrive with it, which is what the apps match their own access rules on.',
+        'What single sign-on does <em>not</em> change is just as deliberate. Proving who you are is not the same as being allowed in from a particular machine, so <strong>every new device is still approved exactly as before</strong>. And people arrive as members with no elevated rights; an admin gives them a role in People &amp; roles, or you map your provider’s groups onto Bailey roles and let the directory decide.',
+      ],
+      steps: [
+        'Open <b>Single sign-on</b> in the console’s Admin section.',
+        'Give the provider a <b>display name</b> — it labels the button people click.',
+        'Enter the <b>issuer URL</b> and press <b>Test</b>; Bailey reads the discovery document and refuses a provider it cannot reach.',
+        'Register the <b>redirect URI</b> shown on the page with your provider, then paste back the <b>client ID and secret</b>.',
+        'Optionally map provider groups onto Bailey roles. Leave it empty and everyone arrives as a member.',
+        'Leave <b>Bitswan accounts</b> on unless you have read the warning beside it — turning it off makes your provider the only way in.',
+        'Press <b>Enable single sign-on</b>. Everyone signed in, you included, signs in again on the next page they open.',
+      ],
+      callout: { kind: 'Keep a way back in', text: 'Adding a provider does not remove Bitswan sign-in unless you ask it to, and that default is deliberate: if your identity provider goes down, its certificate lapses, or its client secret is rotated out from under you, an administrator can still sign in with a Bitswan account and correct the configuration. If you do make your provider the only way in, accept what follows — an outage there locks everyone out of the console, including whoever would fix it. The way back does not run through a browser: an operator with a shell on the server runs <code>bitswan bailey sso disable</code>, which restores Bitswan sign-in and rebuilds the proxy. Make sure someone on your team can actually reach that shell before you close the second door.' },
+      standards: [
+        { code: 'ISO/IEC 27001', clause: 'A.5.16', demand: '<b>Identity management.</b> Identities are managed in the organisation’s own directory, with a single joiner/leaver process rather than a parallel account store.' },
+        { code: 'SOC 2', clause: 'CC6.1 / CC6.2', demand: '<b>Logical access & provisioning.</b> Access derives from the corporate identity provider; de-provisioning there withdraws access here.' },
+        { code: 'NIS2', clause: 'Art. 21(2)(i)', demand: '<b>Access control policy.</b> Authentication is federated to the organisation’s controlled identity source, with device approval retained as a second, independent control.' },
+        { code: 'DORA', clause: 'Art. 9(4)', demand: '<b>Strong authentication.</b> The organisation’s own authentication policy — including its MFA requirements — applies at sign-in, while device trust remains enforced independently by the platform.' },
+      ],
+    },
+    {
+      num: '22', eyebrow: 'Let the right people in', title: 'Sharing an endpoint',
       lede: 'Every protected app the gate fronts — including the frontends your operators build and deploy — can be shared, by its owner, with named people or groups, at view or owner level, without touching anyone else’s access.',
       slots: [
         { id: 'share-modal', label: 'Live capture', caption: 'Share endpoint · sharing a deployed automation’s own frontend (a Bailey-protected endpoint) with a teammate at User level' },
@@ -486,7 +518,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '22', eyebrow: 'Feed the watchtower', title: 'SIEM export & monitoring',
+      num: '23', eyebrow: 'Feed the watchtower', title: 'SIEM export & monitoring',
       lede: 'Stream the server’s security audit log — access approvals, role and device changes, workspace events — to your SIEM over OpenTelemetry, as it happens.',
       slots: [
         { id: 'siem-form', label: 'Live capture', caption: 'SIEM forwarding · the config form — the OTLP endpoint base URL and the protocol, filled in before Save & connect' },
@@ -512,7 +544,7 @@ export const MANUAL = {
     // Horváth) arriving on a new device, and the admin (Tomáš) deciding —
     // deliberately, in the open — whether he and his device get in.
     {
-      num: '23', eyebrow: 'Deny by default', title: 'A teammate’s first login',
+      num: '24', eyebrow: 'Deny by default', title: 'A teammate’s first login',
       lede: 'A new teammate signs in through your identity provider from their own laptop — and gets nothing. Identity alone is not access: Bailey is deny-by-default, and an unknown device waits at the gate.',
       slots: [{ id: 'onboard-newuser-pending', label: 'Live capture', caption: 'New device · Marek is signed in, but the device isn’t trusted — a 6-digit code and “Waiting for an admin…”' }],
       sell: [
@@ -529,7 +561,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '24', eyebrow: 'You decide who gets in', title: 'Approve the person & trust the device',
+      num: '25', eyebrow: 'You decide who gets in', title: 'Approve the person & trust the device',
       lede: 'Approval is a deliberate, present-tense act. The admin sees the pending device in People & roles, confirms the person is really there by the code on their screen, and trusts the device — admitting the user in one move.',
       slots: [
         { id: 'onboard-admin-approve', label: 'Live capture', caption: 'People & roles · Marek’s “Device awaiting approval” bar — the admin types the code from his screen' },
@@ -549,7 +581,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '25', eyebrow: 'In, on a trusted device', title: 'Access granted',
+      num: '26', eyebrow: 'In, on a trusted device', title: 'Access granted',
       lede: 'The moment the admin trusts it, the teammate’s device is let through — no re-login, no second step. And the same console that admitted the device is where you cut it, the instant a laptop is lost or a person leaves.',
       slots: [{ id: 'onboard-newuser-granted', label: 'Live capture', caption: 'New device · approved and redirected through the gate — access now granted on Marek’s laptop' }],
       sell: [
@@ -566,7 +598,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '26', eyebrow: 'Make a mess safely', title: 'Memory governance & the on-demand pool',
+      num: '27', eyebrow: 'Make a mess safely', title: 'Memory governance & the on-demand pool',
       lede: 'Users spin up as many previews and processes as they like without starving the workloads that matter. Bailey reserves memory for the services that must stay up and lets everything else scale to zero — under pressure automatically, or on demand with a button — waking the moment someone touches it, whether it’s a dev preview or a production service.',
       slots: [
         { id: 'resource-management', label: 'Live capture', caption: 'Server Console · Resource management — the memory budget and per-process usage grouped by process and stage (asleep processes shown too), each with a Sleep control' },
@@ -594,7 +626,7 @@ export const MANUAL = {
       ],
     },
     {
-      num: '27', eyebrow: 'Stay current', title: 'Keeping Bailey up to date',
+      num: '28', eyebrow: 'Stay current', title: 'Keeping Bailey up to date',
       lede: 'Every component tells you when it’s behind, moving to the latest is one click — for a workspace or the server itself — every update is recorded (who moved what to which version, and when), and any of the last three versions is one click back.',
       slots: [{ id: 'updates', label: 'Live capture', caption: 'Server Console · Updates — running versions, the workspaces on the latest track, and the update history you can roll back from' }],
       sell: [

@@ -13,6 +13,7 @@ import '../../src/console/views-devices.jsx';
 import '../../src/console/views-resources.jsx';
 import '../../src/console/views-updates.jsx';
 import '../../src/console/views-backups.jsx';
+import '../../src/console/views-sso.jsx';
 import '../../src/console/auth-scenes.jsx';
 import '../../src/console/console-app.jsx';
 
@@ -24,6 +25,7 @@ export const SC_DEVICES = window.SC_DEVICES;
 export const SC_RESOURCES = window.SC_RESOURCES;
 export const SC_UPDATES = window.SC_UPDATES;
 export const SC_BACKUPS = window.SC_BACKUPS;
+export const SC_SSO = window.SC_SSO;
 export const SC_SCENES = window.SC_SCENES;
 export const SC_APP = window.SC_APP;
 

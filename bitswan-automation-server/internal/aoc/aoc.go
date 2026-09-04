@@ -622,6 +622,8 @@ func (c *AOCClient) GetWorkspaceIdentityEnv() []string {
 	return c.workerIdentityEnv()
 }
 
+var WorkerIssuerOverride func() string
+
 // workerIdentityEnv resolves the identity contract every deployed worker
 // receives: KEYCLOAK_URL (the OIDC issuer workers validate Bearer JWTs
 // against) and BITSWAN_ALLOWED_GROUP (the org group path authorization
@@ -655,6 +657,10 @@ func (c *AOCClient) workerIdentityEnv() []string {
 
 	issuer := os.Getenv("KEYCLOAK_URL")
 	group := os.Getenv("BITSWAN_ALLOWED_GROUP")
+
+	if issuer == "" && WorkerIssuerOverride != nil {
+		issuer = WorkerIssuerOverride()
+	}
 
 	if (issuer == "" || group == "") && c.settings.Domain != "" {
 		resp, err := c.GetOrCreateOAuthClient("bitswan-protected",

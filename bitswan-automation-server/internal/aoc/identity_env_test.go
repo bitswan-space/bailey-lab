@@ -116,3 +116,50 @@ func TestWorkerIdentityEnvNoDomainStillStampsAuthMode(t *testing.T) {
 		t.Errorf("workerIdentityEnv = %v, want %v", got, want)
 	}
 }
+
+func TestWorkerIdentityEnvPrefersTheBrokerWhenOneFrontsSignIn(t *testing.T) {
+	clearIdentityEnv(t)
+	WorkerIssuerOverride = func() string { return "https://auth.acme.bswn.io" }
+	t.Cleanup(func() { WorkerIssuerOverride = nil })
+
+	c := identityTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"client_id": "cid", "client_secret": "sec",
+			"issuer_url": "https://kc.example.com/realms/master",
+			"group_path": "/Example Org",
+		})
+	})
+
+	got := c.workerIdentityEnv()
+	want := []string{
+		"BITSWAN_AUTH_MODE=aoc",
+		"KEYCLOAK_URL=https://auth.acme.bswn.io",
+		"BITSWAN_ALLOWED_GROUP=/Example Org",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("workerIdentityEnv = %v, want %v — workers must verify tokens against whatever "+
+			"actually issued them, and behind a broker that is the broker", got, want)
+	}
+}
+
+func TestWorkerIdentityEnvAmbientBeatsTheBroker(t *testing.T) {
+	clearIdentityEnv(t)
+	t.Setenv("KEYCLOAK_URL", "https://own-kc.example.com/realms/custom")
+	WorkerIssuerOverride = func() string { return "https://auth.acme.bswn.io" }
+	t.Cleanup(func() { WorkerIssuerOverride = nil })
+
+	c := identityTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"client_id": "cid", "client_secret": "sec",
+			"issuer_url": "https://kc.example.com/realms/master",
+			"group_path": "/Example Org",
+		})
+	})
+
+	for _, kv := range c.workerIdentityEnv() {
+		if kv == "KEYCLOAK_URL=https://own-kc.example.com/realms/custom" {
+			return
+		}
+	}
+	t.Errorf("an operator's explicit KEYCLOAK_URL must still win: %v", c.workerIdentityEnv())
+}

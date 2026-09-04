@@ -121,10 +121,11 @@ func enforceMFAGate(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
-	email, _ := identityFromHeaders(r)
+	email, gateGroups := identityFromHeaders(r)
 	if email == "" {
 		return true // no identity → upstream OIDC failed; let it through
 	}
+	applySSORoleMapping(email, gateGroups)
 
 	// The PUBLIC onboarding host (bailey-onboard.<domain>) is device-trust
 	// EXEMPT — it's the external half of the two-endpoint split. It serves the

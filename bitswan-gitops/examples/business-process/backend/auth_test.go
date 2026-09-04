@@ -143,3 +143,53 @@ func TestGetUsernameEmptyClaimDoesNotFallBackToHeaders(t *testing.T) {
 		t.Errorf("getUsername = %q, want %q (no cross-source fallback)", got, "anonymous")
 	}
 }
+
+func TestGroupsAlsoReadTheBrokersClaimName(t *testing.T) {
+	// Dex, which fronts sign-in once a server adds its own identity provider,
+	// emits "groups" where Keycloak emits "group_membership".
+	brokered := jwtv5.MapClaims{
+		"preferred_username": "dave",
+		"groups":             []interface{}{"/Example Org", "/Example Org/admin"},
+	}
+
+	if got := claimGroups(brokered); len(got) != 2 || got[0] != "/Example Org" {
+		t.Errorf("claimGroups = %v, want the broker's groups claim to be read too", got)
+	}
+	if !hasGroup(brokered, "/Example Org/admin") {
+		t.Error("hasGroup must see a group the broker delivered, or every app locks admins out behind SSO")
+	}
+}
+
+func TestKeycloakClaimStillWinsOverTheBrokers(t *testing.T) {
+	both := jwtv5.MapClaims{
+		"group_membership": []interface{}{"/Example Org"},
+		"groups":           []interface{}{"/Wrong Org"},
+	}
+	if got := claimGroups(both); len(got) != 1 || got[0] != "/Example Org" {
+		t.Errorf("claimGroups = %v, want the Keycloak claim to take precedence", got)
+	}
+}
+
+func TestJWKSURLFallsBackToKeycloaksPath(t *testing.T) {
+	p := NewJWKSProvider("https://kc.example.com/realms/master")
+	if got := p.resolveJWKSURL(); got != "https://kc.example.com/realms/master/protocol/openid-connect/certs" {
+		t.Errorf("resolveJWKSURL = %q, want the Keycloak path when discovery is unreachable", got)
+	}
+}
+
+func TestJWKSURLComesFromDiscoveryWhenTheIssuerPublishesIt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/openid-configuration" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"issuer":"x","jwks_uri":"https://auth.example.com/keys"}`))
+	}))
+	defer srv.Close()
+
+	p := NewJWKSProvider(srv.URL)
+	if got := p.resolveJWKSURL(); got != "https://auth.example.com/keys" {
+		t.Errorf("resolveJWKSURL = %q, want the jwks_uri the issuer advertises — a broker does not "+
+			"serve keys on Keycloak's path", got)
+	}
+}
