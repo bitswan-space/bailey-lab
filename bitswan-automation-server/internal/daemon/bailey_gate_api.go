@@ -129,6 +129,11 @@ type gateState struct {
 	// retry_after is the remaining per-account/per-IP cooldown in seconds.
 	FailedAttempts int `json:"failed_attempts"`
 	RetryAfter     int `json:"retry_after"`
+	// Where a TRUSTED device on the onboarding host must go next (#425). The
+	// onboarding host serves only the device-trust scenes, so a trusted device
+	// has to leave it; the server picks the destination (the stashed origin,
+	// else the console root) and the SPA navigates there. Empty off that host.
+	LeaveTo string `json:"leave_to"`
 }
 
 func handleGateState(w http.ResponseWriter, r *http.Request, email string, groups []string) {
@@ -159,11 +164,16 @@ func handleGateState(w http.ResponseWriter, r *http.Request, email string, group
 	if strings.TrimSpace(email) != "" {
 		retryAfter, failedAttempts = mfaThrottleState(email, clientIPForRequest(r))
 	}
+	trusted := email != "" && currentDeviceForRequest(r, email) != nil
+	leaveTo := ""
+	if trusted && onOnboardHost(r) {
+		leaveTo = originTarget(r)
+	}
 	writeJSON(w, gateState{
 		Email:            email,
 		IsAdmin:          callerIsAdmin(email),
 		Claimed:          claimed,
-		Trusted:          email != "" && currentDeviceForRequest(r, email) != nil,
+		Trusted:          trusted,
 		TOTPEnrolled:     email != "" && rec != nil,
 		BackupCodes:      email != "" && dbBackupCodesExist(email),
 		CanClaim:         !claimed && eligibleToClaim(email, groups),
@@ -171,6 +181,7 @@ func handleGateState(w http.ResponseWriter, r *http.Request, email string, group
 		InvitePending:    invitePending,
 		FailedAttempts:   failedAttempts,
 		RetryAfter:       retryAfter,
+		LeaveTo:          leaveTo,
 	})
 }
 
