@@ -36,3 +36,35 @@ jobs:
 
     - name: Run tests
       run: pytest tests -v
+
+  # The worker examples are what a deployed automation actually runs, and they
+  # carry the token-verification contract every app inherits. Nothing ran their
+  # tests before, so a change to how identities are checked could pass CI
+  # untouched.
+  examples:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - examples/business-process/backend
+          - examples/go-worker
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+
+    - name: Test ${{ matrix.example }}
+      run: |
+        # Each example resolves its module from /deps at image-build time, so the
+        # go.mod in the checkout is a symlink that dangles anywhere but inside the
+        # build image. Reassemble the layout the image gives it.
+        work="$(mktemp -d)"
+        cp -r "${{ matrix.example }}/." "$work/"
+        rm -f "$work/go.mod" "$work/go.sum"
+        cp "${{ matrix.example }}/image/go.mod" "$work/go.mod"
+        cd "$work"
+        go mod tidy
+        go test ./
