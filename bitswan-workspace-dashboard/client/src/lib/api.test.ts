@@ -48,14 +48,43 @@ test('a save retries the workspace router’s plain-text 404, then succeeds', as
   assert.equal(calls.length, 2);
 });
 
-test('a save reports what a non-JSON answer said, not a parser error', async () => {
+// A gateway page is the router answering, not the dashboard — the same thing
+// `isEdgeUnavailable` names for reads, and the same sentence.
+test('a save behind a gateway page says the router answered', async () => {
   stubFetch([{ status: 502, body: '<html><body>Bad Gateway</body></html>', type: 'text/html' }]);
   await assert.rejects(save(), (err: Error) => {
-    assert.match(err.message, /HTTP 502/);
-    assert.match(err.message, /text\/html/);
+    assert.match(err.message, /not reachable through the workspace router/);
     assert.doesNotMatch(err.message, /JSON at position|Unexpected/);
     return true;
   });
+});
+
+test('a broken body from the dashboard itself reports the status and the type', async () => {
+  stubFetch([{ status: 200, body: '{"ok":true} trailing junk' }]);
+  await assert.rejects(save(), (err: Error) => {
+    assert.match(err.message, /HTTP 200/);
+    assert.match(err.message, /application\/json/);
+    assert.doesNotMatch(err.message, /JSON at position|Unexpected/);
+    return true;
+  });
+});
+
+// These messages are rendered to the user, and a url carries the business
+// process's DIRECTORY name into screens that must show its title — which the
+// walkthrough asserts and which is how this was caught.
+test('no error message from a save carries the request url', async () => {
+  for (const answer of [
+    { status: 200, body: 'not json at all' },
+    { status: 418, body: '<html>teapot</html>', type: 'text/html' },
+    { status: 500, body: '', type: 'text/plain' },
+  ]) {
+    stubFetch([answer]);
+    await assert.rejects(save(), (err: Error) => {
+      assert.doesNotMatch(err.message, /\/api\/copies/);
+      assert.doesNotMatch(err.message, /bp\/README\.md/);
+      return true;
+    });
+  }
 });
 
 test('a save on a dead session raises the session signal', async () => {
