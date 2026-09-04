@@ -305,11 +305,14 @@ func startDaemonContainer(startMessage, successMessage string) error {
 	// it creates (incl. via the Server Console UI) use them instead of the Docker
 	// Hub "latest". Lets operators run a private registry — and CI test images
 	// built from this checkout.
+	for _, h := range extraHostEntries() {
+		runArgs = append(runArgs, "--add-host", h)
+	}
 	for _, key := range []string{"BITSWAN_GITOPS_IMAGE", "BITSWAN_DASHBOARD_IMAGE", "BITSWAN_CODING_AGENT_IMAGE", "BITSWAN_INFRA_DRIVER_IMAGE", "BITSWAN_EGRESS_GATEWAY_IMAGE",
 		// Shared read-through build-package-proxy wiring: propagated daemon →
 		// per-workspace infra-driver → docker build, so per-BP builds fetch npm/Go
 		// deps from a warm local cache. Empty ⇒ builds go direct (current behaviour).
-		"BITSWAN_BUILD_NETWORK", "BITSWAN_GOPROXY", "BITSWAN_NPM_REGISTRY"} {
+		"BITSWAN_BUILD_NETWORK", "BITSWAN_GOPROXY", "BITSWAN_NPM_REGISTRY", extraHostsEnv} {
 		if v := os.Getenv(key); v != "" {
 			runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", key, v))
 		}
@@ -604,4 +607,20 @@ func seedMkcertVolumeFromHost(volume, hostMkcertDir, image string) error {
 	}
 	fmt.Printf("Seeded mkcert CA from %s into volume %q.\n", hostMkcertDir, volume)
 	return nil
+}
+
+const extraHostsEnv = "BITSWAN_EXTRA_HOSTS"
+
+func extraHostEntries() []string {
+	raw := strings.TrimSpace(os.Getenv(extraHostsEnv))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if h := strings.TrimSpace(part); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
 }

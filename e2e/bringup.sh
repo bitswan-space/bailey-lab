@@ -128,6 +128,7 @@ mark "[1b/7] read-through build package proxies (Athens + Verdaccio)"
 # features the manual documents) instead of Docker Hub 'latest'. sudo strips the
 # environment, so set it explicitly on the command via `env`.
 sudo env \
+  BITSWAN_EXTRA_HOSTS="${KC_HOST}:host-gateway" \
   BITSWAN_GITOPS_IMAGE="$GITOPS_IMAGE" \
   BITSWAN_DASHBOARD_IMAGE="$DASHBOARD_IMAGE" \
   BITSWAN_CODING_AGENT_IMAGE="$CODING_AGENT_IMAGE" \

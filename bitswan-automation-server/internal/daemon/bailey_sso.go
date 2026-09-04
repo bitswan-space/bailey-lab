@@ -12,6 +12,8 @@ import (
 
 const settingSSOConfig = "external_oidc_config"
 
+var applyLoginTopology = reconcileLoginTopology
+
 type ssoRoleMapping struct {
 	Group string `json:"group"`
 	Role  string `json:"role"`
@@ -168,6 +170,10 @@ func handleSSOGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	writeSSOConfigDTO(w)
+}
+
+func writeSSOConfigDTO(w http.ResponseWriter) {
 	c, err := getSSOConfig()
 	if err != nil {
 		writeJSONError(w, err.Error(), http.StatusInternalServerError)
@@ -220,13 +226,13 @@ func handleSSOSet(w http.ResponseWriter, r *http.Request, by string) {
 		return
 	}
 
-	if err := reconcileLoginTopology(); err != nil {
+	if err := applyLoginTopology(); err != nil {
 		writeJSONCodeError(w, err.Error(), "reconcile_failed", http.StatusBadGateway)
 		return
 	}
 
 	_ = recordEvent(by, "sso.configure", req.IssuerURL)
-	handleSSOGet(w, r)
+	writeSSOConfigDTO(w)
 }
 
 func handleSSOTest(w http.ResponseWriter, r *http.Request) {
