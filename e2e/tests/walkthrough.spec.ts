@@ -1269,63 +1269,46 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   });
 
   // ---- Coding Agent (+ live-dev preview) ----
-  // The Coding Agent tab pairs the agent terminal/files with the Environment
-  // panel, which lists each automation and its live-dev deployment. A copy
-  // auto-starts live-dev, so we WAIT for an automation to report running, then
-  // open its live preview (the external-link button) and shoot it. If the
-  // preview tab doesn't render in time we still document the running live-dev
-  // state in the panel — never a "Loading…" frame.
+  // The Coding Agent tab pairs the agent chat with the Environment panel, which
+  // lists each automation and its live-dev deployment. The chat is the Claude
+  // Code VS Code sidebar, hosted by the dashboard's own partial `vscode` API
+  // (server/src/vscode-host) and rendered in a nested frame, so the waits below
+  // are for that frame and its composer rather than for a terminal.
   await chapter('coding-agent', async () => {
     await clickTopTab(/Coding Agent/i);
-    // The session auto-warms on this tab: the coding-agent container boots and a
-    // Claude Code session connects over the WS (dashboard → gitops agent-ssh
-    // proxy → agent sshd → dtach → claude). SessionTerminal shows a
-    // "Connecting…" placeholder ONLY until the access token resolves and the
-    // WebSocket URL is built — it clears the instant the xterm mounts, which is
-    // LONG before Claude has actually booted inside the terminal. So
-    // "Connecting… gone + .xterm visible" is far too weak a signal (it catches a
-    // blank/empty terminal). The authoritative "Claude is up" signal is Claude
-    // Code's own TUI: sessions launch bare (no initial prompt — the standing
-    // guidance is the CLAUDE.md baked into the agent image), so once the
-    // interactive prompt renders, the xterm paints the input box and the
-    // persistent footer hint "? for shortcuts" (or, unauthenticated, the
-    // "Welcome to Claude" login screen — either proves the whole launch
-    // pipeline delivered a running Claude). This is a plain on-screen
-    // visibility wait (container boot + ssh + Claude start), NOT a deploy
-    // long-op, so we wait generously.
-    const connecting = d.getByText(/^Connecting…$/).first();
-    const term = d.locator('.xterm').first();
-    await connecting.waitFor({ state: 'hidden', timeout: 5 * 60_000 }).catch(() => {});
-    await term.waitFor({ state: 'visible', timeout: 5 * 60_000 });
-    // The xterm paints visible glyphs into .xterm-rows. Poll the rows text for
-    // Claude's stable TUI markers — and HARD-FAIL when they never appear: a
-    // terminal that connects but never shows Claude is exactly the regression
-    // this chapter exists to catch (broken proxy path, wrapper refusing the
-    // session, claude exiting on boot). chapter() rethrows, so this fails CI.
-    const xtermText = d.locator('.xterm-rows').first();
+    // Opening the tab forks the user's extension host, which activates the
+    // extension and starts a `claude` under it, so first paint is genuinely
+    // slow — wait generously for the panel's own frame to appear.
     await expect
-      .poll(async () => (await xtermText.textContent().catch(() => '')) ?? '', {
-        timeout: 6 * 60_000,
+      .poll(() => dashPage.frames().some((f) => f.url().includes('/sidebar/view')), {
+        timeout: 5 * 60_000,
         intervals: [1000, 2000, 5000],
       })
-      .toMatch(/\? for shortcuts|shortcuts|Welcome to Claude|bypass permissions|Bypassing Permissions/i);
+      .toBe(true);
+    const panel = dashPage.frames().find((f) => f.url().includes('/sidebar/view'))!;
+    const panelText = async () =>
+      (await panel.evaluate(() => (document.body?.innerText ?? '').replace(/\s+/g, ' ')).catch(() => '')) ?? '';
+    // The composer only renders once the extension reports an authenticated
+    // Claude. bringup wires the mock Anthropic endpoint into the dashboard as
+    // well as the agent container, so that is env-credential auth and needs no
+    // sign-in; a login screen here means that wiring broke, and saying so beats
+    // a bare timeout on the composer.
+    await expect
+      .poll(panelText, { timeout: 5 * 60_000, intervals: [1000, 2000, 5000] })
+      .not.toMatch(/How do you want to log in|Claude\.ai Subscription/i);
+    const composer = panel.locator('[contenteditable="true"], [role="textbox"]').first();
+    await composer.waitFor({ state: 'visible', timeout: 3 * 60_000 });
     await capture(dashPage, 'coding-agent');
 
-    // Ask the agent something and hard-assert the answer. bringup always wires
-    // the mock Claude endpoint (e2e/mock-anthropic on the <ws>-agent bridge,
-    // forwarded daemon → agent container), so the agent CAN always answer — and
-    // the manual always shows a real exchange rather than an idle prompt. The
-    // reply text is the mock's, so it is known exactly; a login screen or a
-    // silent prompt here means the mock wiring broke, which is worth failing on.
+    // Ask the agent something and hard-assert the answer. The reply text is the
+    // mock's, so it is known exactly, and the manual always shows a real
+    // exchange rather than an idle panel.
     const prompt = 'What does this business process do?';
-    await term.click();
+    await composer.click();
     await dashPage.keyboard.type(prompt, { delay: 15 });
     await dashPage.keyboard.press('Enter');
     await expect
-      .poll(async () => (await xtermText.textContent().catch(() => '')) ?? '', {
-        timeout: 3 * 60_000,
-        intervals: [1000, 2000, 5000],
-      })
+      .poll(panelText, { timeout: 3 * 60_000, intervals: [1000, 2000, 5000] })
       .toMatch(/reads invoices from the inbound bucket|extracts totals/i);
     await capture(dashPage, 'coding-agent-conversation');
   });
@@ -1619,12 +1602,12 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   const EXPERIMENT_TITLE = 'Check vendor VAT-IDs against ARES';
   const expBanner = () => d.getByText(/You are in an experiment/i).first();
   await chapter('experiment', async () => {
-    // Leave the Coding Agent tab FIRST. The agent pane autostarts a session for
-    // whatever (copy, business process) it is mounted on, so creating the
-    // experiment while that tab is active would spin a coding-agent container up
-    // inside the experiment — real work nobody asked for, and a needless
-    // dependency for a chapter about the copy tree. A human who is about to try
-    // something out looks at the spec; do the same.
+    // Leave the Coding Agent tab FIRST. The chat panel opens an extension host
+    // for whatever (copy, business process) it is mounted on, so creating the
+    // experiment while that tab is active would start one inside the experiment
+    // — real work nobody asked for, and a needless dependency for a chapter
+    // about the copy tree. A human who is about to try something out looks at
+    // the spec; do the same.
     await clickTopTab(/Description/i);
     await d.getByRole('button', { name: /^Advanced$/ }).first().click();
     // NOW there is a business process, so the section says which one it is

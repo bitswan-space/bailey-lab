@@ -191,11 +191,11 @@ export const MANUAL = {
       num: '08', eyebrow: 'Build it', title: 'Coding Agent & requirements',
       lede: 'Describe the process, then let a coding agent build it — inside the workspace’s isolated sandbox — and pin the rules it must keep as runnable requirements.',
       slots: [
-        { id: 'coding-agent', caption: 'Coding Agent · the automations of the invoice flow, each with its live-dev preview' },
+        { id: 'coding-agent', caption: 'Coding Agent · the agent chat in the workspace, beside the automations of the invoice flow and their live-dev previews' },
         {
           id: 'coding-agent-conversation',
           caption:
-            'Coding Agent · asking the agent about the business process it is standing in, and getting an answer',
+            'Coding Agent · asking the agent about the business process it is standing in, and getting an answer — the chat runs in the workspace, in your own copy',
         },
         { id: 'file-editor', label: 'Live capture', caption: 'File editor · the Files sub-tab, opened on the backend worker’s automation.toml in your copy’s working tree' },
         { id: 'file-editor-saved', label: 'Live capture', caption: 'File editor · the memory policy edited to always-on and saved — versioned on your copy branch, not on main until you press Deploy' },
@@ -203,7 +203,7 @@ export const MANUAL = {
         { id: 'requirements', label: 'Live capture', caption: 'Requirements & tests · the rules the process must keep, as runnable specs' },
       ],
       sell: [
-        'The <strong>Coding Agent</strong> works straight from your specification: a terminal and a file tree right in the workspace, writing the invoice-processing automation in your isolated copy you review before it ever reaches main. The point isn’t that there’s an agent — it’s <strong>where</strong> it runs. The agent runs <em>inside</em> Bailey, not beside it: it works in an isolated copy and, while it can reach the internet to do its job, it is <strong>walled off from your production data</strong> — it cannot reach the production database or the user data in it. Everything it produces still passes the <strong>Deploy</strong> tab and the CVE checks before it ships.',
+        'The <strong>Coding Agent</strong> works straight from your specification: a chat panel and a file tree right in the workspace, writing the invoice-processing automation in your isolated copy you review before it ever reaches main. The point isn’t that there’s an agent — it’s <strong>where</strong> it runs. The agent runs <em>inside</em> Bailey, not beside it: it works in an isolated copy and, while it can reach the internet to do its job, it is <strong>walled off from your production data</strong> — it cannot reach the production database or the user data in it. Everything it produces still passes the <strong>Deploy</strong> tab and the CVE checks before it ships.',
         'You don’t have to go through the agent to change something. The Coding Agent tab’s <strong>Files</strong> sub-tab is a full editor over your copy’s working tree — open any file, edit it, and save with ⌘/Ctrl+S. Here we open the backend worker’s <code>automation.toml</code> and set its <code>memory_reservation_policy</code> to <em>always-on</em>: the worker does background processing with no inbound request to wake it, so it should stay resident rather than pause when idle (more on that in <em>Memory governance</em>). Like every change in a copy, the edit is <strong>versioned on your branch and never touches main until you press Deploy</strong>.',
         'Each automation in your copy also gets a <strong>live-dev</strong> deployment — a running preview that auto-builds as you change code. To open a running automation you click its <strong>frontend</strong> (the frontend automation’s open link in the Environment panel) and click through the real thing in your copy before it touches main. The <strong>Requirements &amp; tests</strong> tab turns the spec’s rules into runnable checks — VAT matches the PO, invoices over €5,000 are held, duplicate invoice numbers never post twice — so “does it still do what we promised?” is a button, not a meeting.',
       ],

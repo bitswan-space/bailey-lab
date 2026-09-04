@@ -149,6 +149,7 @@ docker logs "$MOCK_CLAUDE_CTR" 2>&1 | tail -2
 # Forwarded daemon -> agent container (init.go allowlist -> coding_agent.go).
 export ANTHROPIC_BASE_URL="http://${MOCK_CLAUDE_CTR}:${MOCK_CLAUDE_PORT}"
 export ANTHROPIC_API_KEY="sk-ant-e2e-mock-0000000000000000000000000000000000"
+export ANTHROPIC_AUTH_TOKEN="sk-ant-e2e-mock-0000000000000000000000000000000000"
 mark "[1c/7] mock Anthropic API"
 
 # Pin the daemon to THIS checkout's images so workspaces it creates via the
@@ -166,9 +167,27 @@ sudo env \
   BITSWAN_NPM_REGISTRY="$BITSWAN_NPM_REGISTRY_URL" \
   ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
   ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_AUTH_TOKEN" \
   "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status
+
+MOCK_CLAUDE_DASH_CTR="bitswan-e2e-mock-anthropic-dashboard"
+DASHBOARD_NET="bitswan_network"
+echo "=== [1d/7] Same mock, second copy on ${DASHBOARD_NET} for the dashboard-hosted agent chat ==="
+docker network create "$DASHBOARD_NET" 2>/dev/null || true
+docker rm -f "$MOCK_CLAUDE_DASH_CTR" 2>/dev/null || true
+docker run -d --name "$MOCK_CLAUDE_DASH_CTR" --network "$DASHBOARD_NET" \
+  --network-alias "$MOCK_CLAUDE_CTR" --restart unless-stopped \
+  -e MOCK_PORT="$MOCK_CLAUDE_PORT" \
+  -v "$REPO_ROOT/e2e/mock-anthropic/server.mjs:/server.mjs:ro" \
+  node:20-alpine node /server.mjs
+for i in $(seq 1 30); do
+  if docker logs "$MOCK_CLAUDE_DASH_CTR" 2>&1 | grep -q "listening on port"; then break; fi
+  sleep 1
+done
+docker logs "$MOCK_CLAUDE_DASH_CTR" 2>&1 | tail -1
+mark "[1d/7] mock Anthropic API for the dashboard"
 # `ingress init` makes the daemon pull + start traefik; on a cold host that pull
 # can exceed the daemon client's request deadline. Pre-pull, then retry.
 docker pull traefik:v3.6 >/dev/null 2>&1 || true
