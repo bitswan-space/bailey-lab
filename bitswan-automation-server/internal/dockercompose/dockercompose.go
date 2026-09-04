@@ -593,7 +593,7 @@ func CreateDexDockerComposeFile(port, configHash string, extraHosts []string) (s
 	return string(out), nil
 }
 
-func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error) {
+func CreateProtectedProxyDockerComposeFile(env map[string]string, extraHosts []string) (string, error) {
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -635,6 +635,10 @@ func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error
 				},
 			},
 		},
+	}
+
+	if len(extraHosts) > 0 {
+		proxyService["extra_hosts"] = extraHosts
 	}
 
 	// Redis session store. oauth2-proxy holds a per-session refresh LOCK in

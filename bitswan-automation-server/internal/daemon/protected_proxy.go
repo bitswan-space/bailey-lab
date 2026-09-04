@@ -92,7 +92,7 @@ func provisionProtectedProxy() error {
 		env["OAUTH2_PROXY_APPROVAL_PROMPT"] = "auto"
 	}
 
-	composeYAML, err := dockercompose.CreateProtectedProxyDockerComposeFile(env)
+	composeYAML, err := dockercompose.CreateProtectedProxyDockerComposeFile(env, configuredExtraHosts())
 	if err != nil {
 		return fmt.Errorf("render protected-proxy compose: %w", err)
 	}

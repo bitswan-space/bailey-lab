@@ -16,7 +16,8 @@
       "redirectUris": [
         "https://bailey.bs-e2e.localhost/oauth2/callback",
         "https://bailey-onboard.bs-e2e.localhost/oauth2/callback",
-        "https://*.bs-e2e.localhost/oauth2/callback"
+        "https://*.bs-e2e.localhost/oauth2/callback",
+        "https://auth.bs-e2e.localhost/callback"
       ],
       "webOrigins": ["https://bailey.bs-e2e.localhost", "https://bailey-onboard.bs-e2e.localhost"],
       "attributes": { "post.logout.redirect.uris": "https://*.bs-e2e.localhost/*" }
@@ -30,6 +31,7 @@
       "lastName": "Novák",
       "enabled": true,
       "emailVerified": true,
+      "realmRoles": ["default-roles-bitswan"],
       "credentials": [{ "type": "password", "value": "meridian-operator", "temporary": false }]
     },
     {
@@ -39,6 +41,7 @@
       "lastName": "Müller",
       "enabled": true,
       "emailVerified": true,
+      "realmRoles": ["default-roles-bitswan"],
       "credentials": [{ "type": "password", "value": "meridian-auditor", "temporary": false }]
     },
     {
@@ -48,6 +51,7 @@
       "lastName": "Horváth",
       "enabled": true,
       "emailVerified": true,
+      "realmRoles": ["default-roles-bitswan"],
       "credentials": [{ "type": "password", "value": "meridian-member", "temporary": false }]
     }
   ]
