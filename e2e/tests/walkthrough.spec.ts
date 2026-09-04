@@ -3391,10 +3391,12 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const visitor = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
     try {
       const vp = await visitor.newPage();
-      await vp.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
       // The proxy really re-pointed if an unauthenticated visit now rests on
-      // the broker's host rather than Keycloak's.
+      // the broker's host rather than Keycloak's. Re-navigate on each attempt:
+      // a page that landed on Keycloak before the switch completed would never
+      // change its own URL, and the retry would just re-read the stale one.
       await expect(async () => {
+        await vp.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
         expect(new URL(vp.url()).hostname, 'unauthenticated visitors reach the broker').toBe(`auth.${ENV.domain}`);
       }).toPass({ timeout: PROGRESS });
       await expect(vp.getByText(/Sign in to Bitswan Bailey/i).first()).toBeVisible({ timeout: PROGRESS });

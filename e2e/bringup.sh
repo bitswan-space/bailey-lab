@@ -266,12 +266,6 @@ docker run -d --name "$AOC_STUB_CTR" --network bitswan_network \
 for i in $(seq 1 15); do if [ -n "$(docker ps -q -f name="^${AOC_STUB_CTR}$")" ]; then break; fi; sleep 2; done
 [ -n "$(docker ps -q -f name="^${AOC_STUB_CTR}$")" ] || { echo "ERROR: AOC stub not running"; docker logs --tail 50 "$AOC_STUB_CTR"; exit 1; }
 
-# Point the daemon at it. NewAOCClient refuses to build without an access token,
-# so the token has to be present even though the stub never checks it.
-docker exec "$DAEMON_CTR" sh -c \
-  'CFG=/root/.config/bitswan/automation_server_config.toml; touch "$CFG"; \
-   grep -q "^\[aoc\]" "$CFG" || printf "\n[aoc]\naoc_url = \"http://bitswan-e2e-aoc:8080\"\nautomation_server_id = \"bs-e2e\"\naccess_token = \"e2e-aoc-stub-token\"\n" >> "$CFG"'
-
 mark "[3c/7] AOC stub"
 echo "=== [4/7] bitswan-protected-proxy (oauth2-proxy) in front of the gate ==="
 # This is the production chain's first hop. It runs the OIDC handshake against
@@ -357,11 +351,22 @@ echo "=== [5/7] Point Bailey at this domain + register the gate routes ==="
 # setupBaileyRoutes registers bailey. / bailey--inner. / bailey-onboard. →
 # bitswan-protected-proxy:80, but ONLY when the proxy is already running. So we
 # set the domain and restart the daemon now that the proxy is up.
+#
+# The AOC stub is wired in here too, and deliberately not earlier: saveTOMLConfig
+# rewrites the whole file from the daemon's in-memory config, so a section added
+# behind a running daemon's back is silently dropped the next time it saves. It
+# has to go in immediately before the restart that makes the daemon read it.
 docker exec "$DAEMON_CTR" sh -c \
   'CFG=/root/.config/bitswan/automation_server_config.toml; touch "$CFG"; \
-   grep -q "^protected_domain" "$CFG" || { printf "protected_domain = \"bs-e2e.localhost\"\n%s" "$(cat "$CFG")" > "$CFG.new" && mv "$CFG.new" "$CFG"; }'
+   grep -q "^protected_domain" "$CFG" || { printf "protected_domain = \"bs-e2e.localhost\"\n%s" "$(cat "$CFG")" > "$CFG.new" && mv "$CFG.new" "$CFG"; }; \
+   grep -q "^\[aoc\]" "$CFG" || printf "\n[aoc]\n  aoc_url = \"http://bitswan-e2e-aoc:8080\"\n  automation_server_id = \"bs-e2e\"\n  access_token = \"e2e-aoc-stub-token\"\n" >> "$CFG"'
 docker restart "$DAEMON_CTR" >/dev/null
 sleep 8
+# Fail here rather than 20 minutes later in the Single sign-on chapter: without
+# these the daemon cannot fetch the shared OAuth client, and the only symptom is
+# a broker that comes up with one connector instead of two.
+docker exec "$DAEMON_CTR" grep -q "^\[aoc\]" /root/.config/bitswan/automation_server_config.toml \
+  || { echo "ERROR: the daemon's AOC settings did not survive the restart"; docker exec "$DAEMON_CTR" cat /root/.config/bitswan/automation_server_config.toml; exit 1; }
 
 mark "[5/7] point Bailey at domain + restart"
 echo "=== [6/7] Wait for the onboarding host to answer through the chain ==="
