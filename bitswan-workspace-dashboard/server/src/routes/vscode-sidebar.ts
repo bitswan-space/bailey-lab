@@ -59,6 +59,7 @@ export function registerVscodeSidebarRoutes(
         const html = pageFor(instance, {
           assetBase: `${PREFIX}/asset`,
           bridgeUrl: `/ws/coding-agent-sidebar?${qs}`,
+          extensionDir: extensionPath()!,
         });
         reply.header('Content-Type', 'text/html; charset=utf-8');
         return reply.send(html);
