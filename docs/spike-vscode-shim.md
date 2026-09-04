@@ -287,6 +287,17 @@ config directory instead of an in-memory map, so onboarding flags and experiment
 gates survive a restart — and `showTerminalBanner` defaults to false, since this
 deployment has no terminal to fall back to.
 
+## One deployment gotcha
+
+The dashboard container reads `client/dist` from the mounted source per
+request, but holds `index.html` from when it started. Rebuild the client
+without restarting the container and it keeps serving an `index.html` that
+names asset hashes the new build deleted: every module script 404s into the SPA
+fallback, the browser refuses `text/html` as a module, and the app renders
+nothing at all — an empty frame inside a perfectly healthy-looking gate. Two
+gated tests "failed" that way before the cause was obvious. Restart the
+container after a client build.
+
 ## What is not done
 
 - **Rendering isolation is an open question.** VS Code runs webview HTML in a
