@@ -30,9 +30,6 @@ export const ENV = {
   // appends /v1/logs to the HTTP base; the gRPC target is host:port only.
   otlpHttpEndpoint: process.env.E2E_OTLP_HTTP_ENDPOINT || 'http://bitswan-e2e-otel:4318',
   otlpGrpcEndpoint: process.env.E2E_OTLP_GRPC_ENDPOINT || 'http://bitswan-e2e-otel:4317',
-  /** True when bringup wired the mock Claude endpoint (e2e/mock-anthropic), so
-   *  the coding-agent chapter can drive a real conversation. */
-  mockClaude: process.env.E2E_MOCK_CLAUDE === '1',
 };
 
 // A brief settle applied before every screenshot. Callers still wait on a real
