@@ -2590,6 +2590,38 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       .first()
       .click()
       .catch(() => {});
+    // The audit environment: freezing pinned one image, and the tab now carries
+    // the audit itself — the version under review, the diff promoting it would
+    // apply to production, an agent that can read both, and the report. Assert
+    // the environment is really there (not an "unavailable" card), then have the
+    // agent write the report and check that its answer landed in the file.
+    const auditEnv = d.getByText(/Audit environment/i).first();
+    await auditEnv.waitFor({ state: 'visible', timeout: SLA });
+    await d.getByRole('button', { name: /^Diff vs production$/ }).first().click();
+    await d
+      .getByText(/diff --git|No differences|nothing deployed/i)
+      .first()
+      .waitFor({ state: 'visible', timeout: SLA });
+    await capture(dashPage, 'audit-diff');
+    await d.getByRole('button', { name: /^Source$/ }).first().click();
+    const auditSearch = d.getByPlaceholder(/Search the audited source/i).first();
+    await auditSearch.waitFor({ state: 'visible', timeout: SLA });
+    await auditSearch.fill('def');
+    await dashPage.keyboard.press('Enter');
+    await capture(dashPage, 'audit-source');
+    await d.getByRole('button', { name: /^Report$/ }).first().click();
+    await d.getByRole('button', { name: /Draft with the agent/i }).first().click();
+    // The mock Claude endpoint answers, so the agent always writes something —
+    // an empty report here means the audit agent never ran.
+    await expect
+      .poll(
+        async () =>
+          (await d.locator('textarea').first().inputValue().catch(() => '')) ?? '',
+        { timeout: 4 * 60_000, intervals: [2000, 3000, 5000] },
+      )
+      .toMatch(/\S{20,}/);
+    await capture(dashPage, 'audit-report');
+
     const noteBox = d.getByPlaceholder(/Audit note/i).first();
     await noteBox.waitFor({ state: 'visible', timeout: SLA });
     await noteBox.fill(
