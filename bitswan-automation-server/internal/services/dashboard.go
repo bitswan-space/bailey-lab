@@ -151,7 +151,7 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 	}
 
 	if hostExtension := os.Getenv("BITSWAN_CLAUDE_EXTENSION_DIR"); hostExtension != "" && !sidebarEnabled {
-		if _, err := os.Stat(hostExtension); err == nil {
+		if ExtensionDirVisible(hostExtension) {
 			bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
 				hostExtension+":/claude-extension:ro")
 			enableAgentSidebar("/claude-extension")
@@ -383,4 +383,18 @@ func (d *DashboardService) runCommand(cmd *exec.Cmd) error {
 		return fmt.Errorf("command failed: %w\nOutput: %s", err, string(output))
 	}
 	return nil
+}
+
+func ExtensionDirVisible(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(dir); err == nil {
+		return true
+	}
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	_, err := os.Stat(filepath.Join("/host", dir))
+	return err == nil
 }

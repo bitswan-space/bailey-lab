@@ -314,7 +314,8 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		// agent container by services/coding_agent.go. Unset in production; the
 		// e2e points it at a mock Anthropic API so the walkthrough can hold a real
 		// agent conversation with no credentials and no outbound network.
-		"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+		"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+		"BITSWAN_CLAUDE_EXTENSION_DIR"} {
 		if v := os.Getenv(key); v != "" {
 			runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", key, v))
 		}
