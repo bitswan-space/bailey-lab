@@ -3424,7 +3424,14 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // visitor is handed straight to the customer's provider.
     await page.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
     await page.getByText(/Bitswan account/i).first().click();
-    await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
+    // Enabling single sign-on invalidated the proxy session, not the Keycloak
+    // one: this operator signed in several chapters ago and that cookie is still
+    // in the browser. Keycloak therefore hands the broker an identity without
+    // showing a form, and waiting for one would wait forever.
+    const kcForm = page.locator('#username, input[name="username"]').first();
+    if (await kcForm.isVisible({ timeout: 20_000 }).catch(() => false)) {
+      await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
+    }
     await expect(c.getByRole('heading', { name: /Workspaces/i }).first()).toBeVisible({ timeout: PROGRESS });
 
     await c.getByRole('button', { name: /Single sign-on/i }).first().click();
