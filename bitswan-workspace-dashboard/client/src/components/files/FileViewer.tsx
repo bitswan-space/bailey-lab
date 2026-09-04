@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
-import { Clipboard, Loader2 } from 'lucide-react';
+import { Clipboard, Download, Loader2 } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import {
   api,
@@ -31,6 +31,10 @@ interface Props {
  * without a flood of writes during fast typing.
  */
 const AUTOSAVE_IDLE_MS = 2000;
+
+function basename(p: string): string {
+  return p.slice(p.lastIndexOf('/') + 1) || p;
+}
 
 type SaveState =
   | { kind: 'clean' }
@@ -198,6 +202,16 @@ export function FileViewer({
           >
             <Clipboard className="size-3.5" aria-hidden /> Copy reference
           </button>
+          {path ? (
+            <a
+              href={api.copyFiles.rawUrl(copy, path)}
+              download={basename(path)}
+              className="inline-flex h-7 items-center gap-1.5 rounded border border-border bg-background px-2 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              title={`Download ${basename(path)}`}
+            >
+              <Download className="size-3.5" aria-hidden /> Download
+            </a>
+          ) : null}
         </div>
       </div>
       <div className="flex-1 overflow-hidden">
@@ -206,14 +220,25 @@ export function FileViewer({
             Loading…
           </div>
         ) : !data ? null : 'error' in data ? (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            {data.error === 'binary'
-              ? 'Binary file — not displayed.'
-              : data.error === 'too-large'
-                ? 'File is larger than 1 MiB — not displayed.'
-                : data.error === 'not-found'
-                  ? 'File not found.'
-                  : `Couldn't read: ${data.error}`}
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+            <span>
+              {data.error === 'binary'
+                ? 'Binary file — not displayed.'
+                : data.error === 'too-large'
+                  ? 'File is larger than 1 MiB — not displayed.'
+                  : data.error === 'not-found'
+                    ? 'File not found.'
+                    : `Couldn't read: ${data.error}`}
+            </span>
+            {path && data.error !== 'not-found' ? (
+              <a
+                href={api.copyFiles.rawUrl(copy, path)}
+                download={basename(path)}
+                className="inline-flex items-center gap-1.5 rounded border border-border bg-background px-2 py-1 text-[11px] hover:bg-muted hover:text-foreground"
+              >
+                <Download className="size-3.5" aria-hidden /> Download {basename(path)}
+              </a>
+            ) : null}
           </div>
         ) : (
           <Suspense
