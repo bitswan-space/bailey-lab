@@ -58,35 +58,6 @@ EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway-dev:latest"
 OTEL_COLLECTOR_IMAGE="otel/opentelemetry-collector:0.115.1"
 OTEL_CTR="bitswan-e2e-otel"
 
-echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component images ==="
-# The daemon embeds the Server Console SPA via go:embed from
-# internal/daemon/serverconsole_dist (not committed). Build it into the embed
-# dir BEFORE compiling the CLI, or the gate serves an empty console (a directory
-# listing) instead of the real onboarding/console UI.
-make -C "$REPO_ROOT/bitswan-automation-server" console
-mark "[1/7] server-console: make console"
-( cd bitswan-automation-server && go build -o bitswan ./main.go )
-mark "[1/7] bitswan CLI: go build"
-BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"
-# Build every workspace-service image (gitops, dashboard, coding-agent,
-# egress-gateway, infra-driver) as bitswan/<svc>-dev:latest in one parallel pass
-# — the same script developers run locally. The daemon is pinned to these -dev
-# tags below, so the Server Console UI creates workspaces on this checkout's code.
-"$REPO_ROOT/build-dev-images.sh"
-mark "[1/7] build-dev-images.sh: gitops/dashboard/coding-agent/egress/infra-driver"
-
-# The daemon container itself runs this image (debian + docker CLI + git +
-# git-http-backend) with the bitswan binary mounted at runtime, so build the tag
-# here or `automation-server-daemon init` can't start it on a hub-less VM.
-docker build -t bitswan/automation-server-runtime:latest -f "$REPO_ROOT/bitswan-automation-server/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
-mark "[1/7] docker build: automation-server-runtime image"
-# ...and keep it. Every path that recreates the daemon pulls this tag first, so
-# that a server updating its binary also picks up image-supplied tooling. Here
-# that would replace the image just built from THIS checkout with whatever is on
-# Hub — reverting the Dockerfile under test and making a green run prove nothing.
-export BITSWAN_SKIP_RUNTIME_IMAGE_PULL=1
-
-echo "=== [2/7] Daemon + traefik ingress ==="
 # Shared read-through PACKAGE PROXIES for per-BP image builds (a Go module proxy
 # + an npm registry proxy). Per-BP builds otherwise re-download npm/Go deps from
 # the internet on every create-bp (~50s of the cold build); routing them through
@@ -122,6 +93,43 @@ docker run -d --name bitswan-npmproxy --network "$BUILD_PROXY_NET" --restart unl
 BITSWAN_GOPROXY_URL="http://bitswan-goproxy:3000|direct"
 BITSWAN_NPM_REGISTRY_URL="http://bitswan-npmproxy:4873"
 mark "[1b/7] read-through build package proxies (Athens + Verdaccio)"
+# Export so build-dev-images.sh routes THIS repo's own image builds through the
+# proxy too. Those builds start with `go mod download`; without this they go
+# straight to proxy.golang.org on every bring-up, which is both slower and a
+# hard dependency on that host being healthy (it took two E2E runs down today).
+export BITSWAN_BUILD_NETWORK="$BUILD_PROXY_NET"
+export BITSWAN_GOPROXY="$BITSWAN_GOPROXY_URL"
+export BITSWAN_NPM_REGISTRY="$BITSWAN_NPM_REGISTRY_URL"
+
+echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component images ==="
+# The daemon embeds the Server Console SPA via go:embed from
+# internal/daemon/serverconsole_dist (not committed). Build it into the embed
+# dir BEFORE compiling the CLI, or the gate serves an empty console (a directory
+# listing) instead of the real onboarding/console UI.
+make -C "$REPO_ROOT/bitswan-automation-server" console
+mark "[1/7] server-console: make console"
+( cd bitswan-automation-server && go build -o bitswan ./main.go )
+mark "[1/7] bitswan CLI: go build"
+BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"
+# Build every workspace-service image (gitops, dashboard, coding-agent,
+# egress-gateway, infra-driver) as bitswan/<svc>-dev:latest in one parallel pass
+# — the same script developers run locally. The daemon is pinned to these -dev
+# tags below, so the Server Console UI creates workspaces on this checkout's code.
+"$REPO_ROOT/build-dev-images.sh"
+mark "[1/7] build-dev-images.sh: gitops/dashboard/coding-agent/egress/infra-driver"
+
+# The daemon container itself runs this image (debian + docker CLI + git +
+# git-http-backend) with the bitswan binary mounted at runtime, so build the tag
+# here or `automation-server-daemon init` can't start it on a hub-less VM.
+docker build -t bitswan/automation-server-runtime:latest -f "$REPO_ROOT/bitswan-automation-server/Dockerfile" "$REPO_ROOT/bitswan-automation-server"
+mark "[1/7] docker build: automation-server-runtime image"
+# ...and keep it. Every path that recreates the daemon pulls this tag first, so
+# that a server updating its binary also picks up image-supplied tooling. Here
+# that would replace the image just built from THIS checkout with whatever is on
+# Hub — reverting the Dockerfile under test and making a green run prove nothing.
+export BITSWAN_SKIP_RUNTIME_IMAGE_PULL=1
+
+echo "=== [2/7] Daemon + traefik ingress ==="
 
 # Pin the daemon to THIS checkout's images so workspaces it creates via the
 # Server Console UI run the branch's gitops/dashboard/coding-agent (with the

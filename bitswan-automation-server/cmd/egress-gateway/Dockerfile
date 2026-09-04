@@ -4,6 +4,9 @@
 FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
+# Fetch through the shared read-through module proxy when one is passed in
+# (build-dev-images.sh); unset = Go's default.
+ARG GOPROXY
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -o /egress-gateway ./cmd/egress-gateway
