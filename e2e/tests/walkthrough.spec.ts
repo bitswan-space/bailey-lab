@@ -3358,6 +3358,18 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         + ` -s 'redirectUris=["https://auth.${ENV.domain}/callback"]'`);
     } catch { /* already there */ }
 
+    // Register the daemon against the AOC stub. Only now, and not in bringup:
+    // provisioning the proxy is what needs an AOC, and stamping one on the whole
+    // run would switch every deployed app into AOC-mode token verification for
+    // chapters that are not about identity at all. The daemon re-reads its
+    // config per call, so this takes effect without a restart.
+    const registered = sh(`curl -sS --unix-socket /var/run/bitswan/automation-server.sock`
+      + ` -X POST -H 'Content-Type: application/json'`
+      + ` -d '{"aoc_url":"http://bitswan-e2e-aoc:8080","automation_server_id":"bs-e2e",`
+      + `"access_token":"e2e-aoc-stub-token","domain":"${ENV.domain}","force":true}'`
+      + ` -w ' HTTP:%{http_code}' http://unix/aoc/config`);
+    expect(registered, 'the daemon must accept the stub as its AOC').toContain('HTTP:200');
+
     const proxyIssuer = () =>
       sh(`docker inspect bitswan-protected-proxy --format '{{range .Config.Env}}{{println .}}{{end}}'`)
         .split('\n').find((l) => l.startsWith('OAUTH2_PROXY_OIDC_ISSUER_URL=')) || '';

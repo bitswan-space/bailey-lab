@@ -12,10 +12,30 @@ OAUTH_CLIENT = {
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
-        if self.path.rstrip("/") == "/api/automation_server/keycloak/oauth-client":
+        body = self.rfile.read(length)
+        path = self.path.rstrip("/")
+
+        if path == "/api/automation_server/keycloak/oauth-client":
             self.send(200, OAUTH_CLIENT)
             return
+
+        # Registering the server means the daemon now believes it has an AOC, so
+        # creating a workspace registers it too — and a 404 here aborts the
+        # create outright rather than degrading.
+        if path == "/api/automation_server/workspaces":
+            try:
+                name = json.loads(body or b"{}").get("name", "workspace")
+            except ValueError:
+                name = "workspace"
+            self.send(201, {
+                "id": "e2e-" + name,
+                "name": name,
+                "automation_server_id": "bs-e2e",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            })
+            return
+
         self.send(404, {"error": "not implemented by the e2e AOC stub: " + self.path})
 
     def do_GET(self):
