@@ -49,3 +49,14 @@ func TestEveryMountedSubpathIsCreated(t *testing.T) {
 		t.Errorf("expected the agent chat's config volume in:\n%s", compose)
 	}
 }
+
+// gitops materializes the audit environments and the audit agent mounts the
+// same subpaths, so the directory has to exist before either container starts.
+func TestTheAuditsDirectoryIsCreated(t *testing.T) {
+	for _, d := range workspaceVolumeSubdirs {
+		if d == "audits" {
+			return
+		}
+	}
+	t.Error("audits must be in workspaceVolumeSubdirs — gitops and the audit agent both mount it")
+}

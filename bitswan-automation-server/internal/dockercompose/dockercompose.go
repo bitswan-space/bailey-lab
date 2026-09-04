@@ -145,6 +145,11 @@ func (config *DockerComposeConfig) CreateDockerComposeFileWithSecret(existingSec
 			// (/gitops/firewall) — otherwise gitops would read its container-local
 			// layer while the gateways write the volume, and the feed stays empty.
 			wsVolume("firewall", "/gitops/firewall"),
+			// The audit environments a frozen staging stage gets: the audited
+			// source, the diff against production and the report. gitops builds
+			// them and the audit agent container mounts the same subpaths, so
+			// this must be the volume and not the container layer.
+			wsVolume("audits", "/gitops/audits"),
 			wsVolume("ssh", "/home/user1000/.ssh"),
 			// NO docker.sock: after the infra-driver cut-over gitops never
 			// touches Docker — it pushes bitswan.yaml to the driver and calls

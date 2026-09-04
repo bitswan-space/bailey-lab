@@ -29,6 +29,7 @@ var workspaceVolumeSubdirs = []string{
 	"coding-agent-home",
 	"coding-agent-sessions",
 	"claude-configs",
+	"audits",
 }
 
 // ensureWorkspaceVolumeDirs creates any missing standard subdirectories for a
