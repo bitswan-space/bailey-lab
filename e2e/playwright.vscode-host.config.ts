@@ -4,8 +4,8 @@ const PORT = Number(process.env.PROBE_PORT ?? 8760);
 const SERVER_CWD = '../bitswan-workspace-dashboard/server';
 
 export default defineConfig({
-  testDir: './tests',
-  testMatch: /vscode-host\.spec\.ts/,
+  testDir: './tests/spike',
+  testMatch: /vscode-host.*\.spec\.ts/,
   timeout: 120_000,
   retries: 0,
   reporter: [['list']],

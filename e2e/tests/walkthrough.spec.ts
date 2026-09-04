@@ -1310,6 +1310,29 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       })
       .toMatch(/\? for shortcuts|shortcuts|Welcome to Claude|bypass permissions|Bypassing Permissions/i);
     await capture(dashPage, 'coding-agent');
+
+    // With a mock Claude endpoint wired in (e2e/mock-anthropic, reachable from
+    // the agent container and passed through by the daemon), the agent can hold
+    // a real conversation with no credentials and no outbound network — so the
+    // handbook shows an actual exchange instead of an idle prompt. Skipped when
+    // the mock is not configured: without it the agent sits on a login screen
+    // and typing would prove nothing.
+    if (ENV.mockClaude) {
+      const prompt = 'What does this business process do?';
+      await term.click();
+      await dashPage.keyboard.type(prompt, { delay: 15 });
+      await dashPage.keyboard.press('Enter');
+      // The reply is the mock's, so we know its exact text — poll the rows for
+      // it rather than guessing at a spinner. Generous: the CLI has to reach
+      // the mock, stream the answer back, and repaint the TUI.
+      await expect
+        .poll(async () => (await xtermText.textContent().catch(() => '')) ?? '', {
+          timeout: 3 * 60_000,
+          intervals: [1000, 2000, 5000],
+        })
+        .toMatch(/reads invoices from the inbound bucket|extracts totals/i);
+      await capture(dashPage, 'coding-agent-conversation');
+    }
   });
   await chapter('live-dev', async () => {
     await clickTopTab(/Coding Agent/i);

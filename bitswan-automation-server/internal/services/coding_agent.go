@@ -92,6 +92,16 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 	if sshPubKey != "" {
 		envVars = append(envVars, "EDITOR_SSH_PUBLIC_KEY="+sshPubKey)
 	}
+	// Pass an alternate Claude endpoint through to the agent when the daemon was
+	// started with one. Unset in production, so nothing changes there; the e2e
+	// sets it to a mock Anthropic API on the <ws>-agent network so the
+	// walkthrough can drive a real agent conversation with no real credentials
+	// and no outbound network (see e2e/mock-anthropic/).
+	for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+		if v := os.Getenv(key); v != "" {
+			envVars = append(envVars, key+"="+v)
+		}
+	}
 
 	volumes := []interface{}{
 		// Each agent session works in its own copy at /workspace/copies/<name>.

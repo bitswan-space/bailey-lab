@@ -192,6 +192,11 @@ export const MANUAL = {
       lede: 'Describe the process, then let a coding agent build it — inside the workspace’s isolated sandbox — and pin the rules it must keep as runnable requirements.',
       slots: [
         { id: 'coding-agent', caption: 'Coding Agent · the automations of the invoice flow, each with its live-dev preview' },
+        {
+          id: 'coding-agent-conversation',
+          caption:
+            'Coding Agent · asking the agent about the business process it is standing in, and getting an answer',
+        },
         { id: 'file-editor', label: 'Live capture', caption: 'File editor · the Files sub-tab, opened on the backend worker’s automation.toml in your copy’s working tree' },
         { id: 'file-editor-saved', label: 'Live capture', caption: 'File editor · the memory policy edited to always-on and saved — versioned on your copy branch, not on main until you press Deploy' },
         { id: 'live-dev', label: 'Live capture', caption: 'Live-dev · the automation running its live preview in your copy — click its frontend to open it' },

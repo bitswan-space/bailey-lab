@@ -1,9 +1,11 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { activateExtension } from './host.js';
 import { resolveWebviewView, type ResolvedWebview } from './api.js';
+import { startMockAnthropic } from './mock-anthropic.js';
 
 const extensionPath = process.env.CLAUDE_EXTENSION_PATH;
 const workspaceFolder = process.env.PROBE_WORKSPACE ?? process.cwd();
@@ -72,6 +74,22 @@ function injectHostBridge(html: string): string {
   return bridge + relaxed;
 }
 
+const configDir =
+  process.env.PROBE_CLAUDE_CONFIG_DIR ??
+  fs.mkdtempSync(path.join(os.tmpdir(), 'bitswan-vscode-host-claude-'));
+process.env.CLAUDE_CONFIG_DIR = configDir;
+
+const mock = process.env.PROBE_NO_MOCK === '1' ? undefined : await startMockAnthropic();
+if (mock) {
+  process.env.ANTHROPIC_BASE_URL = mock.baseUrl;
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-mock-0000000000000000000000000000000000000000';
+  process.env.CLAUDE_CODE_USE_BEDROCK = '0';
+  process.env.CLAUDE_CODE_USE_VERTEX = '0';
+  process.env.DISABLE_TELEMETRY = '1';
+  process.env.DISABLE_AUTOUPDATER = '1';
+  process.env.DISABLE_ERROR_REPORTING = '1';
+}
+
 const host = await activateExtension({ extensionPath, workspaceFolder });
 const registrations = host.state.webviewViewProviders;
 if (registrations.length === 0) {
@@ -102,9 +120,32 @@ const server = http.createServer((req, res) => {
     res.end(pageHtml);
     return;
   }
+  if (url.pathname === '/__mock') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        baseUrl: mock?.baseUrl ?? null,
+        count: mock?.requests.length ?? 0,
+        requests: (mock?.requests ?? []).slice(-40).map((r) => {
+          const messages = (r.body as { messages?: unknown[] } | undefined)?.messages ?? [];
+          const blocks = messages.flatMap((m) => {
+            const c = (m as { content?: unknown }).content;
+            return Array.isArray(c) ? (c as { type?: string }[]) : [];
+          });
+          return {
+            method: r.method,
+            path: r.path,
+            blockTypes: blocks.map((b) => b.type ?? '?'),
+            imageBlocks: blocks.filter((b) => b.type === 'image').length,
+          };
+        }),
+      }),
+    );
+    return;
+  }
   if (url.pathname === '/__inbox') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ count: extensionInbox.length, messages: extensionInbox.slice(0, 40) }));
+    res.end(JSON.stringify({ count: extensionInbox.length, messages: extensionInbox.slice(-80) }));
     return;
   }
   if (url.pathname.startsWith('/asset/')) {
@@ -146,4 +187,6 @@ wss.on('connection', (socket) => {
 server.listen(port, '127.0.0.1', () => {
   console.log(`vscode-host dev server on http://127.0.0.1:${port}/`);
   console.log(`view=${view.viewId} html=${view.html.length}B nonce=${nonceFrom(view.html) ? 'yes' : 'no'}`);
+  if (mock) console.log(`mock anthropic api on ${mock.baseUrl}`);
+  console.log(`CLAUDE_CONFIG_DIR=${configDir}`);
 });
