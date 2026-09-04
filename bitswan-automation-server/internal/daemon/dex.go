@@ -44,7 +44,7 @@ func buildDexConfig(domain string, aocClient *aoc.OAuthClientResponse, sso ssoCo
 	callback := dexIssuerURL(domain) + "/callback"
 
 	connectors := []map[string]any{}
-	if aocClient != nil && aocClient.ClientID != "" && aocClient.IssuerURL != "" {
+	if !sso.SSOOnly && aocClient != nil && aocClient.ClientID != "" && aocClient.IssuerURL != "" {
 		connectors = append(connectors, map[string]any{
 			"type": "oidc",
 			"id":   dexConnectorAOC,

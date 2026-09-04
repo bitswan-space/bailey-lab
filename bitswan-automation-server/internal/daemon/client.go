@@ -513,6 +513,68 @@ func (c *Client) ApproveDevice(code, email string) (string, error) {
 	return result.Email, nil
 }
 
+type SSOStatus struct {
+	Enabled     bool   `json:"enabled"`
+	SSOOnly     bool   `json:"sso_only"`
+	DisplayName string `json:"display_name"`
+	IssuerURL   string `json:"issuer_url"`
+	UpdatedAt   string `json:"updated_at"`
+	UpdatedBy   string `json:"updated_by"`
+}
+
+func (c *Client) SSOStatus() (*SSOStatus, error) {
+	req, err := http.NewRequest("GET", "http://unix/bailey/sso/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	var out SSOStatus
+	if err := c.doJSON(req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) DisableSSO() (bool, error) {
+	req, err := http.NewRequest("POST", "http://unix/bailey/sso/disable", nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to create request: %w", err)
+	}
+	var out struct {
+		Changed bool `json:"changed"`
+	}
+	if err := c.doJSON(req, &out); err != nil {
+		return false, err
+	}
+	return out.Changed, nil
+}
+
+func (c *Client) doJSON(req *http.Request, out any) error {
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: invalid or missing token")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		var errResp ErrorResponse
+		if json.Unmarshal(body, &errResp) == nil && errResp.Error != "" {
+			return fmt.Errorf("%s", errResp.Error)
+		}
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+	return nil
+}
+
 // PendingDeviceInfo mirrors the daemon's PendingDevice for the CLI list.
 type PendingDeviceInfo struct {
 	Email     string `json:"email"`

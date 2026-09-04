@@ -319,9 +319,10 @@ function QRImage({ value, size = 168 }) {
 }
 
 // ─── Toggle switch ──────────────────────────────────────────────────────────
-function Toggle({ on, onChange, disabled }) {
+function Toggle({ on, onChange, disabled, label }) {
   return (
-    <button type="button" disabled={disabled} onClick={() => onChange(!on)} style={{
+    <button type="button" disabled={disabled} onClick={() => onChange(!on)}
+      aria-label={label} aria-pressed={label ? !!on : undefined} style={{
       width: 40, height: 23, borderRadius: 9999, border: 0, position: 'relative',
       background: on ? C.primary : C.borderHi, cursor: disabled ? 'not-allowed' : 'pointer',
       transition: 'background 160ms', flex: '0 0 auto', opacity: disabled ? 0.5 : 1,

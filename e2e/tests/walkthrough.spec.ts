@@ -3405,9 +3405,9 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await visitor.close().catch(() => {});
     }
 
-    // And it reverts cleanly: disabling tears the broker back down and returns
-    // the proxy to Keycloak, so a server that tried SSO and backed out is not
-    // left on a half-migrated topology.
+    // Closing the second door. Turning Bitswan accounts off leaves the broker
+    // with exactly one connector, so there is nothing to choose between and a
+    // visitor is handed straight to the customer's provider.
     await page.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
     await page.getByText(/Bitswan account/i).first().click();
     await oidcLogin(page, ENV.operatorEmail, ENV.operatorPassword);
@@ -3415,7 +3415,27 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
 
     await c.getByRole('button', { name: /Single sign-on/i }).first().click();
     await expect(c.getByRole('heading', { name: /Single sign-on/i }).first()).toBeVisible({ timeout: SLA });
-    await c.getByRole('button', { name: /^Disable$/ }).first().click();
+    await expect(c.getByText(/people pick between a Bitswan account and your provider/i).first())
+      .toBeVisible({ timeout: SLA });
+    await c.getByRole('button', { name: 'Bitswan account sign-in' }).first().click();
+    await expect(c.getByText(/nobody can sign in . including you/i).first()).toBeVisible({ timeout: SLA });
+    await c.getByRole('button', { name: /^Save changes$/ }).first().click();
+
+    const exclusive = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
+    try {
+      const xp = await exclusive.newPage();
+      await expect(async () => {
+        await xp.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
+        expect(xp.url(), 'the only provider left gets the visitor without asking').toContain('/realms/acme');
+      }).toPass({ timeout: PROGRESS });
+      await expect(xp.getByText(/Sign in to Bitswan Bailey/i)).toHaveCount(0);
+    } finally {
+      await exclusive.close().catch(() => {});
+    }
+
+    // Which is exactly why the way back cannot run through the browser: nobody
+    // can reach the admin UI to undo it, so the host shell has to work.
+    sh('docker exec bitswan-automation-server-daemon bitswan bailey sso disable');
     await expect(async () => {
       expect(sh('docker ps --format "{{.Names}}"'), 'the broker must be gone').not.toContain('bitswan-dex');
       expect(proxyIssuer(), 'the proxy must be back on Keycloak').toContain('/realms/bitswan');

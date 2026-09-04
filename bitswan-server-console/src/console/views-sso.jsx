@@ -3,7 +3,7 @@ import React from 'react';
 const { C: SC, Icon: SIcon, Btn: SBtn, Pill: SPill } = window.WD_SHELL;
 const {
   Card: SCard, PageHeader: SPageHeader, Field: SField, TextInput: STextInput,
-  EmptyState: SEmpty,
+  EmptyState: SEmpty, Toggle: SToggle,
 } = window.SC_UI;
 const { Api: SApi } = window.SC_API;
 const { useState: useS, useEffect: useSE } = React;
@@ -79,6 +79,7 @@ function SSOView({ ctx }) {
     try {
       const r = await SApi.ssoSet({
         enabled,
+        sso_only: !!cfg.sso_only,
         display_name: cfg.display_name || '',
         issuer_url: cfg.issuer_url || '',
         client_id: cfg.client_id || '',
@@ -116,7 +117,7 @@ function SSOView({ ctx }) {
   return (
     <div>
       <SPageHeader title="Single sign-on"
-        sub="Add your own OpenID Connect provider so your people sign in with their company account. Bitswan accounts keep working alongside it." />
+        sub="Add your own OpenID Connect provider so your people sign in with their company account." />
 
       <SCard>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
@@ -159,6 +160,25 @@ function SSOView({ ctx }) {
           <code style={{ fontSize: 12.5, fontFamily: 'Geist Mono, monospace', color: SC.fg, wordBreak: 'break-all' }}>
             {cfg.callback_url || 'Available once this server has a domain.'}
           </code>
+        </Row>
+        <Row label="Bitswan accounts" hint="Whether the Bitswan sign-in button stays next to yours.">
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+            <SToggle label="Bitswan account sign-in" on={!cfg.sso_only} onChange={(on) => patch({ sso_only: !on })} />
+            <div style={{ fontSize: 12.5, color: SC.fg, lineHeight: '18px' }}>
+              {cfg.sso_only
+                ? 'Off — your provider is the only way in, so nobody is asked to choose.'
+                : 'On — people pick between a Bitswan account and your provider when they sign in.'}
+            </div>
+          </div>
+          {cfg.sso_only && (
+            <div style={{ display: 'flex', gap: 10, padding: 12, marginTop: 10, borderRadius: 10, background: '#fffbeb', border: `1px solid ${SC.amber}55` }}>
+              <SIcon name="shield-alert" size={15} color={SC.amber} style={{ marginTop: 1, flex: '0 0 auto' }} />
+              <span style={{ fontSize: 12, color: SC.fg, lineHeight: '17px' }}>
+                If your provider stops answering, nobody can sign in — including you. The way back is a
+                shell on this server: <code style={{ fontFamily: 'Geist Mono, monospace' }}>bitswan bailey sso disable</code>.
+              </span>
+            </div>
+          )}
         </Row>
         <Row label="Groups claim" hint="Only if your provider does not use “groups”.">
           <STextInput value={cfg.groups_claim || ''} onChange={(v) => patch({ groups_claim: v })} placeholder="groups" />
