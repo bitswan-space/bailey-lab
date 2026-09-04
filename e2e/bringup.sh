@@ -376,6 +376,7 @@ E2E_TEAMMATE_EMAIL=marek.horvath@meridianfoods.cz
 E2E_TEAMMATE_PASSWORD=meridian-member
 E2E_OTLP_HTTP_ENDPOINT=http://${OTEL_CTR}:4318
 E2E_OTLP_GRPC_ENDPOINT=http://${OTEL_CTR}:4317
+E2E_AGENT_CHAT=${BITSWAN_CLAUDE_EXTENSION_DIR:+1}
 ENV
 mark "[7/7] write e2e/.env"
 echo "=== bring-up complete ==="

@@ -1274,7 +1274,21 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // Code VS Code sidebar, hosted by the dashboard's own partial `vscode` API
   // (server/src/vscode-host) and rendered in a nested frame, so the waits below
   // are for that frame and its composer rather than for a terminal.
-  await chapter('coding-agent', async () => {
+  // The chat panel is the Claude Code sidebar, which needs the unpacked
+  // extension on the host running the stack (bringup mounts it and reports it
+  // as E2E_AGENT_CHAT). It is a 216 MB third-party artifact, so a plain CI
+  // runner does not have it: there the chapter is skipped and its two slots
+  // render the manual's honest "capture pending" placeholder rather than a
+  // screenshot of an error. Where the extension IS present — a developer's
+  // machine, the KVM runner that builds the manual — the chapter is strict.
+  const agentChat = process.env.E2E_AGENT_CHAT === '1';
+  if (!agentChat) {
+    console.log(
+      '  coding-agent: skipped — no unpacked Claude Code extension on this host ' +
+        '(set BITSWAN_CLAUDE_EXTENSION_DIR before bringup to include the chapter)',
+    );
+  }
+  if (agentChat) await chapter('coding-agent', async () => {
     await clickTopTab(/Coding Agent/i);
     // Opening the tab forks the user's extension host, which activates the
     // extension and starts a `claude` under it, so first paint is genuinely
