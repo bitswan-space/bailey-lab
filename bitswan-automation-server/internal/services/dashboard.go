@@ -130,11 +130,20 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		)
 		// An unpacked Claude Code VS Code extension dropped in the dev source
 		// tree turns on the dashboard-hosted agent sidebar (server/src/vscode-host).
-		// Checked on the host so a tree without it keeps the terminal chat.
+		// Checked on the host so a tree without it leaves the sidebar off.
 		if _, err := os.Stat(filepath.Join(devConfig.SourceDir, ".claude-extension")); err == nil {
 			bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
 				"CLAUDE_EXTENSION_PATH="+dashboardDevContainerPath+"/.claude-extension",
+				"SIDEBAR_CONFIG_ROOT=/claude-config",
 			)
+			bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
+				wsVolume("claude-configs", "/claude-config", false))
+			for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+				if v := os.Getenv(key); v != "" {
+					bitswanDashboard["environment"] = append(
+						bitswanDashboard["environment"].([]string), key+"="+v)
+				}
+			}
 		}
 	}
 
