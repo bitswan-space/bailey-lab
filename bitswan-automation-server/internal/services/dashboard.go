@@ -118,6 +118,23 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), caEnvVars...)
 	}
 
+	sidebarEnabled := false
+	enableAgentSidebar := func(extensionPathInContainer string) {
+		sidebarEnabled = true
+		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
+			"CLAUDE_EXTENSION_PATH="+extensionPathInContainer,
+			"SIDEBAR_CONFIG_ROOT=/claude-config",
+		)
+		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
+			wsVolume("claude-configs", "/claude-config", false))
+		for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+			if v := os.Getenv(key); v != "" {
+				bitswanDashboard["environment"] = append(
+					bitswanDashboard["environment"].([]string), key+"="+v)
+			}
+		}
+	}
+
 	// Hot-reload dev mode: mount the source directory and let the container's
 	// entrypoint run `npm install` + `npm run dev` instead of the pre-built bundle.
 	if devConfig != nil && devConfig.SourceDir != "" {
@@ -128,22 +145,16 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			"BITSWAN_DEV_MODE=true",
 			"BITSWAN_DASHBOARD_DEV_DIR="+dashboardDevContainerPath,
 		)
-		// An unpacked Claude Code VS Code extension dropped in the dev source
-		// tree turns on the dashboard-hosted agent sidebar (server/src/vscode-host).
-		// Checked on the host so a tree without it leaves the sidebar off.
 		if _, err := os.Stat(filepath.Join(devConfig.SourceDir, ".claude-extension")); err == nil {
-			bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
-				"CLAUDE_EXTENSION_PATH="+dashboardDevContainerPath+"/.claude-extension",
-				"SIDEBAR_CONFIG_ROOT=/claude-config",
-			)
+			enableAgentSidebar(dashboardDevContainerPath + "/.claude-extension")
+		}
+	}
+
+	if hostExtension := os.Getenv("BITSWAN_CLAUDE_EXTENSION_DIR"); hostExtension != "" && !sidebarEnabled {
+		if _, err := os.Stat(hostExtension); err == nil {
 			bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
-				wsVolume("claude-configs", "/claude-config", false))
-			for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
-				if v := os.Getenv(key); v != "" {
-					bitswanDashboard["environment"] = append(
-						bitswanDashboard["environment"].([]string), key+"="+v)
-				}
-			}
+				hostExtension+":/claude-extension:ro")
+			enableAgentSidebar("/claude-extension")
 		}
 	}
 
