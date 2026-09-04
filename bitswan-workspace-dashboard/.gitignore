@@ -8,3 +8,4 @@ workspace-demo/
 .mcp.json
 skills-lock.json
 tsconfig.tsbuildinfo
+.claude-extension/

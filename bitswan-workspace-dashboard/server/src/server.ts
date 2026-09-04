@@ -16,6 +16,7 @@ import { registerSnapshotRoutes } from './routes/snapshots.js';
 import { registerDataExplorerRoutes } from './routes/data-explorer.js';
 import { registerCopyRoutes } from './routes/copies.js';
 import { registerCopyFilesRoutes } from './routes/copy-files.js';
+import { registerVscodeSidebarRoutes } from './routes/vscode-sidebar.js';
 import { registerMeRoutes } from './routes/me.js';
 import { registerTaskRoutes } from './routes/tasks.js';
 import { startAgentUploadsSweeper } from './services/agent-uploads.js';
@@ -82,6 +83,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerTaskRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });
   registerPublicEndpointRoutes(app);
+  registerVscodeSidebarRoutes(app, { workspaceRoot: WORKSPACE_ROOT });
 
   // Hourly reaper for pasted terminal images (see services/agent-uploads.ts).
   startAgentUploadsSweeper(app, { workspaceRoot: WORKSPACE_ROOT });
