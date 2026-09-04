@@ -13,6 +13,7 @@ import { DiffTab } from '@/components/diff/DiffTab';
 import { ContainersPane } from '@/components/agents/ContainersPane';
 import { Button } from '@/components/ui/button';
 import { useSessions } from '@/components/agents/SessionProvider';
+import { AgentSidebar } from '@/components/agents/AgentSidebar';
 import { useLatestAgentSession } from '@/hooks/useLatestAgentSession';
 import { cn } from '@/lib/utils';
 import { useUrlEnum, useUrlFlag } from '@/lib/urlState';
@@ -102,14 +103,34 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   // it can portal the terminal over it. Cleanup unbinds so terminals stay
   // alive (just hidden) when the user navigates away.
   const paneRef = useRef<HTMLElement | null>(null);
+  // The dashboard hosts the Claude Code sidebar itself when the extension is
+  // present (CLAUDE_EXTENSION_PATH); otherwise the chat pane keeps the xterm
+  // terminal it has always had.
+  const [sidebarAvailable, setSidebarAvailable] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void fetch('/api/coding-agent/sidebar/status', { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : { available: false }))
+      .then((j: { available?: boolean }) => {
+        if (alive) setSidebarAvailable(Boolean(j.available));
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
   useEffect(() => {
     setCurrentScope({ copy, bp });
     return () => setCurrentScope(null);
   }, [copy, bp, setCurrentScope]);
   useEffect(() => {
+    if (sidebarAvailable) {
+      setPaneEl(null);
+      return undefined;
+    }
     setPaneEl(paneRef.current);
     return () => setPaneEl(null);
-  }, [setPaneEl]);
+  }, [setPaneEl, sidebarAvailable]);
 
   // The BP's live agent — one session per (user, copy, BP), tracked by the
   // provider.
@@ -302,6 +323,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
           sub !== 'chat' && 'hidden',
         )}
       >
+        {sidebarAvailable && <AgentSidebar copy={copy} bp={bp} />}
         {/* Transitional state only. The agent is started automatically, so
             the user sees a spinner while that is in flight — and an error
             with a Retry if it keeps failing, which is a bug worth showing
