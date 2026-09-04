@@ -80,16 +80,25 @@ test('signed in through the real gate, the Coding Agent tab shows a working side
   const sidebar = page.frames().find((f) => f.url().includes('/sidebar/view'));
   console.log('resting url       :', page.url().slice(0, 90));
   console.log('sidebar frame     :', Boolean(sidebar));
-  if (sidebar) {
-    const d = await sidebar.evaluate(() => ({
-      nodes: document.querySelectorAll('*').length,
-      text: (document.body?.innerText || '').slice(0, 160),
-    }));
-    console.log('sidebar           :', JSON.stringify(d));
-  }
+  const detail = sidebar
+    ? await sidebar.evaluate(() => ({
+        nodes: document.querySelectorAll('*').length,
+        editable: document.querySelectorAll('[contenteditable],[role="textbox"]').length,
+        text: (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 140),
+      }))
+    : undefined;
+  console.log('sidebar detail    :', JSON.stringify(detail));
+  const xterm = await page
+    .frames()
+    .find((f) => f.url().includes('--inner') && !f.url().includes('/sidebar/view'))
+    ?.evaluate(() => document.querySelectorAll('.xterm').length);
+  console.log('xterm in dashboard:', xterm);
   console.log('websockets opened :', JSON.stringify([...new Set(wsOpened)]));
   console.log('websocket errors  :', JSON.stringify(wsFailures.slice(0, 4)));
-  await page.screenshot({ path: 'gated-sidebar.png', fullPage: false });
+  await page.screenshot({ path: 'gated-sidebar.png' });
 
   expect(sidebar, 'the sidebar frame is present').toBeTruthy();
+  expect(xterm, 'no terminal is mounted anywhere').toBe(0);
+  expect(detail?.nodes ?? 0, 'the sidebar rendered a real UI').toBeGreaterThan(80);
+  expect(detail?.editable ?? 0, 'the composer is present, so the chat is usable').toBeGreaterThan(0);
 });

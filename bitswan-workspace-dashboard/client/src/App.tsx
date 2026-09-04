@@ -9,7 +9,6 @@ import {
   useCopyRefsMoved,
   useDeployDone,
 } from '@/components/workspace/WorkspaceProvider';
-import { SessionProvider, useSessions } from '@/components/agents/SessionProvider';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
 import { DeleteCopyDialog } from '@/components/workspace/DeleteCopyDialog';
 import { BusyOverlay } from '@/components/workspace/BusyOverlay';
@@ -34,9 +33,7 @@ export function App() {
     <AuthGate>
       <SessionExpiredBanner />
       <WorkspaceProvider>
-        <SessionProvider>
           <Shell />
-        </SessionProvider>
       </WorkspaceProvider>
     </AuthGate>
   );
@@ -190,7 +187,6 @@ function Shell() {
   const { processes } = useProcesses();
   const { copies: copiesSnapshot } = useCopies();
   const deployDone = useDeployDone();
-  const { sendPrompt, startMergeBackSession } = useSessions();
   // Memoise the empty-array fallback so the array identity is stable.
   const allBps = useMemo(() => processes ?? [], [processes]);
   const copies = useMemo(() => copiesSnapshot ?? [], [copiesSnapshot]);
@@ -499,16 +495,13 @@ function Shell() {
           // HANDING OFF MEANS GIVING IT THE TASK. Opening the tab was all this
           // did, so the user arrived at an agent that had been told nothing,
           // sitting at an empty prompt, with no way to know that finishing a
-          // rebase was now their job to describe — the merge-back path next to
-          // it has always sent its prompt (`startMergeBackSession`). The sync
-          // prompt is the conflict-resolution one: commit WIP, rebase onto
-          // main, resolve, push.
+          // rebase was now their job to describe. Both hand-offs sent a prompt
+          // until the terminal session layer was removed.
+          // REGRESSION, KNOWINGLY TAKEN: the prompt hand-off went with the
+          // terminal session layer. This opens the tab and tells the agent
+          // nothing, which is the state the paragraph above was written about.
+          // Restoring it needs a way to seed the hosted sidebar's composer.
           setCopy(copyName);
-          await sendPrompt(copyName, bpDir, 'sync').catch((err: unknown) => {
-            toast.error(
-              `Failed to hand the rebase to the agent: ${errorMessage(err)}`,
-            );
-          });
           handleTab('agent');
           return;
         }
@@ -538,7 +531,7 @@ function Shell() {
         notifyCopyRefsMoved();
       }
     },
-    [handleTab, sendPrompt, notifyCopyRefsMoved],
+    [handleTab, notifyCopyRefsMoved],
   );
 
   const bp = useMemo(
@@ -791,12 +784,9 @@ function Shell() {
         toast.error(`“${label}”: ${res.message}`, { id, duration: 10000 });
         if (bpId) {
           // The agent works inside the experiment, rebasing it onto the
-          // parent branch; the merge fast-forwards once it's done.
-          await startMergeBackSession(name, bpId, parent).catch((err: unknown) => {
-            toast.error(
-              `Failed to hand the rebase to the agent: ${errorMessage(err)}`,
-            );
-          });
+          // parent branch; the merge fast-forwards once it's done. The prompt
+          // that used to describe that task went with the terminal session
+          // layer, so the user has to ask for it themselves for now.
         }
         handleTab('agent');
         return;
@@ -831,7 +821,6 @@ function Shell() {
     wt,
     merging,
     bpId,
-    startMergeBackSession,
     handleTab,
     handleCopyDeleted,
     lock,
