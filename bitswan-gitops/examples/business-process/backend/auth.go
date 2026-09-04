@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 )
@@ -85,17 +86,50 @@ type contextKey string
 
 const claimsKey contextKey = "claims"
 
-// JWKSProvider fetches and caches RSA public keys from a Keycloak JWKS endpoint.
+// JWKSProvider fetches and caches RSA public keys from the issuer's JWKS
+// endpoint. The endpoint is discovered rather than assumed: a server whose
+// admin has added their own identity provider authenticates through a broker,
+// which publishes its keys somewhere other than Keycloak's path.
 type JWKSProvider struct {
-	jwksURL string
-	mu      sync.Mutex
-	keys    map[string]*rsa.PublicKey
+	issuerURL string
+	jwksURL   string
+	mu        sync.Mutex
+	keys      map[string]*rsa.PublicKey
 }
 
 func NewJWKSProvider(issuerURL string) *JWKSProvider {
-	return &JWKSProvider{
-		jwksURL: issuerURL + "/protocol/openid-connect/certs",
+	return &JWKSProvider{issuerURL: strings.TrimRight(issuerURL, "/")}
+}
+
+// resolveJWKSURL reads jwks_uri from the issuer's discovery document, falling
+// back to Keycloak's well-known path when the issuer cannot be reached or does
+// not advertise one. Resolved once and remembered.
+func (p *JWKSProvider) resolveJWKSURL() string {
+	if p.jwksURL != "" {
+		return p.jwksURL
 	}
+	p.jwksURL = p.issuerURL + "/protocol/openid-connect/certs"
+
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+	}
+	resp, err := client.Get(p.issuerURL + "/.well-known/openid-configuration")
+	if err != nil {
+		return p.jwksURL
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return p.jwksURL
+	}
+	var doc struct {
+		JWKSURI string `json:"jwks_uri"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil || doc.JWKSURI == "" {
+		return p.jwksURL
+	}
+	p.jwksURL = doc.JWKSURI
+	return p.jwksURL
 }
 
 type jwksResponse struct {
@@ -114,7 +148,7 @@ func (p *JWKSProvider) fetchKeys() error {
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
-	resp, err := client.Get(p.jwksURL)
+	resp, err := client.Get(p.resolveJWKSURL())
 	if err != nil {
 		return fmt.Errorf("fetching JWKS: %w", err)
 	}
@@ -242,16 +276,25 @@ func isAdmin(claims jwtv5.MapClaims) bool {
 }
 
 func hasGroup(claims jwtv5.MapClaims, group string) bool {
-	rawGroups, ok := claims["group_membership"].([]interface{})
-	if !ok {
-		return false
-	}
-	for _, g := range rawGroups {
-		if s, ok := g.(string); ok && s == group {
+	for _, g := range claimGroups(claims) {
+		if g == group {
 			return true
 		}
 	}
 	return false
+}
+
+// rawGroupClaim returns the group list from the token, under whichever name
+// the thing that issued it uses: Keycloak emits group_membership, the broker
+// that fronts sign-in once a server adds its own identity provider emits
+// groups. Keycloak's name wins when a token carries both.
+func rawGroupClaim(claims jwtv5.MapClaims) []interface{} {
+	for _, name := range []string{"group_membership", "groups"} {
+		if raw, ok := claims[name].([]interface{}); ok && len(raw) > 0 {
+			return raw
+		}
+	}
+	return nil
 }
 
 func getUsername(r *http.Request) string {
@@ -278,15 +321,14 @@ func claimString(claims jwtv5.MapClaims, key string) string {
 	return s
 }
 
-// claimGroups returns the org-scoped group paths from the verified
-// group_membership claim (e.g. ["/Example Org", "/Example Org/admin"]).
+// claimGroups returns the org-scoped group paths from the verified group
+// claim (e.g. ["/Example Org", "/Example Org/admin"]).
 func claimGroups(claims jwtv5.MapClaims) []string {
 	groups := []string{}
 	if claims == nil {
 		return groups
 	}
-	raw, _ := claims["group_membership"].([]interface{})
-	for _, g := range raw {
+	for _, g := range rawGroupClaim(claims) {
 		if s, ok := g.(string); ok {
 			groups = append(groups, s)
 		}

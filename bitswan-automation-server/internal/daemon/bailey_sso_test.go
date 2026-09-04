@@ -746,3 +746,59 @@ func TestDisableSSO_SurfacesAFailedReconcile(t *testing.T) {
 		t.Fatal("a reconcile that failed must not be reported as a successful recovery")
 	}
 }
+
+func TestBrokeredWorkerIssuer(t *testing.T) {
+	ssoTestStore(t)
+	writeTestConfig(t)
+
+	if got := brokeredWorkerIssuer(); got != "" {
+		t.Errorf("no provider configured must leave the AOC's own realm alone, got %q", got)
+	}
+
+	if err := setSSOConfig(ssoConfig{
+		Enabled: true, DisplayName: "Acme SSO",
+		IssuerURL: "https://id.acme.example", ClientID: "bailey", ClientSecret: "s3cret",
+	}, "ada@example.com"); err != nil {
+		t.Fatalf("setSSOConfig: %v", err)
+	}
+
+	want := dexIssuerURL(protectedHostnameDomain())
+	if got := brokeredWorkerIssuer(); got != want {
+		t.Errorf("brokeredWorkerIssuer = %q, want %q — deployed apps verify Bearer tokens "+
+			"against this, and behind a broker the broker is what signed them", got, want)
+	}
+}
+
+func TestBuildDexConfig_LetsGroupsThroughOnEveryConnector(t *testing.T) {
+	aocClient := &aoc.OAuthClientResponse{
+		ClientID: "bitswan-protected", ClientSecret: "kc-secret",
+		IssuerURL: "https://keycloak.example/realms/master",
+	}
+	sso := ssoConfig{
+		DisplayName: "Acme SSO", IssuerURL: "https://id.acme.example",
+		ClientID: "bailey", ClientSecret: "s3cret",
+	}
+
+	raw, err := buildDexConfig("acme.bswn.io", aocClient, sso, "proxy-secret")
+	if err != nil {
+		t.Fatalf("buildDexConfig: %v", err)
+	}
+
+	var cfg struct {
+		Connectors []struct {
+			ID     string `yaml:"id"`
+			Config struct {
+				InsecureEnableGroups bool `yaml:"insecureEnableGroups"`
+			} `yaml:"config"`
+		} `yaml:"connectors"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("rendered config is not valid YAML: %v", err)
+	}
+	for _, c := range cfg.Connectors {
+		if !c.Config.InsecureEnableGroups {
+			t.Errorf("connector %s drops group claims — Dex omits groups unless this is set, and "+
+				"everything downstream that authorizes on group membership then sees none", c.ID)
+		}
+	}
+}

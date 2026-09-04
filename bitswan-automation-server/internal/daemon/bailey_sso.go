@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
 )
 
 const settingSSOConfig = "external_oidc_config"
@@ -342,4 +344,19 @@ func (s *Server) handleSSOStatus(w http.ResponseWriter, r *http.Request) {
 		"updated_at":   c.UpdatedAt,
 		"updated_by":   c.UpdatedBy,
 	})
+}
+
+func brokeredWorkerIssuer() string {
+	if !ssoActive() {
+		return ""
+	}
+	domain := protectedHostnameDomain()
+	if domain == "" {
+		return ""
+	}
+	return dexIssuerURL(domain)
+}
+
+func init() {
+	aoc.WorkerIssuerOverride = brokeredWorkerIssuer
 }

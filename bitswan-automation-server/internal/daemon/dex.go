@@ -50,13 +50,14 @@ func buildDexConfig(domain string, aocClient *aoc.OAuthClientResponse, sso ssoCo
 			"id":   dexConnectorAOC,
 			"name": "Bitswan account",
 			"config": map[string]any{
-				"issuer":       aocClient.IssuerURL,
-				"clientID":     aocClient.ClientID,
-				"clientSecret": aocClient.ClientSecret,
-				"redirectURI":  callback,
-				"scopes":       dexUpstreamScopes,
-				"userNameKey":  "email",
-				"claimMapping": map[string]any{"groups": "group_membership"},
+				"issuer":               aocClient.IssuerURL,
+				"clientID":             aocClient.ClientID,
+				"clientSecret":         aocClient.ClientSecret,
+				"redirectURI":          callback,
+				"scopes":               dexUpstreamScopes,
+				"userNameKey":          "email",
+				"insecureEnableGroups": true,
+				"claimMapping":         map[string]any{"groups": "group_membership"},
 			},
 		})
 	}
