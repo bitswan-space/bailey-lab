@@ -1047,6 +1047,27 @@ export interface CreateAutomationResponse {
   created: { name: string; relativePath: string }[];
 }
 
+/** One match from a search over the audited source. */
+export interface AuditSearchMatch {
+  path: string;
+  line: number;
+  text: string;
+}
+
+/** `GET /api/audits/{bp}/env` — the audit environment for the frozen image. */
+export interface AuditEnv {
+  ready: boolean;
+  // eslint-disable-next-line no-restricted-syntax -- null when staging is not frozen
+  sha: string | null;
+  reason?: string;
+  audited_commit?: string;
+  production_commit?: string;
+  report_bytes?: number;
+  frozen_by?: string;
+  frozen_at?: string;
+  agent?: { running?: boolean; name?: string; reason?: string };
+}
+
 export const api = {
   /**
    * Identify the logged-in user and ensure their personal copy exists
@@ -1406,6 +1427,44 @@ export const api = {
     return content;
   },
 
+  /**
+   * The audit environment a frozen staging stage gets: the audited source, the
+   * diff promoting it would apply to production, and the report. Reading is
+   * open to anyone who can open the tab; writing the report and running the
+   * agent are admin/auditor, refused by the server rather than hidden here.
+   */
+  audits: {
+    env: (bp: string) =>
+      getJson<AuditEnv>(`/api/audits/${encodeURIComponent(bp)}/env`),
+    files: (bp: string) =>
+      getJson<{ entries: FileTreeNode[] }>(`/api/audits/${encodeURIComponent(bp)}/files`),
+    fileContent: (bp: string, p: string) =>
+      getJson<{ path: string; content: string; truncated: boolean }>(
+        `/api/audits/${encodeURIComponent(bp)}/file-content?path=${encodeURIComponent(p)}`,
+      ),
+    search: (bp: string, q: string) =>
+      getJson<{ matches: AuditSearchMatch[]; truncated: boolean }>(
+        `/api/audits/${encodeURIComponent(bp)}/search?q=${encodeURIComponent(q)}`,
+      ),
+    diff: (bp: string) =>
+      getJson<{ diff: string; exists: boolean }>(`/api/audits/${encodeURIComponent(bp)}/diff`),
+    report: (bp: string) =>
+      getJson<{ content: string; exists: boolean }>(
+        `/api/audits/${encodeURIComponent(bp)}/report`,
+      ),
+    saveReport: (bp: string, content: string) =>
+      putJson<{ ok: boolean; bytes: number }>(
+        `/api/audits/${encodeURIComponent(bp)}/report`,
+        { content },
+      ),
+    draft: (bp: string, prompt?: string) =>
+      postJson<{ drafted: boolean; name: string }>(
+        `/api/audits/${encodeURIComponent(bp)}/draft`,
+        { prompt: prompt ?? '' },
+      ),
+    /** The audit chat page, loaded in a frame the way the Coding Agent tab loads its own. */
+    chatViewUrl: (bp: string) => `/api/audits/${encodeURIComponent(bp)}/chat/view`,
+  },
   copyFiles: {
     tree: (name: string) =>
       getJson<FileTreeNode[]>(`/api/copies/${encodeURIComponent(name)}/files`),

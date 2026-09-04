@@ -57,6 +57,7 @@ import {
   useDeployDone,
   type ActiveDeploy,
 } from '@/components/workspace/WorkspaceProvider';
+import { AuditEnvironment } from '@/components/audits/AuditEnvironment';
 import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
@@ -790,6 +791,18 @@ function AuditsPanel({
         )}
       </div>
       </>
+      ) : null}
+
+      {/* The environment the audit happens in: the agent, the audited source,
+          the diff production would receive, and the report. Only while frozen —
+          there is no pinned version to audit otherwise. */}
+      {gate.frozen ? (
+        <div>
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+            Audit environment
+          </div>
+          <AuditEnvironment bp={bp} canAudit={canAudit} />
+        </div>
       ) : null}
 
       {/* Audit sign-offs on the staging image (from the content-hash-keyed
