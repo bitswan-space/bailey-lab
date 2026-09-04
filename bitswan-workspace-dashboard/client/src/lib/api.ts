@@ -1470,6 +1470,9 @@ export const api = {
       ),
     /** The audit chat page, loaded in a frame the way the Coding Agent tab loads its own. */
     chatViewUrl: (bp: string) => `/api/audits/${encodeURIComponent(bp)}/chat/view`,
+    /** Whether this deployment can host an agent chat at all (it needs the
+     *  unpacked extension), so a dead tab is never offered. */
+    chatAvailable: () => getJson<{ available: boolean }>('/api/coding-agent/sidebar/status'),
   },
   copyFiles: {
     tree: (name: string) =>

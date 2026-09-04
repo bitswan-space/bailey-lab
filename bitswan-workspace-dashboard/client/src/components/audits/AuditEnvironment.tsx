@@ -72,9 +72,28 @@ function PanelTab({
  * the workspace has moved on to since.
  */
 export function AuditEnvironment({ bp, canAudit }: { bp: string; canAudit: boolean }) {
-  const [panel, setPanel] = useState<Panel>(canAudit ? 'chat' : 'report');
+  // A deployment without the unpacked extension cannot host a chat at all, so
+  // the tab is not offered rather than offered and broken.
+  const [chatAvailable, setChatAvailable] = useState(false);
+  const [panel, setPanel] = useState<Panel>('report');
   const [env, setEnv] = useState<AuditEnv | null>(null);
   const [envError, setEnvError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    api.audits
+      .chatAvailable()
+      .then((r) => {
+        if (!alive) return;
+        setChatAvailable(r.available);
+        if (r.available && canAudit) setPanel('chat');
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the landing panel is chosen once
+  }, [bp]);
 
   useEffect(() => {
     let alive = true;
@@ -115,7 +134,7 @@ export function AuditEnvironment({ bp, canAudit }: { bp: string; canAudit: boole
     <div className="flex min-h-[28rem] flex-col rounded-lg border border-border">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border px-2">
         <div className="flex items-center">
-          {PANELS.filter((p) => p.id !== 'chat' || canAudit).map((p) => (
+          {PANELS.filter((p) => p.id !== 'chat' || (canAudit && chatAvailable)).map((p) => (
             <PanelTab
               key={p.id}
               panel={p}
