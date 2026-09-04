@@ -76,10 +76,7 @@ type LaunchState =
 export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: AgentFilesTabProps) {
   const {
     sessionFor,
-    startSession,
-    resumeSession,
     setCurrentScope,
-    setPaneEl,
     onExit,
   } = useSessions();
   const { session: latest, loading: pastLoading } = useLatestAgentSession(copy, bp);
@@ -103,34 +100,10 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   // it can portal the terminal over it. Cleanup unbinds so terminals stay
   // alive (just hidden) when the user navigates away.
   const paneRef = useRef<HTMLElement | null>(null);
-  // The dashboard hosts the Claude Code sidebar itself when the extension is
-  // present (CLAUDE_EXTENSION_PATH); otherwise the chat pane keeps the xterm
-  // terminal it has always had.
-  const [sidebarAvailable, setSidebarAvailable] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    void fetch('/api/coding-agent/sidebar/status', { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : { available: false }))
-      .then((j: { available?: boolean }) => {
-        if (alive) setSidebarAvailable(Boolean(j.available));
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, []);
   useEffect(() => {
     setCurrentScope({ copy, bp });
     return () => setCurrentScope(null);
   }, [copy, bp, setCurrentScope]);
-  useEffect(() => {
-    if (sidebarAvailable) {
-      setPaneEl(null);
-      return undefined;
-    }
-    setPaneEl(paneRef.current);
-    return () => setPaneEl(null);
-  }, [setPaneEl, sidebarAvailable]);
 
   // The BP's live agent — one session per (user, copy, BP), tracked by the
   // provider.
@@ -186,33 +159,6 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   // if it has exited (and the server falls back to a fresh conversation on
   // the same UUID when the transcript is gone — see buildAutoCmd). With no
   // prior session at all, start a fresh one.
-  // eslint-disable-next-line no-restricted-syntax -- null = nothing launched yet
-  const launchedToken = useRef<string | null>(null);
-  useEffect(() => {
-    if (!tabVisible || !docVisible || pastLoading) return;
-    if (agent) return; // already attached — nothing to do
-    if (launchFailed) return; // out of attempts; waiting on the user's Retry
-    const token = `${copy}/${bp}#${launchGen}`;
-    if (launchedToken.current === token) return;
-    launchedToken.current = token;
-    if (latest?.claudeSessionId) {
-      resumeSession(copy, bp, latest.claudeSessionId);
-    } else {
-      startSession(copy, bp);
-    }
-  }, [
-    tabVisible,
-    docVisible,
-    pastLoading,
-    agent,
-    launchFailed,
-    launchGen,
-    latest,
-    copy,
-    bp,
-    resumeSession,
-    startSession,
-  ]);
 
   // Restart loop guard. Every session end in this scope lands here; how it's
   // handled depends on why it ended.
@@ -323,7 +269,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
           sub !== 'chat' && 'hidden',
         )}
       >
-        {sidebarAvailable && <AgentSidebar copy={copy} bp={bp} />}
+        <AgentSidebar copy={copy} bp={bp} />
         {/* Transitional state only. The agent is started automatically, so
             the user sees a spinner while that is in flight — and an error
             with a Retry if it keeps failing, which is a bug worth showing
