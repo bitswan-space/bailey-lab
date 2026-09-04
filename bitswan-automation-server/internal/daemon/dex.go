@@ -26,6 +26,8 @@ const (
 	dexGID           = 1001
 )
 
+var dexUpstreamScopes = []string{"openid", "profile", "email", "offline_access"}
+
 func dexHost(domain string) string {
 	return "auth." + strings.TrimPrefix(domain, ".")
 }
@@ -52,20 +54,19 @@ func buildDexConfig(domain string, aocClient *aoc.OAuthClientResponse, sso ssoCo
 				"clientID":     aocClient.ClientID,
 				"clientSecret": aocClient.ClientSecret,
 				"redirectURI":  callback,
-				"scopes":       []string{"openid", "profile", "email"},
+				"scopes":       dexUpstreamScopes,
 				"userNameKey":  "email",
 				"claimMapping": map[string]any{"groups": "group_membership"},
 			},
 		})
 	}
 
-	ssoScopes := []string{"openid", "profile", "email"}
 	ssoCfg := map[string]any{
 		"issuer":               sso.IssuerURL,
 		"clientID":             sso.ClientID,
 		"clientSecret":         sso.ClientSecret,
 		"redirectURI":          callback,
-		"scopes":               ssoScopes,
+		"scopes":               dexUpstreamScopes,
 		"userNameKey":          "email",
 		"insecureEnableGroups": true,
 	}

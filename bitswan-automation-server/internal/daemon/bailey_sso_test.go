@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -525,5 +526,49 @@ func TestHandleSSOSet_RefusesToBuildOnACorruptStoredConfig(t *testing.T) {
 	handleSSOSet(w, httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(`{"enabled":false}`)), "ada@example.com")
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500 rather than silently overwriting an unreadable config", w.Code)
+	}
+}
+
+func dexConnectorScopes(t *testing.T, raw string) map[string][]string {
+	t.Helper()
+	var cfg struct {
+		Connectors []struct {
+			ID     string `yaml:"id"`
+			Config struct {
+				Scopes []string `yaml:"scopes"`
+			} `yaml:"config"`
+		} `yaml:"connectors"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("rendered config is not valid YAML: %v", err)
+	}
+	out := map[string][]string{}
+	for _, c := range cfg.Connectors {
+		out[c.ID] = c.Config.Scopes
+	}
+	return out
+}
+
+func TestBuildDexConfig_AsksEveryUpstreamForARefreshableSession(t *testing.T) {
+	aocClient := &aoc.OAuthClientResponse{
+		ClientID: "bitswan-protected", ClientSecret: "kc-secret",
+		IssuerURL: "https://keycloak.example/realms/master",
+	}
+	sso := ssoConfig{
+		DisplayName: "Acme SSO", IssuerURL: "https://id.acme.example",
+		ClientID: "bailey", ClientSecret: "s3cret",
+	}
+
+	raw, err := buildDexConfig("acme.bswn.io", aocClient, sso, "proxy-secret")
+	if err != nil {
+		t.Fatalf("buildDexConfig: %v", err)
+	}
+
+	for _, id := range []string{dexConnectorAOC, dexConnectorSSO} {
+		scopes := dexConnectorScopes(t, raw)[id]
+		if !slices.Contains(scopes, "offline_access") {
+			t.Errorf("connector %s scopes = %v, want offline_access — without it the upstream "+
+				"refresh token dies with the sign-in session and every brokered session breaks", id, scopes)
+		}
 	}
 }
