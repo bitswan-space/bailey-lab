@@ -127,6 +127,18 @@ export function registerVscodeSidebarRoutes(
         } catch {
           return;
         }
+        if (process.env.SIDEBAR_TRACE === '1') {
+          const text = String(raw);
+          const m = parsed as { type?: string; request?: { type?: string } };
+          app.log.info(
+            {
+              kind: m?.request?.type ?? m?.type ?? '?',
+              bytes: text.length,
+              imageish: /image|attachment|base64|data:/i.test(text.slice(0, 4000)),
+            },
+            'sidebar<-webview',
+          );
+        }
         instance.view.sendFromWebview(parsed);
       });
       socket.on('close', () => off.dispose());
