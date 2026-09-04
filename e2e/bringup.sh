@@ -57,6 +57,8 @@ EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway-dev:latest"
 # (/tmp/bitswan-e2e-vm/base-images.tar) or the VM may 429 pulling it.
 OTEL_COLLECTOR_IMAGE="otel/opentelemetry-collector:0.115.1"
 OTEL_CTR="bitswan-e2e-otel"
+AOC_STUB_IMAGE="python:3.12-alpine"
+AOC_STUB_CTR="bitswan-e2e-aoc"
 
 echo "=== [1/7] Build the Server Console SPA + the bitswan CLI + component images ==="
 # The daemon embeds the Server Console SPA via go:embed from
@@ -128,7 +130,7 @@ mark "[1b/7] read-through build package proxies (Athens + Verdaccio)"
 # features the manual documents) instead of Docker Hub 'latest'. sudo strips the
 # environment, so set it explicitly on the command via `env`.
 sudo env \
-  BITSWAN_EXTRA_HOSTS="${KC_HOST}:host-gateway" \
+  BITSWAN_EXTRA_HOSTS="${KC_HOST}:host-gateway,auth.${DOMAIN}:host-gateway" \
   BITSWAN_GITOPS_IMAGE="$GITOPS_IMAGE" \
   BITSWAN_DASHBOARD_IMAGE="$DASHBOARD_IMAGE" \
   BITSWAN_CODING_AGENT_IMAGE="$CODING_AGENT_IMAGE" \
@@ -243,38 +245,108 @@ for i in $(seq 1 15); do if [ -n "$(docker ps -q -f name="^${OTEL_CTR}$")" ]; th
 [ -n "$(docker ps -q -f name="^${OTEL_CTR}$")" ] || { echo "ERROR: otel-collector not running"; docker logs --tail 50 "$OTEL_CTR"; exit 1; }
 
 mark "[3b/7] otel-collector (SIEM target)"
+echo "=== [3c/7] AOC stub (the one call the protected proxy cannot do without) ==="
+# There is no Automation Operations Centre in this stack, and almost nothing
+# here wants one. The exception is the shared protected proxy: the daemon asks
+# the AOC for the bitswan-protected OAuth client every time it provisions the
+# proxy, which is also how the Single sign-on settings re-point sign-in at the
+# broker. With nothing answering, the daemon can never provision the proxy, so
+# the login topology cannot be exercised at all. This answers that one call with
+# the `bailey` client already seeded in the realm, and 404s everything else —
+# the same "no AOC" every other chapter has always run against. See
+# e2e/aoc-stub/README.md.
+docker rm -f "$AOC_STUB_CTR" >/dev/null 2>&1 || true
+docker pull "$AOC_STUB_IMAGE" >/dev/null 2>&1 || true
+docker run -d --name "$AOC_STUB_CTR" --network bitswan_network \
+  -v "$REPO_ROOT/e2e/aoc-stub/server.py:/srv/server.py:ro" \
+  -e STUB_CLIENT_ID=bailey \
+  -e STUB_CLIENT_SECRET=bailey-e2e-secret \
+  -e STUB_ISSUER_URL="http://${KC_HOST}:${KC_PORT}/realms/bitswan" \
+  "$AOC_STUB_IMAGE" python3 /srv/server.py
+for i in $(seq 1 15); do if [ -n "$(docker ps -q -f name="^${AOC_STUB_CTR}$")" ]; then break; fi; sleep 2; done
+[ -n "$(docker ps -q -f name="^${AOC_STUB_CTR}$")" ] || { echo "ERROR: AOC stub not running"; docker logs --tail 50 "$AOC_STUB_CTR"; exit 1; }
+
+# Point the daemon at it. NewAOCClient refuses to build without an access token,
+# so the token has to be present even though the stub never checks it.
+docker exec "$DAEMON_CTR" sh -c \
+  'CFG=/root/.config/bitswan/automation_server_config.toml; touch "$CFG"; \
+   grep -q "^\[aoc\]" "$CFG" || printf "\n[aoc]\naoc_url = \"http://bitswan-e2e-aoc:8080\"\nautomation_server_id = \"bs-e2e\"\naccess_token = \"e2e-aoc-stub-token\"\n" >> "$CFG"'
+
+mark "[3c/7] AOC stub"
 echo "=== [4/7] bitswan-protected-proxy (oauth2-proxy) in front of the gate ==="
 # This is the production chain's first hop. It runs the OIDC handshake against
 # Keycloak and forwards the verified identity to the :9080 gate as
 # X-Forwarded-Email / X-Forwarded-Groups. cookie domain .${DOMAIN} so the session
 # is shared across bailey. / bailey--inner. / bailey-onboard.
+#
+# Brought up as a compose project — the SAME project and service name the daemon
+# uses (provisionProtectedProxy) — rather than a bare `docker run`. A container
+# compose does not own cannot be recreated by it: `docker compose up -d` tries
+# to CREATE and dies on "the container name is already in use", so the daemon
+# could never re-point the proxy and the Single sign-on topology switch had no
+# way to work here.
+PROXY_DIR="$(mktemp -d)"
+cat > "$PROXY_DIR/docker-compose.yml" <<YAML
+services:
+  bitswan-protected-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+    container_name: bitswan-protected-proxy
+    restart: always
+    networks: [bitswan_network]
+    extra_hosts:
+      - "${KC_HOST}:host-gateway"
+    environment:
+      - OAUTH2_PROXY_PROVIDER=oidc
+      - OAUTH2_PROXY_OIDC_ISSUER_URL=http://${KC_HOST}:${KC_PORT}/realms/bitswan
+      - OAUTH2_PROXY_CLIENT_ID=bailey
+      - OAUTH2_PROXY_CLIENT_SECRET=bailey-e2e-secret
+      - OAUTH2_PROXY_COOKIE_SECRET=0123456789abcdef0123456789abcdef
+      - OAUTH2_PROXY_EMAIL_DOMAINS=*
+      - OAUTH2_PROXY_SCOPE=openid email profile
+      - OAUTH2_PROXY_UPSTREAMS=http://${DAEMON_CTR}:9080
+      - OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:80
+      - OAUTH2_PROXY_REVERSE_PROXY=true
+      - OAUTH2_PROXY_PASS_HOST_HEADER=true
+      - OAUTH2_PROXY_PASS_USER_HEADERS=true
+      - OAUTH2_PROXY_SET_XAUTHREQUEST=true
+      - OAUTH2_PROXY_PASS_ACCESS_TOKEN=true
+      - OAUTH2_PROXY_SKIP_PROVIDER_BUTTON=true
+      - OAUTH2_PROXY_REDIRECT_URL=${BAILEY_URL}/oauth2/callback
+      - OAUTH2_PROXY_COOKIE_DOMAINS=.${DOMAIN}
+      - OAUTH2_PROXY_WHITELIST_DOMAINS=.${DOMAIN},${KC_HOST}:${KC_PORT}
+      - OAUTH2_PROXY_COOKIE_SECURE=true
+      - OAUTH2_PROXY_COOKIE_SAMESITE=none
+      - OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST=true
+      - OAUTH2_PROXY_COOKIE_CSRF_EXPIRE=1h
+      - OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL=true
+networks:
+  bitswan_network:
+    external: true
+YAML
 docker rm -f bitswan-protected-proxy >/dev/null 2>&1 || true
-docker run -d --name bitswan-protected-proxy --network bitswan_network \
-  --add-host "${KC_HOST}:host-gateway" \
-  -e OAUTH2_PROXY_PROVIDER=oidc \
-  -e OAUTH2_PROXY_OIDC_ISSUER_URL="http://${KC_HOST}:${KC_PORT}/realms/bitswan" \
-  -e OAUTH2_PROXY_CLIENT_ID=bailey \
-  -e OAUTH2_PROXY_CLIENT_SECRET=bailey-e2e-secret \
-  -e OAUTH2_PROXY_COOKIE_SECRET=0123456789abcdef0123456789abcdef \
-  -e OAUTH2_PROXY_EMAIL_DOMAINS='*' \
-  -e OAUTH2_PROXY_SCOPE="openid email profile" \
-  -e OAUTH2_PROXY_UPSTREAMS="http://${DAEMON_CTR}:9080" \
-  -e OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:80 \
-  -e OAUTH2_PROXY_REVERSE_PROXY=true \
-  -e OAUTH2_PROXY_PASS_HOST_HEADER=true \
-  -e OAUTH2_PROXY_PASS_USER_HEADERS=true \
-  -e OAUTH2_PROXY_SET_XAUTHREQUEST=true \
-  -e OAUTH2_PROXY_PASS_ACCESS_TOKEN=true \
-  -e OAUTH2_PROXY_SKIP_PROVIDER_BUTTON=true \
-  -e OAUTH2_PROXY_REDIRECT_URL="${BAILEY_URL}/oauth2/callback" \
-  -e OAUTH2_PROXY_COOKIE_DOMAINS=".${DOMAIN}" \
-  -e OAUTH2_PROXY_WHITELIST_DOMAINS=".${DOMAIN},${KC_HOST}:${KC_PORT}" \
-  -e OAUTH2_PROXY_COOKIE_SECURE=true \
-  -e OAUTH2_PROXY_COOKIE_SAMESITE=none \
-  -e OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST=true \
-  -e OAUTH2_PROXY_COOKIE_CSRF_EXPIRE=1h \
-  -e OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL=true \
-  quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+docker compose -p bitswan-protected-proxy -f "$PROXY_DIR/docker-compose.yml" up -d
+
+# When the daemon re-provisions the proxy (the Single sign-on chapter switches
+# the login topology), it writes its OWN compose file into its config volume and
+# runs `up -d` there — which also picks up a docker-compose.override.yml sitting
+# next to it. That is where the two things only this stack needs live, so they
+# survive every re-provision without the shipped compose carrying test-only
+# settings:
+#
+#   - ssl_insecure_skip_verify, because the broker is served over TLS from the
+#     mkcert CA generated inside the daemon's own volume, which no sibling
+#     container trusts. Playwright runs with ignoreHTTPSErrors for the same
+#     reason. A real deployment's broker has a publicly trusted certificate.
+#   - the cookie/unverified-email settings this stack has always run with, so a
+#     re-provisioned proxy behaves like the one bringup started.
+docker exec -i "$DAEMON_CTR" sh -c 'mkdir -p /root/.config/bitswan/protected-proxy && cat > /root/.config/bitswan/protected-proxy/docker-compose.override.yml' <<'YAML'
+services:
+  bitswan-protected-proxy:
+    environment:
+      - OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY=true
+      - OAUTH2_PROXY_COOKIE_SAMESITE=none
+      - OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL=true
+YAML
 # SIGPIPE-safe readiness poll (see the traefik/otel checks above).
 for i in $(seq 1 15); do if [ -n "$(docker ps -q -f name='^bitswan-protected-proxy$')" ]; then break; fi; sleep 2; done
 [ -n "$(docker ps -q -f name='^bitswan-protected-proxy$')" ] || { echo "ERROR: protected proxy not running"; docker logs --tail 50 bitswan-protected-proxy; exit 1; }
