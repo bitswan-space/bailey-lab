@@ -216,19 +216,6 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
           conversation per (user, copy, BP), so there is nothing to tell
           apart; the dot alone carries running / failed / starting. */}
       <div className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-background px-5">
-        <div className="flex items-center border-r border-border pr-4">
-          <span
-            title={agent ? 'Agent running' : launchFailed ? 'Agent unavailable' : 'Starting agent…'}
-            className={cn(
-              'size-1.5 rounded-full',
-              agent
-                ? 'bg-emerald-600'
-                : launchFailed
-                  ? 'bg-destructive'
-                  : 'bg-muted-foreground/40',
-            )}
-          />
-        </div>
         <SubTab
           active={sub === 'chat'}
           onClick={() => setSub('chat')}
@@ -270,33 +257,6 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
         )}
       >
         <AgentSidebar copy={copy} bp={bp} />
-        {/* Transitional state only. The agent is started automatically, so
-            the user sees a spinner while that is in flight — and an error
-            with a Retry if it keeps failing, which is a bug worth showing
-            rather than an empty pane. */}
-        {!agent && (
-          <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-            {launchFailed ? (
-              <>
-                <AlertTriangle className="size-5 text-amber-600" aria-hidden />
-                <span className="max-w-md text-center text-destructive">
-                  {launchState === 'refused'
-                    ? 'The coding agent for this business process could not be reached.'
-                    : `The coding agent for this business process exited immediately on ${
-                        RELAUNCH_BACKOFF_MS.length + 1
-                      } attempts.`}
-                </span>
-                <Button onClick={retry} size="sm" variant="outline">
-                  <RotateCcw className="size-3.5" aria-hidden /> Retry
-                </Button>
-              </>
-            ) : (
-              <span className="flex items-center gap-2">
-                <Loader2 className="size-3.5 animate-spin" aria-hidden /> Starting agent…
-              </span>
-            )}
-          </div>
-        )}
       </main>
 
       {/* Files pane — mounted alongside so toggling back to Chat doesn't

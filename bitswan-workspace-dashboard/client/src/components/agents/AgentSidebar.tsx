@@ -14,16 +14,22 @@ const HOST_KEY = '__bitswanHost';
  * The Claude Code VS Code sidebar, hosted by the dashboard's own partial
  * `vscode` API (server/src/vscode-host).
  *
- * The webview is extension-authored HTML running with scripts enabled, so it is
- * confined to a sandboxed frame WITHOUT `allow-same-origin`: it gets an opaque
- * origin and cannot reach the dashboard's DOM, cookies or storage.
+ * The frame carries `allow-same-origin`. An opaque-origin sandbox was the first
+ * choice and it does not work: the webview reads `localStorage` (which throws
+ * outright without the flag) and fetches extension resources at runtime, and
+ * from an opaque origin those requests carry no SameSite cookies so the Bailey
+ * gate answers 302. Both are load-bearing for the panel.
  *
- * That opaque origin is also why THIS component owns the websocket rather than
- * the frame: a socket opened inside the frame sends `Origin: null` and no
- * SameSite cookies, so the Bailey gate refuses the upgrade. So the page holds
- * the socket and relays both directions over `postMessage`, which is the same
- * shape VS Code uses — a webview never talks to the extension host directly.
- * `targetOrigin` has to be `*`, because an opaque origin matches nothing else.
+ * The honest consequence: because this document is served from the dashboard's
+ * own origin, `allow-same-origin` leaves the extension's bundle same-origin with
+ * the dashboard. The isolation VS Code gets comes from serving webviews on a
+ * SEPARATE origin, which needs its own routed hostname here — see
+ * docs/spike-vscode-shim.md. Until that exists this is a spike, not a shipping
+ * posture.
+ *
+ * This component still owns the websocket and relays over `postMessage`, which
+ * is the shape VS Code uses anyway — a webview never talks to the extension
+ * host directly.
  */
 export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
@@ -83,7 +89,7 @@ export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
         key={src}
         title="Claude Code"
         src={src}
-        sandbox="allow-scripts allow-forms allow-popups"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
         className="h-full w-full border-0 bg-white"
       />
       {!ready && (
