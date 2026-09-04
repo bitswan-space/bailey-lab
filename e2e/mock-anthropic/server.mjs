@@ -153,7 +153,11 @@ export async function startMockAnthropic(port = 0) {
           },
         });
         sse(res, 'content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-        for (const piece of reply.match(/.{1,24}/g) ?? [reply]) {
+        // [\s\S], not `.`: a dot does not match a newline, so chunking with it
+        // silently drops every line break out of the stream — which turned a
+        // markdown answer into one run-on paragraph by the time the CLI had
+        // reassembled it.
+        for (const piece of reply.match(/[\s\S]{1,24}/g) ?? [reply]) {
           sse(res, 'content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: piece } });
         }
         sse(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });

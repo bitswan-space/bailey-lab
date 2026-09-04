@@ -2643,14 +2643,20 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // The mock Claude endpoint answers, so the agent always writes something —
     // an empty report here means the audit agent never ran.
     // Length, not a \S run: the agent writes prose, which has spaces in it.
+    // Lines, too — a report that arrives as one run-on paragraph means the
+    // stream lost its newlines, which is a real defect and not a report.
+    const reportText = async () =>
+      ((await d.locator('textarea').first().inputValue().catch(() => '')) ?? '').trim();
     await expect
-      .poll(
-        async () =>
-          ((await d.locator('textarea').first().inputValue().catch(() => '')) ?? '').trim()
-            .length,
-        { timeout: 4 * 60_000, intervals: [2000, 3000, 5000] },
-      )
+      .poll(async () => (await reportText()).length, {
+        timeout: 4 * 60_000,
+        intervals: [2000, 3000, 5000],
+      })
       .toBeGreaterThan(40);
+    expect(
+      (await reportText()).split('\n').length,
+      'the drafted report should be markdown with lines, not one paragraph',
+    ).toBeGreaterThan(3);
     await capture(dashPage, 'audit-report');
 
     const noteBox = d.getByPlaceholder(/Audit note/i).first();
