@@ -96,6 +96,28 @@ PROBE_WORKSPACE=<a BP dir> \
 node --import tsx src/vscode-host/probe.ts
 ```
 
+### The two loops
+
+Local, no gate — the shim host plus a mock Anthropic API, started by the config
+itself:
+
+```
+cd e2e && npx playwright test -c playwright.vscode-host.config.ts
+```
+
+Against the real deployment, through the real gate. `tests/spike/gated.ts` signs
+in with OIDC and then approves *this browser's own* pairing code with the
+operator CLI, which is what makes the loop runnable without a human:
+
+```
+cd e2e && GATED_PASSWORD=… npx playwright test -c playwright.gated.config.ts
+```
+
+That runs every `gated-*.spec.ts`: the panel renders and the terminal is gone,
+a pasted and a dropped image reach the agent, an oversized file downloads, and
+the description saves without a failure toast. The default config ignores
+`spike/**`, so none of this runs in CI.
+
 ## The sidebar actually renders, and is tested
 
 `e2e/tests/vscode-host.spec.ts` + `e2e/playwright.vscode-host.config.ts` drive the
