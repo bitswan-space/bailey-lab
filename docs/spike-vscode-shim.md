@@ -34,15 +34,19 @@ render it the dashboard needs to serve that HTML, serve two files
 ways. `asWebviewUri` rewriting already works — the refs above came back on the
 dashboard's own base URL.
 
-## Why this is cheap
+## Size and memory
 
 The extension unpacks to 216 MB, but **215 MB of that is one file**:
 `resources/native-binary/claude`. The actual code is ~9 MB
-(`extension.js` 3.2 MB + `webview/index.js` 5.1 MB). The container already has a
-`claude` CLI, so whether we ship the bundled binary at all is a separate,
-testable question — and the answer decides almost the entire disk cost.
+(`extension.js` 3.2 MB + `webview/index.js` 5.1 MB).
 
-Memory is one Node process plus that JS, against a code-server instance per user.
+Removing that binary does **not** work — see bug 3 below; the extension resolves
+its own copy by platform and the UI errors out without it. So disk cost is ~216 MB
+per extension version until someone establishes whether it can be pointed at the
+CLI already in the container.
+
+Memory is one Node process plus ~9 MB of JS, against a code-server instance
+per user.
 
 ## The measured API surface
 
@@ -91,6 +95,54 @@ CLAUDE_EXTENSION_PATH=<unpacked extension/> \
 PROBE_WORKSPACE=<a BP dir> \
 node --import tsx src/vscode-host/probe.ts
 ```
+
+## The sidebar actually renders, and is tested
+
+`e2e/tests/vscode-host.spec.ts` + `e2e/playwright.vscode-host.config.ts` drive the
+whole thing in a real Chromium, starting the shim host themselves:
+
+```
+CLAUDE_EXTENSION_PATH=<unpacked extension/> PROBE_WORKSPACE=<a BP dir> \
+npx playwright test -c playwright.vscode-host.config.ts
+```
+
+Passing, with the real UI on screen — prompt box, model picker reading
+"Opus 5 (1M) High", Auto permission mode, session history:
+
+```
+dom nodes            : 131
+bridge log           : ["open","toExt","fromExt","fromExt","toExt", ...]
+messages to extension: 12
+console errors       : []
+page errors          : []
+failed requests      : []
+```
+
+The webview↔extension protocol is live in both directions. The first twelve
+messages are `init`, `get_claude_state`, `get_current_selection`,
+`get_asset_uris`, `list_sessions_request` — so `dev-server.ts` is a working
+reference for what the dashboard has to bridge.
+
+The extension also starts its own IDE integration server on activation
+(`Created lock file at ~/.claude/ide/<port>.lock`, `CLAUDE_CODE_SSE_PORT`), which
+is how the CLI attaches to an IDE. That works unmodified under the shim.
+
+### Three bugs the browser found that static analysis could not
+
+1. **`asWebviewUri` produced `file:///asset/...`** for a relative resource base —
+   `ShimUri.parse` fell through to `ShimUri.file` on a relative URL, and every
+   asset 404'd. It now returns a path-only URI when the base has no scheme.
+2. **CSP: `style-src 'unsafe-inline' 'nonce-…'` silently blocks inline styles** —
+   a nonce in the list makes `'unsafe-inline'` ignored, so the UI rendered
+   unstyled. `font-src` also needs `data:` for the bundled base64 fonts.
+3. **The bundled binary is not optional.** Omitting
+   `resources/native-binary/claude` gives
+   `Unsupported platform: linux-x64. No compatible Claude Code binary found.`
+   thrown repeatedly from the webview. So the earlier "215 MB of the 216 MB is
+   just the binary, and the container already has a CLI" note does **not** mean
+   we can drop it — the extension resolves its own copy by platform. Whether it
+   can be pointed at an existing CLI is still open, and it is the single biggest
+   lever on install size.
 
 ## What is not done
 
