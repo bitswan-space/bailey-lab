@@ -55,10 +55,8 @@ export function registerVscodeSidebarRoutes(
 
       try {
         const instance = await openSidebar({ email, ...s, workspaceRoot });
-        const qs = `copy=${encodeURIComponent(s.copy)}&bp=${encodeURIComponent(s.bp)}`;
         const html = pageFor(instance, {
           assetBase: `${PREFIX}/asset`,
-          bridgeUrl: `/ws/coding-agent-sidebar?${qs}`,
           extensionDir: extensionPath()!,
         });
         reply.header('Content-Type', 'text/html; charset=utf-8');
