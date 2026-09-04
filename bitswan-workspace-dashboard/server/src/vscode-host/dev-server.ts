@@ -97,12 +97,19 @@ if (registrations.length === 0) {
   process.exit(1);
 }
 const registration = registrations[Math.min(viewIndex, registrations.length - 1)]!;
+const ASSET_BASE_PLACEHOLDER = 'https://__bitswan_asset_base__/asset';
+
 const view: ResolvedWebview = await resolveWebviewView(registration, {
   extensionPath,
-  resourceBase: `http://127.0.0.1:${port}/asset`,
+  resourceBase: ASSET_BASE_PLACEHOLDER,
 });
 
-const pageHtml = injectHostBridge(view.html);
+const pageTemplate = injectHostBridge(view.html);
+
+function pageFor(hostHeader: string | undefined): string {
+  const authority = hostHeader && /^[A-Za-z0-9._:-]+$/.test(hostHeader) ? hostHeader : `127.0.0.1:${port}`;
+  return pageTemplate.split(ASSET_BASE_PLACEHOLDER).join(`//${authority}/asset`);
+}
 const toWebviewSockets = new Set<WebSocket>();
 const extensionInbox: unknown[] = [];
 
@@ -117,7 +124,7 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (url.pathname === '/' || url.pathname === '/index.html') {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(pageHtml);
+    res.end(pageFor(req.headers.host));
     return;
   }
   if (url.pathname === '/__mock') {
