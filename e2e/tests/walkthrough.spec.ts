@@ -3468,8 +3468,8 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const after = await page.context().browser()!.newContext({ ignoreHTTPSErrors: true });
     try {
       const ap = await after.newPage();
-      await ap.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
       await expect(async () => {
+        await ap.goto(ENV.baileyUrl + '/', { waitUntil: 'domcontentloaded', timeout: PROGRESS });
         expect(new URL(ap.url()).hostname, 'back to signing in against Keycloak').toContain('keycloak');
       }).toPass({ timeout: PROGRESS });
     } finally {
