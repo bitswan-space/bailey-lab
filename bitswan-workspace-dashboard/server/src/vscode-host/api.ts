@@ -1,10 +1,21 @@
 import { EventEmitter as NodeEmitter } from 'node:events';
+import { promises as nodeFs } from 'node:fs';
 import path from 'node:path';
 import { recordTouch } from './recorder.js';
 import { makeStub } from './stub.js';
 
 export interface Disposable {
   dispose(): void;
+}
+
+interface UriLike {
+  fsPath?: string;
+  path?: string;
+}
+
+function fsPathOf(uri: UriLike | string): string {
+  if (typeof uri === 'string') return uri;
+  return uri.fsPath ?? uri.path ?? '';
 }
 
 function disposable(fn: () => void): Disposable {
@@ -293,14 +304,43 @@ export function buildVscodeApi(state: HostState): Record<string, unknown> {
       recordTouch('workspace.applyEdit', 'call', true);
       return false;
     },
+    // A real filesystem, not stubs. The extension writes pasted images through
+    // workspace.fs before handing the path to the CLI; no-op writes are why an
+    // attached image reached the model but the agent then reported it "isn't on
+    // disk" and offered to hand-author an SVG instead.
     fs: {
-      readFile: async () => new Uint8Array(),
-      writeFile: async () => undefined,
-      stat: async () => ({ type: 1, ctime: 0, mtime: 0, size: 0 }),
-      readDirectory: async () => [],
-      createDirectory: async () => undefined,
-      delete: async () => undefined,
-      rename: async () => undefined,
+      readFile: async (uri: UriLike) => new Uint8Array(await nodeFs.readFile(fsPathOf(uri))),
+      writeFile: async (uri: UriLike, content: Uint8Array) => {
+        const target = fsPathOf(uri);
+        await nodeFs.mkdir(path.dirname(target), { recursive: true });
+        await nodeFs.writeFile(target, content);
+      },
+      stat: async (uri: UriLike) => {
+        const st = await nodeFs.stat(fsPathOf(uri));
+        return {
+          type: st.isDirectory() ? 2 : st.isSymbolicLink() ? 64 : 1,
+          ctime: st.ctimeMs,
+          mtime: st.mtimeMs,
+          size: st.size,
+        };
+      },
+      readDirectory: async (uri: UriLike) => {
+        const entries = await nodeFs.readdir(fsPathOf(uri), { withFileTypes: true });
+        return entries.map((e) => [e.name, e.isDirectory() ? 2 : e.isSymbolicLink() ? 64 : 1]);
+      },
+      createDirectory: async (uri: UriLike) => {
+        await nodeFs.mkdir(fsPathOf(uri), { recursive: true });
+      },
+      delete: async (uri: UriLike, options?: { recursive?: boolean }) => {
+        await nodeFs.rm(fsPathOf(uri), { recursive: Boolean(options?.recursive), force: true });
+      },
+      rename: async (from: UriLike, to: UriLike) => {
+        await nodeFs.rename(fsPathOf(from), fsPathOf(to));
+      },
+      copy: async (from: UriLike, to: UriLike) => {
+        await nodeFs.copyFile(fsPathOf(from), fsPathOf(to));
+      },
+      isWritableFileSystem: () => true,
     },
   };
 
