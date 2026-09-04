@@ -144,6 +144,54 @@ is how the CLI attaches to an IDE. That works unmodified under the shim.
    can be pointed at an existing CLI is still open, and it is the single biggest
    lever on install size.
 
+## Interaction: what works, and what auth actually requires
+
+`tests/spike/vscode-host-interaction.spec.ts` drives the composer against a mock
+Anthropic API (`mock-anthropic.ts`, started by the dev host on a random port with
+`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY` pointed at it).
+
+**Image paste works.** Synthesising a real `ClipboardEvent` with a PNG `File`:
+
+- the app calls `preventDefault()` and handles it itself (the composer is
+  `contenteditable="plaintext-only"`, so it must)
+- an attachment chip renders reading **`pasted.png 24x24`**, with a thumbnail —
+  the webview decodes the PNG and reads its dimensions
+- **no bridge traffic at paste time**: the image is held entirely in the webview
+  until the turn is submitted
+
+On submit (in the run that had working credentials) the CLI sent
+`POST /v1/messages` with block types `["text","image","text","text"]` — **one
+`image` block** — and the mock's reply streamed back and rendered in the
+transcript. So the whole path works: paste -> chip -> CLI -> API image block.
+
+**Auth is the blocker, and it is narrower than "does the mock work".** Measured:
+
+| Surface | `ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL` |
+|---|---|
+| the bundled `claude` CLI (`-p "..."`) | **sufficient** — hits the mock, streams a reply |
+| the extension's sidebar | **not sufficient** — falls back to "How do you want to log in?" |
+
+The extension has its own login gate on top of the CLI's credential resolution.
+Getting past it needs either a seeded credential store or the OAuth flow; env vars
+alone do not do it.
+
+### Two false alarms, recorded so nobody re-chases them
+
+Both were **my** bugs, not the product's:
+
+1. **The "config leak".** An early run had the mock echoing text from the
+   *hosting* Claude Code session, which looked like `CLAUDE_CONFIG_DIR`
+   defaulting to a shared `~/.claude`. It was not. The request carries a
+   `role: "system"` message *after* the user turn (a mid-conversation system
+   message), and the mock was reading `messages[messages.length - 1]`. It now
+   picks the last `role === "user"` message and strips `<system-reminder>`
+   blocks. There was no leak.
+2. **"The API-key path works, no sign-in needed."** That reading came from a run
+   where `CLAUDE_CONFIG_DIR` was unset and the extension reused the ambient
+   developer's *already authenticated* `~/.claude`. With an isolated config dir
+   the sidebar asks for login. The dev host now always sets an isolated
+   `CLAUDE_CONFIG_DIR` so this cannot flatter a result again.
+
 ## What is not done
 
 - **No dashboard UI.** The next step is serving `html` + the two assets and
@@ -153,8 +201,9 @@ is how the CLI attaches to an IDE. That works unmodified under the shim.
   `enableScripts: true`, and putting it straight into the dashboard's DOM would
   give it the dashboard's origin, cookies and gate. It needs *some* isolation
   boundary — that does not have to be an embedded IDE, but it cannot be nothing.
-- **Auth.** Whether the extension's sign-in works without a real browser
-  redirect host is still unknown, and is the biggest risk to the whole idea.
+- **Auth.** Now measured, not unknown: the CLI accepts env-var credentials, the
+  sidebar does not. Seeding a credential store, or hosting the OAuth redirect, is
+  the next real piece of work and still the biggest risk.
 - **Where the host process runs.** The coding-agent container is deliberately
   network-isolated from the dashboard and holds the working tree, which argues
   for running the host there and speaking to it over the existing SSH channel.
