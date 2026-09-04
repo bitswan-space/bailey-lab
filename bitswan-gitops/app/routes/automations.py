@@ -297,6 +297,84 @@ async def put_bp_audit_policy_route(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/business-processes/{bp}/audit-env")
+async def get_bp_audit_env_route(
+    bp: ValidBp,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """The audit environment for the frozen staging image: the two versions it
+    compares, whether the audited source is materialized, and the temporary
+    audit agent's state. `ready: false` with a reason when staging is not
+    frozen or the environment could not be built."""
+    return automation_service.audit_env_state(bp)
+
+
+@router.get("/business-processes/{bp}/audit-env/files")
+async def get_bp_audit_files_route(
+    bp: ValidBp,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """The audited source tree, as the auditor's file explorer reads it."""
+    return await automation_service.audit_env_tree(bp)
+
+
+@router.get("/business-processes/{bp}/audit-env/file-content")
+async def get_bp_audit_file_route(
+    bp: ValidBp,
+    path: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """One file from the audited source."""
+    return await automation_service.audit_env_file(bp, path)
+
+
+@router.get("/business-processes/{bp}/audit-env/search")
+async def get_bp_audit_search_route(
+    bp: ValidBp,
+    q: str = Query(...),
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Search the audited source."""
+    return automation_service.audit_env_search(bp, q)
+
+
+@router.get("/business-processes/{bp}/audit-env/diff")
+async def get_bp_audit_diff_route(
+    bp: ValidBp,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """The diff promoting this image would apply to production."""
+    return automation_service.audit_env_diff(bp)
+
+
+class AuditReportRequest(BaseModel):
+    content: str
+    by: str | None = None
+
+
+@router.get("/business-processes/{bp}/audit-env/report")
+async def get_bp_audit_report_route(
+    bp: ValidBp,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """The audit report as it stands — the markdown the agent or the auditor
+    has written for this image."""
+    return automation_service.audit_env_report(bp)
+
+
+@router.put("/business-processes/{bp}/audit-env/report")
+async def put_bp_audit_report_route(
+    bp: ValidBp,
+    body: AuditReportRequest,
+    automation_service: AutomationService = Depends(get_automation_service),
+):
+    """Write the audit report for the frozen image (admin/auditor only)."""
+    try:
+        return automation_service.write_audit_env_report(bp, body.content, body.by)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/business-processes/{bp}/staging-gate/audits")
 async def post_bp_audit_route(
     bp: ValidBp,
