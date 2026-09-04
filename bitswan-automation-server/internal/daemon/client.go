@@ -542,7 +542,7 @@ func (c *Client) DisableSSO() (bool, error) {
 	var out struct {
 		Changed bool `json:"changed"`
 	}
-	if err := c.doJSON(req, &out); err != nil {
+	if err := c.doJSONLongRunning(req, &out); err != nil {
 		return false, err
 	}
 	return out.Changed, nil
@@ -550,6 +550,15 @@ func (c *Client) DisableSSO() (bool, error) {
 
 func (c *Client) doJSON(req *http.Request, out any) error {
 	resp, err := c.doRequest(req)
+	return c.decodeDaemonJSON(resp, err, out)
+}
+
+func (c *Client) doJSONLongRunning(req *http.Request, out any) error {
+	resp, err := c.doLongRunningRequest(req)
+	return c.decodeDaemonJSON(resp, err, out)
+}
+
+func (c *Client) decodeDaemonJSON(resp *http.Response, err error, out any) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to daemon: %w", err)
 	}
