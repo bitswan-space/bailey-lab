@@ -36,6 +36,38 @@ function mockAnswer(turn) {
     return `I can see the ${turn.images === 1 ? 'image' : `${turn.images} images`} you attached. From that, the layout needs the totals column right-aligned and the header row pinned while the table scrolls.`;
   }
   if (!prompt) return 'I did not receive a prompt — say what you would like me to do.';
+  // The audit agent's own prompt: an auditor reading the manual should see what
+  // an audit report looks like, not a restatement of the instruction.
+  if (/audit report|audit\.md|production\.diff/.test(prompt)) {
+    return [
+      '# Audit — invoice-processing',
+      '',
+      '## What this version changes',
+      '',
+      'The frozen image adds VAT validation against the purchase order and routes',
+      'anything over €5,000 to approval instead of straight to the ledger.',
+      'Production has nothing deployed for this business process yet, so the',
+      'whole tree is new rather than a delta.',
+      '',
+      '## Risk',
+      '',
+      '- The approval threshold is a constant in the worker, not configuration:',
+      '  changing it is a code change and another audit.',
+      '- Totals are rounded to whole currency units; the rounding case is only',
+      '  covered by a fixture that uses whole units.',
+      '',
+      '## Verified',
+      '',
+      'Read every file under source/. The worker writes only to the ledger',
+      'client and the inbound bucket, and no credential is read outside the',
+      'environment the deployment provides.',
+      '',
+      '## Not verified',
+      '',
+      'Behaviour against a real vendor invoice — this environment has the source',
+      'and the diff, not a running stage.',
+    ].join('\n');
+  }
   if (/\btest|pytest|coverage\b/.test(prompt)) {
     return 'I ran the test suite for this business process: 12 passed, 0 failed. The invoice-total rounding case is the one worth watching — it only passes because the fixture uses whole currency units.';
   }
