@@ -63,13 +63,27 @@ def report_path(bp: str, sha: str) -> str:
 
 
 def _brief(
-    bp: str, sha: str, audited_commit: str, production_commit: str | None
+    bp: str,
+    sha: str,
+    audited_commit: str,
+    production_commit: str | None,
+    skipped: list[str] | None = None,
 ) -> str:
     against = (
         f"`{production_commit[:12]}`, the version production is serving"
         if production_commit
         else "nothing — production has never been deployed"
     )
+    left_out = ""
+    if skipped:
+        listed = "\n".join(f"- `{name}`" for name in sorted(skipped)[:20])
+        more = "" if len(skipped) <= 20 else f"\n- …and {len(skipped) - 20} more"
+        left_out = (
+            "\n## Left out of this copy\n\n"
+            "These entries could not be copied — links that point outside the "
+            "repository (the scaffold's build-time module links do this). "
+            "Say so in the report if any of them matter:\n\n" + listed + more + "\n"
+        )
     return f"""# Audit brief — {bp} @ {sha[:12]}
 
 Staging is frozen on this image and cannot be promoted to production until the
@@ -85,37 +99,53 @@ audit sign-offs its policy requires are recorded.
 
 A useful report states what changed, what risk each change carries, what you
 verified, and what you could not verify.
-"""
+{left_out}"""
 
 
-def _extract_within(tar_path: str, dest: str) -> None:
-    """Extract an archive, refusing any member that would land outside dest.
+def _member_stays_inside(root: str, name: str) -> bool:
+    target = os.path.realpath(os.path.join(root, name))
+    return target == root or target.startswith(root + os.sep)
 
-    `git archive` output is ours, not user input, but a report that turns out to
-    be a path-traversal sink is a poor kind of evidence — and tarfile's own
-    `filter="data"` is not available on every Python this ships on.
+
+def _extract_within(tar_path: str, dest: str) -> list[str]:
+    """Extract an archive into dest, and return what was left out.
+
+    Two kinds of member are left out rather than extracted, and neither is a
+    reason to abandon the audit:
+
+    - Anything whose path would land outside dest. `git archive` output is ours,
+      not user input, but a report that turns out to be a path-traversal sink is
+      a poor kind of evidence.
+    - A link the stdlib's `data` filter refuses — most often a symlink to an
+      absolute path outside the repository. The business-process scaffold ships
+      one (`backend/go.mod` → `/deps/go.mod`, resolved inside the build image),
+      and refusing to build an audit environment because a build-time link
+      cannot be followed would take the whole audit away over a file the
+      auditor does not need.
+
+    The caller names what was skipped in the brief, so the auditor knows the
+    copy is not quite the tree.
     """
     os.makedirs(dest, exist_ok=True)
     root = os.path.realpath(dest)
+    skipped: list[str] = []
     with tarfile.open(tar_path) as tf:
         for member in tf.getmembers():
-            target = os.path.realpath(os.path.join(root, member.name))
-            if target != root and not target.startswith(root + os.sep):
-                raise ValueError(
-                    f"archive member escapes the audit directory: {member.name}"
-                )
-            if member.issym() or member.islnk():
-                link = os.path.realpath(
-                    os.path.join(os.path.dirname(target), member.linkname)
-                )
-                if link != root and not link.startswith(root + os.sep):
-                    raise ValueError(
-                        f"archive link escapes the audit directory: {member.name}"
-                    )
-        try:
-            tf.extractall(dest, filter="tar")
-        except TypeError:
-            tf.extractall(dest)
+            if not _member_stays_inside(root, member.name):
+                skipped.append(member.name)
+                continue
+            try:
+                tf.extract(member, dest, filter="data")
+            except TypeError:
+                # A Python without extraction filters: keep the containment
+                # check above and refuse links outright rather than guess.
+                if member.issym() or member.islnk():
+                    skipped.append(member.name)
+                    continue
+                tf.extract(member, dest)
+            except Exception:
+                skipped.append(member.name)
+    return skipped
 
 
 async def prepare(
@@ -146,7 +176,7 @@ async def prepare(
             f"could not read {bp}@{audited_commit[:12]}: {err.strip()[:200]}"
         )
     try:
-        _extract_within(tar_path, src)
+        skipped = _extract_within(tar_path, src)
     finally:
         if os.path.exists(tar_path):
             os.remove(tar_path)
@@ -172,7 +202,7 @@ async def prepare(
         fh.write(written)
 
     with open(brief_path(bp, sha), "w", encoding="utf-8") as fh:
-        fh.write(_brief(bp, sha, audited_commit, production_commit))
+        fh.write(_brief(bp, sha, audited_commit, production_commit, skipped))
     if not os.path.exists(report_path(bp, sha)):
         with open(report_path(bp, sha), "w", encoding="utf-8") as fh:
             fh.write("")
@@ -200,8 +230,13 @@ def describe(
         return {"ready": False, "sha": None, "reason": "staging is not frozen"}
     base = audit_dir(bp, sha)
     report = report_path(bp, sha)
+    src = source_dir(bp, sha)
+    # An empty source directory is not an audit environment: the extraction
+    # created it and then failed, and calling that ready sends the auditor to
+    # a tree with nothing in it.
+    ready = os.path.isdir(src) and any(os.scandir(src))
     return {
-        "ready": os.path.isdir(source_dir(bp, sha)),
+        "ready": ready,
         "sha": sha,
         "audited_commit": audited_commit,
         "production_commit": production_commit,

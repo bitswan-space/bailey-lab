@@ -2627,25 +2627,30 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // Say what the audit environment reports before pressing the button: when
     // the agent has not come up, its own reason is the only thing that explains
     // an empty report, and it is not on screen.
+    // From INSIDE the dashboard frame: the outer chrome host has no /api route,
+    // so a relative fetch there measures Traefik, not the dashboard.
+    const dashFrame = dashPage.frames().find((f) => f.url().includes('--inner'));
     console.log(
       '  audit env      :',
-      await dashPage
-        .evaluate(async () => {
+      (await dashFrame
+        ?.evaluate(async () => {
           const r = await fetch('/api/audits/invoice-processing/env', { credentials: 'include' });
           return `${r.status} ${(await r.text()).slice(0, 400)}`;
         })
-        .catch((e: unknown) => `unreadable: ${String(e).slice(0, 120)}`),
+        .catch((e: unknown) => `unreadable: ${String(e).slice(0, 120)}`)) ?? 'no dashboard frame',
     );
     await d.getByRole('button', { name: /Draft with the agent/i }).first().click();
     // The mock Claude endpoint answers, so the agent always writes something —
     // an empty report here means the audit agent never ran.
+    // Length, not a \S run: the agent writes prose, which has spaces in it.
     await expect
       .poll(
         async () =>
-          (await d.locator('textarea').first().inputValue().catch(() => '')) ?? '',
+          ((await d.locator('textarea').first().inputValue().catch(() => '')) ?? '').trim()
+            .length,
         { timeout: 4 * 60_000, intervals: [2000, 3000, 5000] },
       )
-      .toMatch(/\S{20,}/);
+      .toBeGreaterThan(40);
     await capture(dashPage, 'audit-report');
 
     const noteBox = d.getByPlaceholder(/Audit note/i).first();

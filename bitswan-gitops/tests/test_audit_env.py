@@ -1,7 +1,9 @@
 """The audit environment materialized when staging is frozen."""
 
 import os
+import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -163,3 +165,60 @@ async def test_a_report_over_the_cap_is_refused(repo):
         audit_env.write_report(
             "invoices", "sha1234", "x" * (audit_env.MAX_REPORT_BYTES + 1)
         )
+
+
+async def test_a_link_out_of_the_repository_is_left_out_not_fatal(repo, tmp_path):
+    """The business-process scaffold ships `backend/go.mod` as a symlink to
+    `/deps/go.mod`, which is resolved inside the build image and points nowhere
+    in the archive. Refusing to build the audit environment over it took the
+    whole audit away — the e2e caught exactly that."""
+    clone, production, audited = repo
+    (Path(clone) / "backend").mkdir()
+    os.symlink("/deps/go.mod", Path(clone) / "backend" / "go.mod")
+    (Path(clone) / "backend" / "main.go").write_text("package main\n")
+    git("add", "-A", cwd=clone)
+    git("commit", "-qm", "scaffold links", cwd=clone)
+    tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=clone, capture_output=True, text=True
+    ).stdout.strip()
+
+    env = await audit_env.prepare("invoices", "links", tip, production, clone)
+
+    assert env["ready"] is True
+    src = audit_env.source_dir("invoices", "links")
+    assert (Path(src) / "backend" / "main.go").read_text() == "package main\n"
+    assert not (Path(src) / "backend" / "go.mod").exists()
+    # …and the brief says what the copy is missing, so the auditor is not left
+    # wondering whether a file was deleted or never copied.
+    brief = open(audit_env.brief_path("invoices", "links")).read()
+    assert "Left out of this copy" in brief
+    assert "backend/go.mod" in brief
+
+
+async def test_an_in_repository_symlink_survives(repo, tmp_path):
+    clone, _, _ = repo
+    (Path(clone) / "shared.py").write_text("SHARED = 1\n")
+    os.symlink("shared.py", Path(clone) / "alias.py")
+    git("add", "-A", cwd=clone)
+    git("commit", "-qm", "relative link", cwd=clone)
+    tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=clone, capture_output=True, text=True
+    ).stdout.strip()
+
+    await audit_env.prepare("invoices", "rel", tip, None, clone)
+    src = Path(audit_env.source_dir("invoices", "rel"))
+    assert (src / "alias.py").is_symlink()
+    assert (src / "alias.py").read_text() == "SHARED = 1\n"
+
+
+async def test_an_empty_source_directory_is_not_a_ready_environment(repo):
+    clone, _, audited = repo
+    await audit_env.prepare("invoices", "empty", audited, None, clone)
+    src = audit_env.source_dir("invoices", "empty")
+    for name in os.listdir(src):
+        target = os.path.join(src, name)
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        else:
+            os.remove(target)
+    assert audit_env.describe("invoices", "empty")["ready"] is False
