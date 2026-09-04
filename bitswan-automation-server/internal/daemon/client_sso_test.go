@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,10 +16,17 @@ import (
 // asked for the long-running transport.
 func ssoSocketClient(t *testing.T, handler http.HandlerFunc) *Client {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "d.sock")
+	// Not t.TempDir(): it embeds the test's name, and a socket path over ~104
+	// bytes is rejected outright on macOS.
+	dir, err := os.MkdirTemp("", "bsy")
+	if err != nil {
+		t.Fatalf("temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("listen on %s (%d bytes): %v", sock, len(sock), err)
 	}
 	srv := &http.Server{Handler: handler}
 	go func() { _ = srv.Serve(ln) }()
