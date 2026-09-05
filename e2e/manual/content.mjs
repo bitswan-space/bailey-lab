@@ -295,6 +295,42 @@ export const MANUAL = {
     },
     {
       num: '12', eyebrow: 'Four eyes on production', title: 'Freeze & audit',
+      lede: 'Production is gated by four eyes, not two. An auditor freezes staging to lock the exact image under review, audits it inside a copy of that exact version, and signs off on a written report — or proposes a fix instead. Every freeze, policy change and verdict, and the report that argued for it, is recorded in bitswan.yaml.',
+      slots: [
+        { id: 'freeze-staging', label: 'Live capture', caption: 'Freeze staging \u00b7 an auditor locks the staging image for review \u2014 dev \u2192 staging is closed until it is unfrozen' },
+        { id: 'audit-open', label: 'Live capture', caption: 'Audits \u00b7 the audit opens in a copy of the exact version the frozen image was built from' },
+        { id: 'audit-copy', label: 'Live capture', caption: 'Auditing \u00b7 a copy like any other \u2014 the agent, the files and the diff \u2014 holding the version under audit; changing it proposes a new version rather than approving this one' },
+        { id: 'audit-report', label: 'Live capture', caption: 'Audit report \u00b7 a file in the business process, written with the same editor as anything else and versioned with the copy' },
+        { id: 'audit-signoff', label: 'Live capture', caption: 'Audit sign-off \u00b7 Approve and Request changes sit on the report itself \u2014 there is no separate box to fill in, and the verdict is stored with the report that argued for it' },
+        { id: 'audit-log', label: 'Live capture', caption: 'Audit log \u00b7 every verdict recorded with who, when and the report they signed off \u2014 persisted in bitswan.yaml' },
+      ],
+      sell: [
+        'An audit is not a separate world: it happens in a <strong>copy of the version under audit</strong>. Opening one gives the auditor that exact version \u2014 the source the frozen image was built from \u2014 in an ordinary copy, so they read it with the <strong>same coding agent, file explorer and diff</strong> they use every day, and write their findings to a report file that is versioned with it. Nothing they do there can change what is frozen: a sign-off attaches to the image\u2019s content hash, and a copy is not that image.',
+        '<strong>How an audit is conducted.</strong> The copy opens with a report already scaffolded under four headings, and working through them <em>is</em> the method. <em>What this version changes</em>: start from the diff against what is running in production \u2014 that is the actual surface of risk, and it is one tab away. <em>Risk</em>: what could this do that the last version could not \u2014 new egress, new data, a threshold in code rather than configuration? <em>Verified</em>: what you actually read or ran, in enough detail that someone else could repeat it. <em>Not verified</em>: the honest remainder. An audit that states its limits is worth more than one that implies it checked everything.',
+        'The <strong>coding agent is in the copy too</strong>, and it is genuinely useful here \u2014 it reads a tree faster than you do and will draft the report for you. It is a research assistant, not the auditor: what it drafts is a claim you are about to sign your name to, so read the code behind anything it asserts. The report file is an ordinary file in the business process, so you and the agent are editing the same document.',
+        '<strong>You sign off on the report, not on a text box.</strong> <em>Approve</em> and <em>Request changes</em> live on the report tab itself: pressing one saves the report, reads it back and records it <em>with</em> the verdict. What is stored is the argument, not a thumbs-up \u2014 so a year later, in a review or an incident, the record shows what was checked, what was not, and on what grounds it was released.',
+        'That gives an auditor a second way out. An audit that finds something can <strong>fix it</strong>: deploying from the audit copy starts a <strong>new version</strong> in Development, which travels the same road as any other \u2014 build, checks, staging, its own freeze and its own sign-off. Changing what you were asked to approve is therefore never a shortcut through approving it.',
+        '<strong>No one promotes straight to production.</strong> First an auditor or admin <strong>freezes staging</strong> \u2014 that locks the exact image under review (a fixed tag) and closes dev \u2192 staging, so the thing being audited can\u2019t change underneath the review. A normal member never sees a Production promote button they can click; they hand off to an auditor, exactly as segregation-of-duties demands.',
+        'You set the bar with an <strong>audit policy</strong>: how many auditor sign-offs (at least one) a frozen image needs before it may reach production. Only when the policy is met does the Production promote unlock; a single \u201crequest changes\u201d holds the line. Every change to the gate \u2014 the freeze, each policy change, and each verdict with its report \u2014 is written into <code>bitswan.yaml</code> and versioned in git, attributed to the acting auditor and appended to a fast-forward-only history. Once the audited image reaches production, staging <strong>unfreezes automatically</strong> \u2014 no point holding the lock after release.',
+      ],
+      steps: [
+        'As an auditor, press <b>Freeze</b> on the Staging node to lock the image under review.',
+        'Open <b>Audits</b> \u2192 <b>Open the code for auditing</b>: a copy of the exact version that image was built from.',
+        'Read it \u2014 the diff against production, the source, the agent if you want it \u2014 and write the <b>Audit report</b> tab.',
+        'Press <b>Approve</b> or <b>Request changes</b> on the report itself \u2014 or fix what you found and deploy from the copy, proposing a new version with an audit of its own.',
+        'Once the policy is met, <b>Promote to Production</b> unlocks \u2014 staging unfreezes automatically once production is live.',
+      ],
+      specs: [{ v: '4 eyes', l: 'auditor sign-off to prod' }, { v: 'N sign-offs', l: 'policy you set' }, { v: '1 report', l: 'stored with every verdict' }],
+      callout: { kind: 'Who audited what, and on what grounds', text: 'Every freeze, policy change and sign-off is committed to <code>bitswan.yaml</code> in the process\u2019s own git repo \u2014 attributed to the acting auditor, appended to an immutable, fast-forward-only history, and carrying <strong>the report as it stood when it was signed</strong>. The audit log isn\u2019t a promise, and it isn\u2019t a thumbs-up; it\u2019s the reasoning, versioned.' },
+      standards: [
+        { code: 'ISO/IEC 27001', clause: 'A.5.3', demand: '<b>Segregation of duties.</b> The person who builds a change cannot unilaterally release it to production \u2014 an independent auditor must sign off.' },
+        { code: 'ISO/IEC 27001', clause: 'A.8.32', demand: '<b>Change management.</b> Production changes are reviewed and approved against a policy before release, then promoted verbatim.' },
+        { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change approval.</b> Changes are authorised by required sign-offs recorded in a tamper-evident log before deployment.' },
+        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> An independent sign-off gate limits the risk a change poses to critical functions.' },
+      ],
+    },
+    {
+      num: '12', eyebrow: 'Four eyes on production', title: 'Freeze & audit',
       lede: 'Production is gated by four eyes, not two. An auditor freezes staging to lock the exact image under review, signs off against a policy you set, and only then does the Production promote unlock — with every freeze, policy change and sign-off recorded in bitswan.yaml.',
       slots: [
         { id: 'freeze-staging', label: 'Live capture', caption: 'Freeze staging · an auditor locks the staging image for review — dev → staging is closed until it is unfrozen' },

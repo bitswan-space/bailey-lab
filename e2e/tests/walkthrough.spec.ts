@@ -2609,7 +2609,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // is the proof), write the report that was seeded there, and come back to
     // sign off. The other exit — change it and deploy, which starts a new
     // version — is stated on the banner and is an ordinary Deploy.
-    const openAudit = d.getByRole('button', { name: /Open the audit|Continue the audit/i }).first();
+    const openAudit = d.getByRole('button', { name: /Open the code for auditing/i }).first();
     await openAudit.waitFor({ state: 'visible', timeout: SLA });
     await capture(dashPage, 'audit-open');
     await openAudit.click();
@@ -2618,43 +2618,51 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await capture(dashPage, 'audit-copy');
 
     // The report is a file in the business process, seeded when the audit
-    // opened, edited with the editor every copy has.
-    await clickTopTab(/Coding Agent/i);
-    await d.getByRole('button', { name: /^Files$/ }).first().click().catch(() => undefined);
-    const auditReport = d.getByText('AUDIT.md', { exact: false }).first();
-    await auditReport.waitFor({ state: 'visible', timeout: SLA });
-    await auditReport.click();
-    const reportEditor = d.locator('.cm-content').first();
+    // opened. It has its own tab where Deploy would be — the same editor the
+    // description uses, with the verdict buttons on it.
+    await clickTopTab(/Audit report/i);
+    const reportEditor = d.locator('.ProseMirror, [contenteditable="true"]').first();
     await reportEditor.waitFor({ state: 'visible', timeout: SLA });
+    await expect(
+      reportEditor.getByText(/What this version changes/i).first(),
+      'the audit copy did not open with a seeded report',
+    ).toBeVisible({ timeout: SLA });
     await reportEditor.click();
     await dashPage.keyboard.press('Control+End');
     await dashPage.keyboard.type(
-      '\n\nVAT validation reviewed against the purchase order; approval threshold is a constant, flagged.',
+      'Read every file in the copy. VAT validation is checked against the purchase order. The approval threshold is a constant in the worker, not configuration — flagged, not blocking. Behaviour against a real vendor invoice is not verified here.',
       { delay: 8 },
     );
     await dashPage.keyboard.press('Control+s');
+    await d.getByRole('button', { name: /Saving/i }).first()
+      .waitFor({ state: 'hidden', timeout: SLA }).catch(() => undefined);
     await capture(dashPage, 'audit-report');
 
-    // Back to the frozen image to sign it off. The copy stays where it is.
+    // Signing off happens HERE, on the report — there is no separate note box.
+    // The verdict stores the report as it stands, so the record carries the
+    // reasoning and not just a verdict.
+    const approve = d.getByRole('button', { name: /^Approve$/ }).first();
+    await approve.waitFor({ state: 'visible', timeout: SLA });
+    await capture(dashPage, 'audit-signoff');
+    await approve.click();
+    await expect(
+      d.getByText(/Approved, with your report|You approved this image/i).first(),
+      'the sign-off did not land',
+    ).toBeVisible({ timeout: SLA });
+
+    // Back on the frozen image: the audit log shows the verdict WITH the report
+    // that argued for it, and the policy (1 sign-off) is met.
     await clickTopTab(/Deployments/i);
     await d
       .getByRole('button', { name: /Audits (off|\d+\/\d+)/i })
       .first()
       .click()
       .catch(() => undefined);
-
-    const noteBox = d.getByPlaceholder(/Audit note/i).first();
-    await noteBox.waitFor({ state: 'visible', timeout: SLA });
-    await noteBox.fill(
-      'Reviewed the frozen staging image — migrations additive, no PII change. Approved for Production.',
-    );
-    await capture(dashPage, 'audit-signoff');
-    await d.getByRole('button', { name: /^Approve$/ }).first().click();
-    // The sign-off lands in the audit log, and the policy (1 sign-off) is met.
-    await d
-      .getByText(/Approved/i)
-      .first()
-      .waitFor({ state: 'visible', timeout: SLA });
+    await expect(
+      d.getByText(/The report as it was signed off/i).first(),
+      'the audit log did not keep the report with the verdict',
+    ).toBeVisible({ timeout: SLA });
+    await d.getByText(/The report as it was signed off/i).first().click().catch(() => undefined);
     await capture(dashPage, 'audit-log');
   });
 

@@ -9,9 +9,8 @@ test('an auditor opens the audit and lands in a copy of the audited version', as
   await signInThroughGate(page, AUDITS);
   const d = page.frameLocator('iframe').first();
 
-  const open = d.getByRole('button', { name: /Open the audit|Continue the audit/i }).first();
+  const open = d.getByRole('button', { name: /Open the code for auditing/i }).first();
   await open.waitFor({ state: 'visible', timeout: 120_000 });
-  await expect(d.getByText(/The audit happens in a copy/i).first()).toBeVisible();
   await open.click();
 
   // The auditing banner is the proof they are in the audit copy — and it says

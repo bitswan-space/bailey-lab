@@ -34,8 +34,16 @@ test('the audit is one door in, and the sign-off lives beside the report', async
   expect(text).toMatch(/Audit/i);
   await page.screenshot({ path: 'gated-audit-report-tab.png' });
 
-  // …and the sign-off, next to it.
-  await d.getByRole('button', { name: /^Sign off$/ }).first().click();
-  await d.getByText(/Add your audit|Update your audit/i).first().waitFor({ timeout: 60_000 });
+  // …and the verdict sits ON the report: no pane to switch to, no note box to
+  // fill in. What gets recorded is the document itself.
   await expect(d.getByRole('button', { name: /^Approve$/ }).first()).toBeVisible();
+  await expect(d.getByRole('button', { name: /^Request changes$/ }).first()).toBeVisible();
+  await expect(d.getByPlaceholder(/Audit note/i)).toHaveCount(0);
+  await expect(d.getByRole('button', { name: /^Sign off$/ })).toHaveCount(0);
+
+  // The other way out of an audit is still there, and still named for what it
+  // means.
+  await expect(
+    d.getByRole('button', { name: /Propose a new version/i }).first(),
+  ).toBeVisible();
 });
