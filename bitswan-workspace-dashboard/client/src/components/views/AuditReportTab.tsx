@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
-import { FileText, Gavel, Rocket } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Check, FileText, Loader2, Rocket, X } from 'lucide-react';
 import { api, errorMessage, type AuditState, type StagingGate } from '@/lib/api';
-import { AuditSignOff } from '@/components/audits/AuditSignOff';
+import { toast } from '@/lib/notify';
 import { SpecificationTab } from '@/components/workspace/SpecificationTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
@@ -32,7 +32,7 @@ export interface AuditReportTabProps {
   onEdited?: () => void;
 }
 
-type Pane = 'report' | 'signoff' | 'propose';
+type Pane = 'report' | 'propose';
 
 /**
  * What an auditor does, in the place a copy normally offers Deploy.
@@ -61,6 +61,11 @@ export function AuditReportTab({
   onEdited,
 }: AuditReportTabProps) {
   const [pane, setPane] = useState<Pane>('report');
+  const [signing, setSigning] = useState(false);
+  const saveRef = useRef<(() => Promise<void>) | undefined>(undefined);
+  const registerSave = useCallback((fn: () => Promise<void>) => {
+    saveRef.current = fn;
+  }, []);
   const [audit, setAudit] = useState<AuditState | null>(null);
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
   const [gate, setGate] = useState<StagingGate | null>(null);
@@ -73,13 +78,45 @@ export function AuditReportTab({
     ]);
     if (state.status === 'fulfilled') setAudit(state.value);
     if (staging.status === 'fulfilled') setGate(staging.value);
-  }, [bp.id, bp.name]);
+  }, [bp.name]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   const reportPath = audit?.report_path ?? `${bp.name}/AUDIT.md`;
+  const canAudit = role === 'admin' || role === 'auditor';
+  const myVerdict = meEmail
+    ? gate?.signoffs?.find((a) => a.who === meEmail)?.verdict
+    : undefined;
+
+  // Signing off records the REPORT, so the report has to be on disk first —
+  // and it is the report that is stored, not a note about it.
+  const sign = async (verdict: 'approve' | 'reject') => {
+    setSigning(true);
+    const work = (async () => {
+      await saveRef.current?.();
+      const file = await api.copyFiles.content(copy, reportPath);
+      const report = 'content' in file ? file.content : '';
+      await api.recordAudit(bp.name, verdict, undefined, report);
+      await load();
+    })();
+    toast.promise(work, {
+      loading: verdict === 'approve' ? 'Recording your approval…' : 'Requesting changes…',
+      success:
+        verdict === 'approve'
+          ? 'Approved, with your report'
+          : 'Changes requested, with your report',
+      error: (e: unknown) => `Couldn’t record the audit: ${errorMessage(e)}`,
+    });
+    try {
+      await work;
+    } catch {
+      /* toast handled */
+    } finally {
+      setSigning(false);
+    }
+  };
   const proposals = changed.filter((c) => !c.path.endsWith('/AUDIT.md')).length;
 
   return (
@@ -89,7 +126,6 @@ export function AuditReportTab({
           {(
             [
               { id: 'report' as Pane, label: 'Report', Icon: FileText },
-              { id: 'signoff' as Pane, label: 'Sign off', Icon: Gavel },
               { id: 'propose' as Pane, label: 'Propose a new version', Icon: Rocket },
             ]
           ).map(({ id, label, Icon }) => (
@@ -108,13 +144,49 @@ export function AuditReportTab({
             </button>
           ))}
         </div>
-        <div className="ml-auto flex items-center gap-2 text-[11px] text-muted-foreground">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           {proposals > 0 && (
-            <span className="inline-flex items-center gap-1.5 rounded border border-violet-300 bg-violet-50 px-2 py-1 text-violet-900">
+            <span className="inline-flex items-center gap-1.5 rounded border border-violet-300 bg-violet-50 px-2 py-1 text-[11px] text-violet-900">
               <Rocket className="size-3.5" aria-hidden />
               {proposals} changed file{proposals === 1 ? '' : 's'} — deploying proposes a new
               version
             </span>
+          )}
+          {pane === 'report' && canAudit && (
+            <>
+            {myVerdict && (
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded px-2 py-1 text-[11px]',
+                  myVerdict === 'approve'
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : 'bg-red-100 text-red-700',
+                )}
+              >
+                You {myVerdict === 'approve' ? 'approved' : 'requested changes on'} this image —
+                signing again replaces it
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => void sign('approve')}
+              disabled={signing}
+              className="inline-flex h-7 items-center gap-1.5 rounded border border-emerald-300 bg-emerald-50 px-2 text-[11px] text-emerald-800 hover:bg-emerald-100 disabled:opacity-50"
+              title="Record this report as an approval of the frozen image"
+            >
+              {signing ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Check className="size-3.5" aria-hidden />}
+              Approve
+            </button>
+            <button
+              type="button"
+              onClick={() => void sign('reject')}
+              disabled={signing}
+              className="inline-flex h-7 items-center gap-1.5 rounded border border-red-300 bg-red-50 px-2 text-[11px] text-red-800 hover:bg-red-100 disabled:opacity-50"
+              title="Record this report as a request for changes"
+            >
+              <X className="size-3.5" aria-hidden /> Request changes
+            </button>
+            </>
           )}
         </div>
       </div>
@@ -128,11 +200,20 @@ export function AuditReportTab({
               label: 'Write it with the agent',
               title:
                 'Open the coding agent on this copy — the report is a file in it, so the agent reads and writes it like any other',
+              prompt: [
+                `Write the audit report for ${bp.name} in ${reportPath}.`,
+                audit?.audited_sha
+                  ? `The version under audit is the frozen staging image ${audit.audited_sha}, checked out in this copy.`
+                  : 'The version under audit is the frozen staging image, checked out in this copy.',
+                'Read the source, compare it with what is deployed in production, and fill in the headings that are already in the file: what this version changes, risk, verified, not verified.',
+                'Write only what you actually checked — say plainly what you could not verify. Edit the file directly; do not change anything else.',
+              ].join(' '),
             }}
+            registerSave={registerSave}
             onShowAgents={onShowAgents}
             {...(onEdited ? { onSaved: onEdited } : {})}
           />
-        ) : pane === 'propose' ? (
+        ) : (
           <SyncDeployTab
             bp={bp}
             wt={wt}
@@ -143,18 +224,6 @@ export function AuditReportTab({
             onDeployed={onDeployed}
             onManageDeployments={onDeployed}
           />
-        ) : (
-          <div className="px-4 py-3">
-            <AuditSignOff
-              bp={bp.name}
-              gate={gate}
-              role={role}
-              meEmail={meEmail}
-              onChange={() => void load()}
-              onEnterCopy={() => undefined}
-              signOffHere
-            />
-          </div>
         )}
       </div>
     </div>

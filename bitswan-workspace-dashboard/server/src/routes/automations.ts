@@ -518,11 +518,11 @@ export function registerAutomationRoutes(
   // frozen staging image. Admin/auditor only; appended to the audit log.
   app.post<{
     Params: { bp: string };
-    Body: { verdict?: string; note?: string };
+    Body: { verdict?: string; note?: string; report?: string };
   }>('/api/automations/business-processes/:bp/staging-gate/audits', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
-    const { verdict, note } = req.body ?? {};
+    const { verdict, note, report } = req.body ?? {};
     if (verdict !== 'approve' && verdict !== 'reject') {
       return reply.code(400).send({ error: "verdict must be 'approve' or 'reject'" });
     }
@@ -538,6 +538,7 @@ export function registerAutomationRoutes(
       const r = await gitops.recordAudit(req.params.bp, {
         verdict,
         ...(note ? { note } : {}),
+        ...(report ? { report } : {}),
         ...(by ? { by } : {}),
       });
       if (!r.ok) {

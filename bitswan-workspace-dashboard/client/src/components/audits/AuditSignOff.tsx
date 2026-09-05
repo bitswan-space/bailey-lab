@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
-  AlertTriangle,
   Check,
+  FileText,
   Gavel,
-  Loader2,
   Lock,
   Minus,
   Plus,
@@ -13,7 +12,7 @@ import {
   User,
   X,
 } from 'lucide-react';
-import { api, errorMessage, type StagingGate } from '@/lib/api';
+import { api, type StagingGate } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { AuditWorkspace } from './AuditWorkspace';
 import { formatRelative } from '@/lib/format-date';
@@ -27,10 +26,10 @@ export function isAuditor(role: string | null): boolean {
 }
 
 /**
- * The audit of a frozen staging image: its policy, who has signed off, and the
- * sign-off itself. Rendered in the Deployments tab's Audits section, and again
- * in the Audit report tab an auditor gets inside their audit copy — one
- * component, so the two cannot drift apart.
+ * The audit record of a frozen staging image: its policy, every verdict given
+ * on it with the report that argued for it, and the door into an audit copy.
+ * The verdict itself is given in that copy, on its Audit report tab, so that
+ * signing off and the report being signed off are one action.
  */
 export function AuditSignOff({
   bp,
@@ -39,7 +38,6 @@ export function AuditSignOff({
   meEmail,
   onChange,
   onEnterCopy,
-  signOffHere = false,
 }: {
   bp: string;
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
@@ -49,16 +47,9 @@ export function AuditSignOff({
   meEmail: string;
   onChange: () => void;
   onEnterCopy: (name: string, label: string) => void;
-  /**
-   * Whether an auditor can sign off from here. The Deployments tab's Audits
-   * section shows the record and one way in; the sign-off itself belongs in the
-   * audit copy, next to the report that argues for it.
-   */
-  signOffHere?: boolean;
 }) {
   const canAudit = isAuditor(role);
   const roleKnown = role !== null;
-  const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [editPolicy, setEditPolicy] = useState(false);
   const [draft, setDraft] = useState(gate?.required ?? 1);
@@ -95,29 +86,6 @@ export function AuditSignOff({
       <div className="px-3 py-12 text-center text-[13px] text-muted-foreground">Loading…</div>
     );
   }
-
-  // My most-recent sign-off on the frozen image (signoffs are newest-first), so
-  // I can see my current verdict and change it — reject → approve or back.
-  const myLatest = meEmail ? gate.signoffs.find((a) => a.who === meEmail) : undefined;
-
-  const doAudit = async (verdict: 'approve' | 'reject') => {
-    setBusy(true);
-    const work = api.recordAudit(bp, verdict, note.trim() || undefined);
-    toast.promise(work, {
-      loading: verdict === 'approve' ? 'Recording approval…' : 'Requesting changes…',
-      success: verdict === 'approve' ? 'Audit approved' : 'Changes requested',
-      error: (e: unknown) => `Audit failed: ${String(e)}`,
-    });
-    try {
-      await work;
-      setNote('');
-      onChange();
-    } catch {
-      /* toast handled */
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const savePolicy = async () => {
     setBusy(true);
@@ -247,7 +215,7 @@ export function AuditSignOff({
 
       {/* The way in. An audit is done in a copy of the audited version, so the
           only thing needed here is the door to it. */}
-      {gate.frozen && canAudit && !signOffHere ? (
+      {gate.frozen && canAudit ? (
         <AuditWorkspace bp={bp} onEnterCopy={onEnterCopy} />
       ) : null}
 
@@ -264,7 +232,7 @@ export function AuditSignOff({
         ) : (
           <div className="rounded-lg border border-border bg-background px-3.5">
             {gate.signoffs.map((a) => (
-              <SignoffRow key={a.id} a={a} />
+              <SignoffRow key={a.id} a={a} mine={Boolean(meEmail) && a.who === meEmail} />
             ))}
           </div>
         )}
@@ -329,64 +297,10 @@ export function AuditSignOff({
           <Snowflake className="size-4 shrink-0 text-sky-600" aria-hidden />
           <span>
             You must <strong>freeze staging</strong> before auditing — freeze it on the Staging node
-            above to lock the image, then sign off here.
+            above to lock the image, then open it for auditing here.
           </span>
         </div>
-      ) : !signOffHere ? null : (
-        <div className="order-first rounded-lg border border-border bg-muted/30 px-3.5 py-3">
-          {myLatest ? (
-            <div className="mb-2 flex flex-wrap items-center gap-1.5 text-[12px] text-muted-foreground">
-              <span>Your current sign-off:</span>
-              <span
-                className={cn(
-                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold',
-                  myLatest.verdict === 'approve'
-                    ? 'bg-emerald-100 text-emerald-700'
-                    : 'bg-red-100 text-red-700',
-                )}
-              >
-                {myLatest.verdict === 'approve' ? (
-                  <Check className="size-3" aria-hidden />
-                ) : (
-                  <X className="size-3" aria-hidden />
-                )}
-                {myLatest.verdict === 'approve' ? 'Approved' : 'Changes requested'}
-              </span>
-              <span>— you can change it below.</span>
-            </div>
-          ) : null}
-          <div className="mb-2 text-[13px] font-semibold text-foreground">
-            {myLatest ? 'Update your audit' : 'Add your audit'}
-          </div>
-          <textarea
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            rows={3}
-            placeholder="Audit note — what did you review? (supports multiple lines)"
-            className="mb-2 w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-[13px] outline-none focus:border-primary"
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void doAudit('approve')}
-              className="inline-flex items-center gap-1.5 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-[12px] font-semibold text-emerald-700 hover:bg-emerald-100"
-            >
-              <Check className="size-3.5" aria-hidden />
-              Approve
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void doAudit('reject')}
-              className="inline-flex items-center gap-1.5 rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-[12px] font-semibold text-red-700 hover:bg-red-100"
-            >
-              <X className="size-3.5" aria-hidden />
-              Request changes
-            </button>
-          </div>
-        </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -422,7 +336,7 @@ function LogRow({ e }: { e: StagingLogEntry }) {
   );
 }
 
-function SignoffRow({ a }: { a: StagingSignoff }) {
+function SignoffRow({ a, mine }: { a: StagingSignoff; mine: boolean }) {
   const ok = a.verdict === 'approve';
   return (
     <div className="flex items-start gap-3 border-b border-border/60 py-2.5 last:border-b-0">
@@ -438,6 +352,11 @@ function SignoffRow({ a }: { a: StagingSignoff }) {
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-[13px] font-semibold text-foreground">{a.who}</span>
+          {mine ? (
+            <span className="rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              you
+            </span>
+          ) : null}
           {a.role ? <span className="text-[12px] text-muted-foreground">· {a.role}</span> : null}
           <span
             className={cn(
@@ -457,6 +376,21 @@ function SignoffRow({ a }: { a: StagingSignoff }) {
             {a.note}
           </div>
         ) : null}
+        {a.report ? (
+          <details className="mt-1.5 rounded-md border border-border bg-muted/30">
+            <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[12px] font-semibold text-foreground">
+              <FileText className="mr-1.5 inline size-3.5 align-[-2px]" aria-hidden />
+              The report as it was signed off
+            </summary>
+            <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-border px-2.5 py-2 font-mono text-[12px] leading-relaxed text-muted-foreground">
+              {a.report}
+            </pre>
+          </details>
+        ) : (
+          <div className="mt-1.5 text-[12px] text-muted-foreground">
+            No report was recorded with this verdict.
+          </div>
+        )}
       </div>
     </div>
   );

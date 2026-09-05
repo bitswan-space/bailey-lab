@@ -1501,7 +1501,7 @@ export class GitopsClient {
    *  the frozen staging image; appended to the audit log in bitswan.yaml. */
   async recordAudit(
     bp: string,
-    payload: { verdict: string; note?: string; by?: string },
+    payload: { verdict: string; note?: string; by?: string; report?: string },
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/audits`,

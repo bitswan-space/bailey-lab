@@ -49,6 +49,11 @@ from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
+# An audit report is prose, and it is versioned in bitswan.yaml with the verdict
+# it justifies. Long enough for a real review, bounded so one audit cannot
+# bloat the state every workspace operation reads.
+MAX_AUDIT_REPORT_CHARS = 64 * 1024
+
 # Placeholder returned instead of a secret env value the caller may not see
 # (Inspect → env view). Masking happens HERE, server-side — the real value
 # never leaves gitops for an unprivileged caller.
@@ -2945,6 +2950,7 @@ class AutomationService:
         verdict: str,
         note: str | None = None,
         by: str | None = None,
+        report: str | None = None,
     ) -> dict:
         """Record one audit sign-off on the frozen staging IMAGE (admin/auditor
         only). `verdict` is 'approve' or 'reject' ("request changes"). Stored in
@@ -2978,6 +2984,11 @@ class AutomationService:
                 "verdict": verdict,
                 "at": self._now_str(),
                 "note": (note or "").strip() or None,
+                # The report the auditor wrote, stored WITH the verdict. A
+                # verdict on its own is a checkbox; what makes it evidence is
+                # the reasoning, and that has to still be there when the copy
+                # it was written in is long gone.
+                "report": (report or "").strip()[:MAX_AUDIT_REPORT_CHARS] or None,
             },
         )
         low = "approved" if verdict == "approve" else "requested changes on"

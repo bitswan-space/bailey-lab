@@ -621,6 +621,8 @@ export interface StagingLogEntry {
  *  (keyed by image content hash). Append-only; only each auditor's latest
  *  verdict counts. */
 export interface StagingSignoff {
+  /** The audit report as it stood when this verdict was given. */
+  report?: string;
   id: string;
   who: string;
   // eslint-disable-next-line no-restricted-syntax -- null = role unknown
@@ -1197,11 +1199,20 @@ export const api = {
     ),
   /** Record one audit sign-off (approve / request changes) on the frozen staging
    *  image (admin/auditor only; appended to the audit log in bitswan.yaml). */
-  recordAudit: (bp: string, verdict: 'approve' | 'reject', note?: string) =>
+  recordAudit: (
+    bp: string,
+    verdict: 'approve' | 'reject',
+    note?: string,
+    report?: string,
+  ) =>
     postJson<StagingGate>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/audits`,
-      { verdict, ...(note ? { note } : {}) },
+      { verdict, ...(note ? { note } : {}), ...(report ? { report } : {}) },
     ),
+  /** Type a prompt into the agent's composer the next time its panel loads.
+   *  Consumed once, by that load — the person still presses send. */
+  seedAgentPrompt: (copy: string, bp: string, prompt: string) =>
+    postJson<{ ok: boolean }>('/api/coding-agent/sidebar/prompt', { copy, bp, prompt }),
   /** Per-stage deployment history for a business process (newest-first). */
   bpHistory: (bp: string, stage: string) =>
     getJson<BpHistory>(
