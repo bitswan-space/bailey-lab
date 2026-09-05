@@ -21,6 +21,10 @@ test('an auditor opens the audit and lands in a copy of the audited version', as
   const bannerText = await banner.locator('..').innerText();
   console.log('banner:', bannerText.replace(/\s+/g, ' ').slice(0, 220));
   expect(bannerText).toMatch(/changes nothing that is deployed|proposal/i);
+  // Writing the report is the audit, not a proposal about the version: an
+  // auditor who has only written findings must not be told they are proposing
+  // a new version.
+  expect(bannerText).not.toMatch(/1 file — that is a proposal/i);
   await page.screenshot({ path: 'gated-audit-copy.png' });
 
   // The report was seeded into the business process, so there is something to
