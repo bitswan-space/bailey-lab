@@ -2687,7 +2687,11 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       d.getByText(/The report as it was signed off/i).first(),
       'the audit log did not keep the report with the verdict',
     ).toBeVisible({ timeout: SLA });
-    await d.getByText(/The report as it was signed off/i).first().click().catch(() => undefined);
+    const kept = d.getByText(/The report as it was signed off/i).first();
+    await kept.click().catch(() => undefined);
+    // The row sits below the fold on a laptop viewport; the point of the shot
+    // is the report under it, so bring it into view before capturing.
+    await kept.scrollIntoViewIfNeeded().catch(() => undefined);
     await capture(dashPage, 'audit-log');
 
     // Leave the audit copy. The rest of the walkthrough is the operator's own
