@@ -2664,6 +2664,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     ).toBeVisible({ timeout: SLA });
     await d.getByText(/The report as it was signed off/i).first().click().catch(() => undefined);
     await capture(dashPage, 'audit-log');
+
+    // Leave the audit copy. The rest of the walkthrough is the operator's own
+    // work in their own copy, and an audit copy holds the frozen version —
+    // staying in it would mean editing and deploying the wrong tree.
+    await d.getByRole('button', { name: /Leave the audit/i }).first().click().catch(() => undefined);
+    await d
+      .getByText(/You are auditing/i)
+      .first()
+      .waitFor({ state: 'hidden', timeout: SLA })
+      .catch(() => undefined);
   });
 
   await chapter('promote-prod', async () => {
