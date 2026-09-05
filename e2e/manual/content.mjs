@@ -304,6 +304,7 @@ export const MANUAL = {
         { id: 'audit-report', label: 'Live capture', caption: 'Audit report \u00b7 a file in the business process, written with the same editor as anything else and versioned with the copy' },
         { id: 'audit-signoff', label: 'Live capture', caption: 'Audit sign-off \u00b7 Approve and Request changes sit on the report itself \u2014 there is no separate box to fill in, and the verdict is stored with the report that argued for it' },
         { id: 'audit-log', label: 'Live capture', caption: 'Audit log \u00b7 every verdict recorded with who, when and the report they signed off \u2014 persisted in bitswan.yaml' },
+        { id: 'audit-recorded', label: 'Live capture', caption: 'The report as it was recorded \u00b7 read back as the document it was written as, from the audit log and from the production deploy that shipped it' },
       ],
       sell: [
         'An audit is not a separate world: it happens in a <strong>copy of the version under audit</strong>. Opening one gives the auditor that exact version \u2014 the source the frozen image was built from \u2014 in an ordinary copy, so they read it with the <strong>same coding agent, file explorer and diff</strong> they use every day, and write their findings to a report file that is versioned with it. Nothing they do there can change what is frozen: a sign-off attaches to the image\u2019s content hash, and a copy is not that image.',

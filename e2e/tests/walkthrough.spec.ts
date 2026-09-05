@@ -2704,11 +2704,23 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       'the audit log did not keep the report with the verdict',
     ).toBeVisible({ timeout: SLA });
     const kept = d.getByText(/The report as it was signed off/i).first();
-    await kept.click().catch(() => undefined);
-    // The row's top edge is already on screen, so scrollIntoViewIfNeeded does
-    // nothing and the report under it stays below the fold. Centre it.
     await kept.evaluate((el) => el.scrollIntoView({ block: 'center' })).catch(() => undefined);
     await capture(dashPage, 'audit-log');
+
+    // The report as it was recorded, read back the way it was written: the row
+    // opens it in a dialog that renders the document rather than its source.
+    await kept.click();
+    const recorded = d.getByRole('dialog');
+    await recorded.waitFor({ state: 'visible', timeout: SLA });
+    await expect(
+      recorded.getByText(/What this version changes/i).first(),
+      'the recorded report did not render as a document',
+    ).toBeVisible({ timeout: SLA });
+    await capture(dashPage, 'audit-recorded');
+    // A modal blocks every click behind it, so it has to be closed before the
+    // walkthrough carries on — leaving it open cost a whole run.
+    await dashPage.keyboard.press('Escape');
+    await recorded.waitFor({ state: 'hidden', timeout: SLA });
 
     // Leave the audit copy. The rest of the walkthrough is the operator's own
     // work in their own copy, and an audit copy holds the frozen version —
