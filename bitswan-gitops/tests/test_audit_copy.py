@@ -6,6 +6,8 @@ exit: an auditor who finds something can fix it and deploy, which is a new
 version going through dev and its own sign-off like any other.
 """
 
+import json
+
 import pytest
 from fastapi import HTTPException
 
@@ -204,3 +206,35 @@ async def test_the_state_says_whether_the_report_has_been_started(
 
     (tmp_path / name / "invoices" / "AUDIT.md").write_text("# Audit\n")
     assert (await copies.audit_state(bp="invoices")).report_exists is True
+
+
+async def test_an_audit_copy_records_the_business_process_it_is_of(
+    as_auditor, tmp_path, monkeypatch
+):
+    """Without it the copy is not scoped to one process and the banner cannot
+    even name what is being audited — which is what a live run showed."""
+    as_auditor(_Service())
+    created = {}
+
+    async def fake_create(body):
+        created.update(body.model_dump())
+        path = tmp_path / body.branch_name
+        (path / "invoices").mkdir(parents=True)
+        (path / copies.COPY_META_FILE).write_text(
+            '{"kind": "audit", "owner": "auditor@acme.com"}'
+        )
+        return {"name": body.branch_name}
+
+    async def fake_adopt(name, body):
+        return {"adopted": "commit"}
+
+    monkeypatch.setattr(copies, "create_copy", fake_create)
+    monkeypatch.setattr(copies, "adopt_version", fake_adopt)
+    opened = await copies.open_audit(copies.OpenAuditRequest(bp="invoices"))
+
+    assert created["kind"] == "audit"
+    assert created["bps"] == ["invoices"], "the audited process is recorded on the copy"
+    assert created["owner"] == "auditor@acme.com"
+    meta = json.loads((tmp_path / opened.name / copies.COPY_META_FILE).read_text())
+    assert meta["audited_sha"] == "abc12345"
+    assert meta["audited_commit"] == "9b72ebb3"

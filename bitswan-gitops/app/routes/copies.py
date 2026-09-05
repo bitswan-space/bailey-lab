@@ -784,6 +784,20 @@ async def create_copy(body: CreateCopyRequest):
     # The one business process an experiment is about. None for a user copy,
     # which carries every business process by definition.
     exp_bp = None
+    if kind == COPY_KIND_AUDIT:
+        # An audit is about the one business process whose image is frozen,
+        # recorded the same way an experiment's is: the banner, the copy scope
+        # and every one-process rule read it from there.
+        requested = body.bps or []
+        if len(requested) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "An audit is of one business process: name exactly one in " "'bps'."
+                ),
+            )
+        exp_bp = requested[0]
+        _validate_bp_dir(exp_bp)
     if kind == COPY_KIND_EXPERIMENT:
         # WHICH business process is not optional and not plural: each one is its
         # own git repo, so an experiment spanning two would be two unrelated
