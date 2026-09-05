@@ -635,7 +635,12 @@ function Shell() {
   const isColleagueView =
     copy !== null && !isMyCopy && !isMyExperiment && !isMyAudit;
   const auditStatus = useCopyStatus(isMyAudit && copy ? copy : '', copyEditNonce);
-  const auditProposedChanges = isMyAudit ? auditStatus.changed.length : 0;
+  // Writing the report is not proposing a change to the version: the report is
+  // a file in the copy, but what it argues about is the frozen image, and it is
+  // stored with the verdict rather than deployed. Only the rest is a proposal.
+  const auditProposedChanges = isMyAudit
+    ? auditStatus.changed.filter((c) => !c.path.endsWith('/AUDIT.md')).length
+    : 0;
 
   // ── the ONE divergence reading ────────────────────────────────────────────
   // How the business process ON SCREEN stands against its OWN main. Read once,

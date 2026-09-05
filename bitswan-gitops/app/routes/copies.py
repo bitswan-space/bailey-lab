@@ -2568,9 +2568,10 @@ class AuditStateResponse(BaseModel):
     report_exists: bool = False
     audited_sha: str | None = None
     audited_commit: str | None = None
-    # Files the auditor has changed in their copy of the audited version. A
-    # non-empty list means they are proposing a new version rather than (or as
-    # well as) signing this one off.
+    # Files the auditor has changed in their copy of the audited version, NOT
+    # counting the report: writing that is the audit, not a proposal about the
+    # version. A non-empty list means they are proposing a new version rather
+    # than (or as well as) signing this one off.
     proposed_changes: list[str] = []
 
 
@@ -2663,7 +2664,14 @@ async def audit_state(bp: str = Query(...)):
     changed: list[str] = []
     if exists:
         status = await get_copy_status(name, bp=bp)
-        changed = [c.get("path") for c in status.get("changed", []) if c.get("path")]
+        report_rel = audit_report_path(bp)
+        changed = [
+            c.get("path")
+            for c in status.get("changed", [])
+            if c.get("path")
+            and c.get("path") != report_rel
+            and not str(c.get("path")).endswith("/" + os.path.basename(report_rel))
+        ]
     report = os.path.join(copy_path, audit_report_path(bp))
     return AuditStateResponse(
         frozen=True,

@@ -166,6 +166,25 @@ async def test_the_state_reports_what_the_auditor_has_changed(
     assert state.proposed_changes == ["invoices/worker.py"]
 
 
+async def test_writing_the_report_is_not_proposing_a_change(
+    as_auditor, tmp_path, monkeypatch
+):
+    """The report lives in the business process, but what it argues about is
+    the frozen image — it is stored with the verdict, not deployed. Counting it
+    as a proposal would tell every auditor who wrote one that they were
+    proposing a new version."""
+    as_auditor(_Service())
+    name = audit_copy_name("abc12345", "auditor@acme.com")
+    (tmp_path / name / "invoices").mkdir(parents=True)
+
+    async def fake_status(copy, bp=None):
+        return {"changed": [{"path": "invoices/AUDIT.md", "kind": "modified"}]}
+
+    monkeypatch.setattr(copies, "get_copy_status", fake_status)
+    state = await copies.audit_state(bp="invoices")
+    assert state.proposed_changes == []
+
+
 def test_the_report_is_seeded_with_the_two_exits(tmp_path):
     """An auditor should find the report waiting to be edited, not have to
     invent a file — and it should say what the two ways out of an audit are."""
