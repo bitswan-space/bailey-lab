@@ -2621,7 +2621,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     try {
       await clickTopTab(/Coding Agent/i);
       await d.getByRole('button', { name: /^Files$/ }).first().click({ timeout: 30_000 });
-      await d.getByText('README.md', { exact: false }).first().waitFor({ timeout: 60_000 });
+      // Open a source file: reading the code is what an auditor is here to do,
+      // and an empty pane says nothing.
+      await d.getByText('main.go', { exact: false }).first().click({ timeout: 60_000 });
+      await d.locator('.cm-content').first().waitFor({ state: 'visible', timeout: 60_000 });
     } catch {
       /* leave the shot on whatever the copy is showing */
     }
@@ -2699,9 +2702,9 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     ).toBeVisible({ timeout: SLA });
     const kept = d.getByText(/The report as it was signed off/i).first();
     await kept.click().catch(() => undefined);
-    // The row sits below the fold on a laptop viewport; the point of the shot
-    // is the report under it, so bring it into view before capturing.
-    await kept.scrollIntoViewIfNeeded().catch(() => undefined);
+    // The row's top edge is already on screen, so scrollIntoViewIfNeeded does
+    // nothing and the report under it stays below the fold. Centre it.
+    await kept.evaluate((el) => el.scrollIntoView({ block: 'center' })).catch(() => undefined);
     await capture(dashPage, 'audit-log');
 
     // Leave the audit copy. The rest of the walkthrough is the operator's own
