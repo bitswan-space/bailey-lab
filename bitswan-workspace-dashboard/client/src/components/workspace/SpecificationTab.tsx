@@ -89,9 +89,15 @@ interface SpecificationTabProps {
    * BUILD; an audit report is handed to it to WRITE. Same button, and the
    * label has to say which, or it reads as "build this report".
    */
-  agentCta?: { label: string; title: string };
+  agentCta?: { label: string; title: string; prompt: string };
+  /**
+   * Hands the parent a way to flush the buffer to disk and wait for it. An
+   * audit sign-off records the report, so the report has to be written before
+   * the verdict is — autosave's two seconds are not a promise.
+   */
+  registerSave?: (save: () => Promise<void>) => void;
   /** Flips the workspace to the Coding Agent tab (Build automation). */
-  onShowAgents: () => void;
+  onShowAgents: (prompt?: string) => void;
   /** Fired after a save lands on disk — lets the shell refresh anything
    *  keyed on the copy's dirtiness (e.g. the experiment banner's merge gate). */
   onSaved?: () => void;
@@ -290,6 +296,7 @@ export function SpecificationTab({
   copy,
   path,
   agentCta,
+  registerSave,
   onShowAgents,
   onSaved,
 }: SpecificationTabProps) {
@@ -448,6 +455,12 @@ export function SpecificationTab({
     [copy, readmePath, bp.id],
   );
   forceSaveRef.current = () => void doSave(true);
+
+  useEffect(() => {
+    registerSave?.(async () => {
+      await doSave(true);
+    });
+  }, [registerSave, doSave]);
 
   // Autosave: idle-debounce while dirty. `editorState` in the deps resets
   // the timer on every transaction, so the save fires AUTOSAVE_DELAY_MS
@@ -617,13 +630,15 @@ export function SpecificationTab({
     dispatchTransaction(state.tr.delete(pos, pos + node.nodeSize));
   }, [mermaidDeletePos, dispatchTransaction]);
 
-  // "Build automation" sends the description to the coding agent: flush
-  // any unsaved edits first (the agent reads README.md from disk), then
-  // hand the automation prompt to the BP's agent — typed into the running
-  // session, or seeding a fresh one — and flip to the Coding Agent tab.
-  const onBuildAutomation = () => {
-    void doSave(false);
-    onShowAgents();
+  // The agent reads this document from disk, so unsaved edits are flushed
+  // before it is asked to act on them. The prompt is typed into its composer,
+  // not sent: the person sees what is being asked and decides.
+  const onBuildAutomation = async () => {
+    await doSave(false);
+    onShowAgents(
+      agentCta?.prompt ??
+        `Read ${readmePath} and build the automation it describes, staying inside this business process. Ask me about anything the description leaves open.`,
+    );
   };
 
   // ---- Render -------------------------------------------------------------

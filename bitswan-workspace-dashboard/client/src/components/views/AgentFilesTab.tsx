@@ -25,6 +25,8 @@ interface AgentFilesTabProps {
    *  mounted-but-hidden otherwise). Gates auto-reattach so we don't spin up
    *  sessions for BPs the user is only browsing on other tabs. */
   tabVisible?: boolean;
+  /** Bumped when a prompt has been seeded for the agent, to reload its panel. */
+  agentReloadNonce?: number;
 }
 
 type Sub = 'chat' | 'files' | 'containers';
@@ -71,7 +73,13 @@ type LaunchState =
  * (Plan, Notes, and the Playwright Browser pane from the wireframe are
  * intentionally not built.)
  */
-export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: AgentFilesTabProps) {
+export function AgentFilesTab({
+  copy,
+  bp,
+  branch: _branch,
+  tabVisible = true,
+  agentReloadNonce = 0,
+}: AgentFilesTabProps) {
   const { session: latest, loading: pastLoading } = useLatestAgentSession(copy, bp);
 
   // Sub-tab and the Diff toggle live in the URL so the Agents view is
@@ -135,7 +143,7 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
           sub !== 'chat' && 'hidden',
         )}
       >
-        <AgentSidebar copy={copy} bp={bp} />
+        <AgentSidebar copy={copy} bp={bp} reloadNonce={agentReloadNonce} />
       </main>
 
       {/* Files pane — mounted alongside so toggling back to Chat doesn't

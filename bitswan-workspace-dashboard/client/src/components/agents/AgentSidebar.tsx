@@ -5,12 +5,14 @@ import { getAccessToken } from '@/lib/auth-token';
 interface AgentSidebarProps {
   copy: string;
   bp: string;
+  /** Bumped to reload the panel — how a seeded prompt reaches the composer. */
+  reloadNonce?: number;
 }
 
 const FRAME_KEY = '__bitswanSidebar';
 const HOST_KEY = '__bitswanHost';
 
-export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
+export function AgentSidebar({ copy, bp, reloadNonce = 0 }: AgentSidebarProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -63,7 +65,7 @@ export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
     };
   }, [copy, bp]);
 
-  const src = `/api/coding-agent/sidebar/view?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}`;
+  const src = `/api/coding-agent/sidebar/view?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}${reloadNonce ? `&n=${reloadNonce}` : ''}`;
   return (
     <div className="relative h-full w-full">
       <iframe

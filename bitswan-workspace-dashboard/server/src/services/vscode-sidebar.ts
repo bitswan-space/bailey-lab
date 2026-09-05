@@ -415,11 +415,31 @@ function markThemeKind(html: string): string {
   });
 }
 
+const MAX_SEEDED_PROMPT_CHARS = 8 * 1024;
+
+/**
+ * The webview reads `#root`'s `data-initial-prompt` when it boots and types it
+ * into the composer (it does not send it — the person still decides). That
+ * attribute is the extension's own hand-off for "open Claude on this", and it
+ * is the only one: there is no command for typing into a session that is
+ * already running.
+ */
+export function seedInitialPrompt(html: string, prompt: string | undefined): string {
+  const text = (prompt ?? '').trim().slice(0, MAX_SEEDED_PROMPT_CHARS);
+  if (!text) return html;
+  const attr = text
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return html.replace(/<div id="root"/i, `<div id="root" data-initial-prompt="${attr}"`);
+}
+
 export function pageFor(
   html: string,
-  opts: { assetBase: string; extensionDir: string; assetUris?: unknown },
+  opts: { assetBase: string; extensionDir: string; assetUris?: unknown; initialPrompt?: string },
 ): string {
-  const withBridge = injectBridge(markThemeKind(html), opts.assetUris);
+  const withBridge = injectBridge(markThemeKind(seedInitialPrompt(html, opts.initialPrompt)), opts.assetUris);
   const themed = withBridge.includes('</head>')
     ? withBridge.replace('</head>', `${themeBlock(opts.extensionDir)}\n</head>`)
     : themeBlock(opts.extensionDir) + withBridge;

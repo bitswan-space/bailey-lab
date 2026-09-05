@@ -1,3 +1,4 @@
+import { useCallback, useState } from 'react';
 import { GitBranch, GitMerge, Loader2, Plus, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
 import { GetStartedTab } from '@/components/views/GetStartedTab';
@@ -11,6 +12,8 @@ import { ReadmeCard } from '@/components/workspace/ReadmeCard';
 import { SpecificationTab } from '@/components/workspace/SpecificationTab';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { api } from '@/lib/api';
+import { toast } from '@/lib/notify';
 import type { BpDivergence } from '@/lib/api';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
 
@@ -102,6 +105,23 @@ export function WorkspaceView({
   onTakeMain,
 }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
+  const [agentReloadNonce, setAgentReloadNonce] = useState(0);
+
+  // Opening the agent, optionally with something to say. A running session has
+  // no command for typing into it, so a prompt is handed over the only way the
+  // extension offers: it is seeded for the panel's next load, and the panel is
+  // reloaded. The person reads it and presses send.
+  const showAgents = useCallback(
+    (prompt?: string) => {
+      onTab('agent');
+      if (!prompt || !wt || !bp) return;
+      api
+        .seedAgentPrompt(wt.name, bp.name, prompt)
+        .then(() => setAgentReloadNonce((n) => n + 1))
+        .catch(() => toast.error('Couldn’t hand the prompt to the agent — type it yourself.'));
+    },
+    [onTab, wt, bp],
+  );
 
   // Orientation page — always reachable, even before any business process
   // exists (a brand-new operator opens here), so it precedes the empty state.
@@ -142,6 +162,7 @@ export function WorkspaceView({
               bp={bp.name}
               branch={wt.branch || wt.name}
               tabVisible={tab === 'agent'}
+              agentReloadNonce={agentReloadNonce}
             />
           </div>
           <EnvironmentPanel bp={bp.name} copy={wt.name} />
@@ -156,7 +177,7 @@ export function WorkspaceView({
         (bpInWt && wt ? (
           // Copy scope: the spec is editable — writes the copy's
           // README.md. Main scope below stays read-only (no write path).
-          <SpecificationTab bp={bp} copy={wt.name} onShowAgents={() => onTab('agent')} onSaved={onCopyEdited} />
+          <SpecificationTab bp={bp} copy={wt.name} onShowAgents={showAgents} onSaved={onCopyEdited} />
         ) : (
           <div className="flex-1 overflow-auto bg-background">
             <div className="mx-auto max-w-4xl px-7 py-6">
@@ -170,7 +191,7 @@ export function WorkspaceView({
           <RequirementsTab
             copy={wt.name}
             bp={bp.name}
-            onShowAgents={() => onTab('agent')}
+            onShowAgents={showAgents}
           />
         ) : (
           <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="manage requirements" />
@@ -206,7 +227,7 @@ export function WorkspaceView({
             onDeployed={() => onTab('deployments')}
             role={role}
             meEmail={meEmail}
-            onShowAgents={() => onTab('agent')}
+            onShowAgents={showAgents}
             editNonce={editNonce}
             {...(onCopyEdited ? { onEdited: onCopyEdited } : {})}
           />
