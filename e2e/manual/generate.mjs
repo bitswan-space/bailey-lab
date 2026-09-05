@@ -85,31 +85,103 @@ function withPagedjs(html) {
   return html.replace('</body>', `<script>${polyfill}</script></body>`);
 }
 
+/**
+ * Which chapters must NOT float their How-to box in print.
+ *
+ * The box is emitted before the prose (a float only affects what follows it),
+ * and Paged.js fills sheets in DOM order — so a box too tall to share a sheet
+ * with the prose takes the sheet alone, leaving an empty column and pushing the
+ * prose to the next one. A taller one is cut mid-list.
+ *
+ * This is MEASURED on the real pagination rather than predicted from a step
+ * count: how tall a box renders depends on how its steps wrap, so the only
+ * honest input is the laid-out result. Two defects are detected per chapter —
+ * the box spanning more than one sheet, and a sheet carrying the box but none
+ * of that chapter's prose. Both are cured the same way: unfloated, the box is
+ * roughly half as tall and fits with the prose after it.
+ */
+function collectFullWidthChapters(page) {
+  return page.evaluate(() => {
+    const sheets = [...document.querySelectorAll('.pagedjs_page')];
+    const idx = (el) => sheets.indexOf(el.closest('.pagedjs_page'));
+    const per = new Map();
+    for (const frag of document.querySelectorAll('.two[data-ch]')) {
+      const ch = frag.dataset.ch;
+      if (!per.has(ch)) per.set(ch, { box: new Set(), text: new Set() });
+      const at = idx(frag);
+      if (at < 0) continue;
+      const g = per.get(ch);
+      if (frag.querySelector('.howto')) g.box.add(at);
+      // A fragment counts as carrying prose only if it has real text in it —
+      // an empty .selltext shell is what Paged.js leaves on the box's sheet.
+      const txt = frag.querySelector('.selltext');
+      if (txt && txt.innerText.trim().length > 0) g.text.add(at);
+    }
+    const out = [];
+    for (const [ch, g] of per) {
+      const split = g.box.size > 1;
+      const alone = [...g.box].some((p) => !g.text.has(p));
+      if (split || alone) out.push(ch);
+    }
+    return out.sort();
+  });
+}
+
 async function renderPdf(htmlPath, pdfPath) {
   const { chromium } = await import('@playwright/test');
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
-    // Disable auto-run so we drive + await the layout ourselves (one pass).
+    // Disable auto-run so we drive + await the layout ourselves.
     await page.addInitScript(() => {
       window.PagedConfig = { auto: false };
     });
-    await page.goto('file://' + htmlPath, { waitUntil: 'networkidle' });
-    // The PDF is rendered from the CLEAN HTML (the inline-polyfill copy is written
-    // afterward, only for the standalone Artifact), so inject the polyfill here so
-    // window.Paged.Previewer exists for the manual layout below.
-    await page.addScriptTag({ path: PAGED_POLYFILL_PATH });
-    // Run Paged.js and resolve once the whole book is laid out into numbered
-    // sheets. previewer.preview() returns a flow with the final page count.
-    const pages = await page.evaluate(async () => {
-      const previewer = new window.Paged.Previewer();
-      const flow = await previewer.preview();
-      return flow.total;
-    });
+
+    // One pagination pass. `fullWidth` chapters get the class before Paged.js
+    // runs, so the layout it produces is the one we measure and print.
+    const paginate = async (fullWidth) => {
+      await page.goto('file://' + htmlPath, { waitUntil: 'networkidle' });
+      if (fullWidth.length) {
+        await page.evaluate((chs) => {
+          for (const ch of chs) {
+            document
+              .querySelectorAll(`.two[data-ch="${ch}"]`)
+              .forEach((el) => el.classList.add('full-howto'));
+          }
+        }, fullWidth);
+      }
+      // The PDF is rendered from the CLEAN HTML (the inline-polyfill copy is
+      // written afterward, only for the standalone Artifact), so inject the
+      // polyfill here so window.Paged.Previewer exists.
+      await page.addScriptTag({ path: PAGED_POLYFILL_PATH });
+      return page.evaluate(async () => {
+        const previewer = new window.Paged.Previewer();
+        const flow = await previewer.preview();
+        return flow.total;
+      });
+    };
+
+    await paginate([]);
+    const fullWidth = await collectFullWidthChapters(page);
+    let pages;
+    if (fullWidth.length) {
+      pages = await paginate(fullWidth);
+      const still = await collectFullWidthChapters(page);
+      // Unfloating can only make a box shorter, so a chapter still failing is
+      // one that does not fit even full width — say so instead of looping.
+      const unfixed = still.filter((ch) => fullWidth.includes(ch));
+      if (unfixed.length) {
+        console.warn(`::warning::How-to box still does not fit on one sheet in ch${unfixed.join(', ch')}`);
+      }
+      console.log(`Paged.js: How-to box set full width in ch${fullWidth.join(', ch')} (too tall to float on a sheet).`);
+    } else {
+      pages = await paginate([]);
+    }
     console.log(`Paged.js: laid out ${pages} numbered A4 pages.`);
     await page.emulateMedia({ media: 'print' });
     // Paged.js sized each .pagedjs_page to A4 already; print at that size.
     await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
+    return fullWidth;
   } finally {
     await browser.close();
   }
@@ -129,18 +201,27 @@ async function main() {
   writeFileSync(htmlPath, cleanHtml);
   console.log('Wrote ' + htmlPath);
 
+  // Chapters whose How-to box the PDF pass had to unfloat. Baked into the
+  // saved HTML too, so the standalone file paginates the same way when a
+  // reader prints it from the browser.
+  let fullWidthChapters = [];
   const pdfPath = join(BUILD, 'handbook.pdf');
   if (process.env.MANUAL_NO_PDF === '1') {
     console.log('MANUAL_NO_PDF=1 — skipping PDF.');
   } else {
-    await renderPdf(htmlPath, pdfPath);
+    fullWidthChapters = await renderPdf(htmlPath, pdfPath);
     console.log('Wrote ' + pdfPath);
   }
 
   // Re-write the saved HTML WITH the inline Paged.js polyfill so the standalone
   // file (the published Artifact) paginates itself in the browser on open —
   // page numbers on every sheet + resolved TOC page numbers.
-  writeFileSync(htmlPath, withPagedjs(cleanHtml));
+  let savedHtml = cleanHtml;
+  for (const ch of fullWidthChapters) {
+    savedHtml = savedHtml.split(`<div class="two" data-ch="${ch}">`)
+      .join(`<div class="two full-howto" data-ch="${ch}">`);
+  }
+  writeFileSync(htmlPath, withPagedjs(savedHtml));
   console.log('Embedded Paged.js into ' + htmlPath + ' for standalone pagination.');
 
   // Publish into the Server Console so the manual is built INTO the product:
