@@ -1053,25 +1053,29 @@ export interface CreateAutomationResponse {
   created: { name: string; relativePath: string }[];
 }
 
-/** One match from a search over the audited source. */
-export interface AuditSearchMatch {
-  path: string;
-  line: number;
-  text: string;
+/** `GET /api/audits/{bp}/copy` — this auditor's audit as it stands. */
+export interface AuditState {
+  frozen: boolean;
+  bp: string;
+  report_path: string;
+  reason?: string;
+  name?: string;
+  exists?: boolean;
+  audited_sha?: string;
+  audited_commit?: string;
+  report_exists?: boolean;
+  /** Files the auditor has changed in their copy: a proposal, not a sign-off. */
+  proposed_changes?: string[];
 }
 
-/** `GET /api/audits/{bp}/env` — the audit environment for the frozen image. */
-export interface AuditEnv {
-  ready: boolean;
-  // eslint-disable-next-line no-restricted-syntax -- null when staging is not frozen
-  sha: string | null;
-  reason?: string;
-  audited_commit?: string;
-  production_commit?: string;
-  report_bytes?: number;
-  frozen_by?: string;
-  frozen_at?: string;
-  agent?: { running?: boolean; name?: string; reason?: string };
+/** `POST /api/audits/{bp}/copy` — the copy the auditor works in. */
+export interface OpenedAudit {
+  name: string;
+  created: boolean;
+  bp: string;
+  audited_sha: string;
+  audited_commit: string;
+  report_path: string;
 }
 
 export const api = {
@@ -1434,45 +1438,15 @@ export const api = {
   },
 
   /**
-   * The audit environment a frozen staging stage gets: the audited source, the
-   * diff promoting it would apply to production, and the report. Reading is
-   * open to anyone who can open the tab; writing the report and running the
-   * agent are admin/auditor, refused by the server rather than hidden here.
+   * An audit happens in a copy of the version under audit. `state` reads where
+   * this auditor's audit stands (creating nothing); `open` gives them the copy,
+   * or returns the one they already have. gitops decides who may audit and
+   * which version is under audit.
    */
   audits: {
-    env: (bp: string) =>
-      getJson<AuditEnv>(`/api/audits/${encodeURIComponent(bp)}/env`),
-    files: (bp: string) =>
-      getJson<{ entries: FileTreeNode[] }>(`/api/audits/${encodeURIComponent(bp)}/files`),
-    fileContent: (bp: string, p: string) =>
-      getJson<{ path: string; content: string; truncated: boolean }>(
-        `/api/audits/${encodeURIComponent(bp)}/file-content?path=${encodeURIComponent(p)}`,
-      ),
-    search: (bp: string, q: string) =>
-      getJson<{ matches: AuditSearchMatch[]; truncated: boolean }>(
-        `/api/audits/${encodeURIComponent(bp)}/search?q=${encodeURIComponent(q)}`,
-      ),
-    diff: (bp: string) =>
-      getJson<{ diff: string; exists: boolean }>(`/api/audits/${encodeURIComponent(bp)}/diff`),
-    report: (bp: string) =>
-      getJson<{ content: string; exists: boolean }>(
-        `/api/audits/${encodeURIComponent(bp)}/report`,
-      ),
-    saveReport: (bp: string, content: string) =>
-      putJson<{ ok: boolean; bytes: number }>(
-        `/api/audits/${encodeURIComponent(bp)}/report`,
-        { content },
-      ),
-    draft: (bp: string, prompt?: string) =>
-      postJson<{ drafted: boolean; name: string }>(
-        `/api/audits/${encodeURIComponent(bp)}/draft`,
-        { prompt: prompt ?? '' },
-      ),
-    /** The audit chat page, loaded in a frame the way the Coding Agent tab loads its own. */
-    chatViewUrl: (bp: string) => `/api/audits/${encodeURIComponent(bp)}/chat/view`,
-    /** Whether this deployment can host an agent chat at all (it needs the
-     *  unpacked extension), so a dead tab is never offered. */
-    chatAvailable: () => getJson<{ available: boolean }>('/api/coding-agent/sidebar/status'),
+    state: (bp: string) => getJson<AuditState>(`/api/audits/${encodeURIComponent(bp)}/copy`),
+    open: (bp: string) =>
+      postJson<OpenedAudit>(`/api/audits/${encodeURIComponent(bp)}/copy`, {}),
   },
   copyFiles: {
     tree: (name: string) =>

@@ -14,6 +14,8 @@ import type { BpDivergence } from '@/lib/api';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
 
 interface WorkspaceViewProps {
+  /** Enter a copy. An audit is opened in one, from the Audits section. */
+  onEnterCopy: (name: string, label: string) => void;
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected
   bp: BusinessProcess | null;
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
@@ -75,6 +77,7 @@ interface WorkspaceViewProps {
 export function WorkspaceView({
   bp,
   wt,
+  onEnterCopy,
   copyCreating = false,
   addingBp = null,
   tab,
@@ -203,7 +206,7 @@ export function WorkspaceView({
 
       {tab === 'deployments' &&
         (bp.inMain ? (
-          <DeploymentsTab bp={bp} />
+          <DeploymentsTab bp={bp} onEnterCopy={onEnterCopy} />
         ) : (
           <CenteredNote
             icon={<GitMerge className="size-5 text-primary" aria-hidden />}

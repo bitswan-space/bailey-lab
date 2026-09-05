@@ -70,6 +70,7 @@ itself. Please keep new state out of the listing and behind an endpoint.
 import asyncio
 import contextlib
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -178,7 +179,15 @@ COPY_META_VERSION = 1
 # LEGACY copy: operator-created, unowned, and never an experiment.
 COPY_KIND_USER = "user"
 COPY_KIND_EXPERIMENT = "experiment"
-COPY_KINDS = (COPY_KIND_USER, COPY_KIND_EXPERIMENT)
+# An AUDIT copy is an ordinary copy of ONE business process, put at the version
+# a frozen staging image was built from. It is a copy on purpose: an auditor
+# reads it with the same agent, file explorer and diff everyone else has, and
+# when they find something they can fix it and deploy it — which makes it a new
+# version, going through dev and its own sign-off like any other.
+COPY_KIND_AUDIT = "audit"
+COPY_KINDS = (COPY_KIND_USER, COPY_KIND_EXPERIMENT, COPY_KIND_AUDIT)
+# Both of these are about exactly one business process and record it as `bp`.
+COPY_KINDS_SCOPED_TO_ONE_BP = (COPY_KIND_EXPERIMENT, COPY_KIND_AUDIT)
 
 
 def _copy_meta_path(copy_path: str) -> str:
@@ -208,6 +217,24 @@ def read_copy_meta(copy_path: str) -> dict | None:
             status_code=500, detail=f"Corrupt copy metadata at {path}: not an object"
         )
     return data
+
+
+def scoped_copy_bp(meta: dict | None) -> str | None:
+    """The ONE business process a scoped copy (experiment or audit) is about."""
+    if not meta or meta.get("kind") not in COPY_KINDS_SCOPED_TO_ONE_BP:
+        return None
+    bp = (meta.get("bp") or "").strip()
+    return bp or None
+
+
+def audited_image(meta: dict | None) -> dict | None:
+    """The frozen image an audit copy was opened for: its content sha and the
+    source commit it was built from. None for every other kind of copy."""
+    if not meta or meta.get("kind") != COPY_KIND_AUDIT:
+        return None
+    sha = (meta.get("audited_sha") or "").strip()
+    commit = (meta.get("audited_commit") or "").strip()
+    return {"sha": sha, "commit": commit} if sha else None
 
 
 def experiment_bp(meta: dict | None) -> str | None:
@@ -263,7 +290,7 @@ def copy_scope_bps(copy_path: str, meta: dict | None = None) -> list[str]:
     """
     if meta is None:
         meta = read_copy_meta(copy_path)
-    bp = experiment_bp(meta)
+    bp = scoped_copy_bp(meta)
     if not bp:
         return list_bp_clones(copy_path)
     return [bp] if os.path.isdir(os.path.join(copy_path, bp, ".git")) else []
@@ -965,17 +992,20 @@ def _copy_facts(copy_path: str, name: str) -> dict:
         facts["owner"] = meta.get("owner")
         facts["parent"] = meta.get("parent")
         facts["title"] = meta.get("title")
-        if meta.get("kind") == COPY_KIND_EXPERIMENT:
-            bp = experiment_bp(meta)
+        if meta.get("kind") in COPY_KINDS_SCOPED_TO_ONE_BP:
+            bp = scoped_copy_bp(meta)
             if bp:
                 facts["bp"] = bp
-            else:
+            elif meta.get("kind") == COPY_KIND_EXPERIMENT:
                 # An experiment from before experiments were per-business
                 # process. Reported as such rather than omitted: the dashboard
                 # filters experiments by `bp`, and one silently missing from
                 # every list is a copy the user can neither find nor discard.
                 facts["bp_legacy"] = True
                 _note_legacy_experiment(name)
+        audited = audited_image(meta)
+        if audited:
+            facts["audited"] = audited
     return facts
 
 
@@ -2506,6 +2536,182 @@ class AdoptResponse(BaseModel):
     deploy_task_ids: list[str] = []
 
 
+class OpenAuditRequest(BaseModel):
+    """Open (or re-open) the audit of a business process's frozen image."""
+
+    bp: str
+
+
+class AuditStateResponse(BaseModel):
+    """The audit as it stands for the asking auditor. Creates nothing."""
+
+    frozen: bool
+    bp: str
+    report_path: str
+    reason: str | None = None
+    name: str | None = None
+    exists: bool = False
+    audited_sha: str | None = None
+    audited_commit: str | None = None
+    # Files the auditor has changed in their copy of the audited version. A
+    # non-empty list means they are proposing a new version rather than (or as
+    # well as) signing this one off.
+    proposed_changes: list[str] = []
+
+
+class OpenAuditResponse(BaseModel):
+    name: str
+    created: bool
+    bp: str
+    audited_sha: str
+    audited_commit: str
+    report_path: str
+
+
+def audit_copy_name(sha: str, owner: str) -> str:
+    """One audit copy per (image, auditor): two auditors reviewing the same
+    image work in their own copies, and re-opening an audit returns to the one
+    already there rather than starting again.
+
+    Kept short on purpose — a copy name becomes a branch name and part of every
+    per-(copy, business process) resource name.
+    """
+    who = hashlib.sha256((owner or "").strip().lower().encode()).hexdigest()[:6]
+    return f"audit-{(sha or '')[:8]}-{who}"
+
+
+def audit_report_path(bp: str) -> str:
+    """Where the report lives: a file in the audited business process, so it is
+    written with the same editor and agent as anything else, versioned with the
+    copy, and carried along if the auditor deploys their changes."""
+    return f"{bp}/AUDIT.md"
+
+
+@router.get("/audit", response_model=AuditStateResponse)
+async def audit_state(bp: str = Query(...)):
+    """What this auditor's audit of `bp` looks like right now, creating
+    nothing: whether staging is frozen, which version is under audit, whether
+    they already have a copy of it, and whether they have changed it — which is
+    the difference between signing the frozen version off and proposing a new
+    one."""
+    from app.dependencies import get_automation_service
+    from app.task_queue import current_requester
+
+    _validate_bp_dir(bp)
+    service = get_automation_service()
+    owner = (current_requester.get() or "").strip()
+    gate = service.read_staging_gate(bp)
+    if not gate.get("frozen"):
+        return AuditStateResponse(
+            frozen=False,
+            reason="Staging is not frozen for this business process.",
+            bp=bp,
+            report_path=audit_report_path(bp),
+        )
+    sha = gate.get("frozen_sha") or ""
+    name = audit_copy_name(sha, owner)
+    copy_path = os.path.join(_copies_dir(), name)
+    exists = os.path.isdir(copy_path)
+    changed: list[str] = []
+    if exists:
+        status = await get_copy_status(name, bp=bp)
+        changed = [c.get("path") for c in status.get("changed", []) if c.get("path")]
+    return AuditStateResponse(
+        frozen=True,
+        bp=bp,
+        name=name,
+        exists=exists,
+        audited_sha=sha,
+        audited_commit=service.stage_source_commit(bp, "staging") or "",
+        report_path=audit_report_path(bp),
+        proposed_changes=changed,
+    )
+
+
+@router.post("/audit", response_model=OpenAuditResponse)
+async def open_audit(body: OpenAuditRequest):
+    """Give an auditor a copy of the version under audit.
+
+    Auditing used to be a read-only environment of its own — an extracted
+    source tree, a diff file, a report file, and a container to read them with.
+    This is the same thing built out of what a copy already is: the audited
+    version, in a copy, with the agent, the file explorer, the diff and Deploy
+    that every copy has. The auditor reads it the way they read anything; if
+    they find something they can fix it, and deploying that is a NEW version
+    which goes to dev and needs its own sign-off. Nothing here lets an audit
+    change what is frozen.
+    """
+    from app.dependencies import get_automation_service
+    from app.task_queue import current_requester
+
+    _validate_bp_dir(body.bp)
+    bp = body.bp
+    service = get_automation_service()
+    owner = (current_requester.get() or "").strip()
+    role = service._role_of(owner)
+    if role not in ("admin", "auditor"):
+        raise HTTPException(
+            status_code=403,
+            detail="Opening an audit requires an admin or auditor role.",
+        )
+
+    gate = service.read_staging_gate(bp)
+    if not gate.get("frozen"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Staging is not frozen for this business process, so there is "
+                "no version under audit. Freeze staging to open an audit."
+            ),
+        )
+    sha = gate.get("frozen_sha") or ""
+    commit = service.stage_source_commit(bp, "staging") or ""
+    if not commit:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Staging has no single deployed source version to audit — a "
+                "promotion is part-way through."
+            ),
+        )
+
+    name = audit_copy_name(sha, owner)
+    _validate_new_copy_name(name)
+    copy_path = os.path.join(_copies_dir(), name)
+    created = not os.path.isdir(copy_path)
+    if created:
+        await create_copy(
+            CreateCopyRequest(
+                branch_name=name,
+                kind=COPY_KIND_AUDIT,
+                owner=owner,
+                title=f"Audit of {bp} @ {sha[:8]}",
+                bps=[bp],
+            )
+        )
+        meta_path = os.path.join(copy_path, COPY_META_FILE)
+        if os.path.exists(meta_path):
+            with open(meta_path) as fh:
+                meta = json.load(fh)
+            meta["audited_sha"] = sha
+            meta["audited_commit"] = commit
+            with open(meta_path, "w") as fh:
+                json.dump(meta, fh, indent=2, sort_keys=True)
+        # Put the copy AT the audited version, with the primitive "edit this
+        # version" already uses: the audited tree on top of main, so the
+        # auditor's own fix deploys with no sync first.
+        await adopt_version(name, AdoptRequest(bp=bp, source="commit", commit=commit))
+
+    return OpenAuditResponse(
+        name=name,
+        created=created,
+        bp=bp,
+        audited_sha=sha,
+        audited_commit=commit,
+        report_path=audit_report_path(bp),
+    )
+
+
 @router.post("/{name}/adopt")
 async def adopt_version(name: str, body: AdoptRequest):
     """Take a version WHOLESALE into copy `name`, for ONE business process,
@@ -3581,7 +3787,7 @@ async def get_all_bp_divergence(name: str):
             result[bp] = {"ahead": ahead, "behind": behind}
     # Only a person's copy is workspace-wide, so only there is a business
     # process it lacks a thing it is behind on. An experiment is ONE process.
-    if not experiment_bp(meta):
+    if not scoped_copy_bp(meta):
         for bp in list_bp_repos():
             if bp in clones:
                 continue

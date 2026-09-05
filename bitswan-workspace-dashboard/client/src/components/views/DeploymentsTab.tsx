@@ -57,7 +57,7 @@ import {
   useDeployDone,
   type ActiveDeploy,
 } from '@/components/workspace/WorkspaceProvider';
-import { AuditEnvironment } from '@/components/audits/AuditEnvironment';
+import { AuditWorkspace } from '@/components/audits/AuditWorkspace';
 import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
@@ -595,6 +595,7 @@ function AuditsPanel({
   role,
   meEmail,
   onChange,
+  onEnterCopy,
 }: {
   bp: string;
   // eslint-disable-next-line no-restricted-syntax -- null = not loaded yet
@@ -603,6 +604,7 @@ function AuditsPanel({
   role: string | null;
   meEmail: string;
   onChange: () => void;
+  onEnterCopy: (name: string, label: string) => void;
 }) {
   const canAudit = isAuditor(role);
   const roleKnown = role !== null;
@@ -799,9 +801,9 @@ function AuditsPanel({
       {gate.frozen ? (
         <div>
           <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Audit environment
+            Where the audit happens
           </div>
-          <AuditEnvironment bp={bp} canAudit={canAudit} />
+          <AuditWorkspace bp={bp} canAudit={canAudit} onEnterCopy={onEnterCopy} />
         </div>
       ) : null}
 
@@ -2226,7 +2228,14 @@ function DeploymentCard({
  * modal with a real Diff-vs-current). Other section tabs are honest
  * placeholders for not-yet-built features.
  */
-export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
+export function DeploymentsTab({
+  bp,
+  onEnterCopy,
+}: {
+  bp: BusinessProcess;
+  /** Enter a copy — the audit opens in one. */
+  onEnterCopy: (name: string, label: string) => void;
+}) {
   const { automations } = useAutomations();
   // Stage, section, the open Inspect modal and the rollback confirmation all
   // live in the URL so the exact view is deep-linkable.
@@ -3248,6 +3257,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 role={role}
                 meEmail={meEmail}
                 onChange={refresh}
+                onEnterCopy={onEnterCopy}
               />
             ) : (
               <SupplyChainPanel

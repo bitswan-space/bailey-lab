@@ -43,15 +43,15 @@ export interface Copy {
    * before the metadata existed ("legacy" copies) carry none of these fields;
    * the dashboard hides those from its UI.
    */
-  kind?: 'user' | 'experiment';
+  kind?: 'user' | 'experiment' | 'audit';
   /** The owner's email. */
   owner?: string;
   /** Experiments only: the user copy this experiment branched off, and the
    *  only place it merges back into. */
   parent?: string;
   /**
-   * EXPERIMENTS ONLY: the directory name of the ONE business process this
-   * experiment is about. A copy is a person's workspace-wide environment; an
+   * EXPERIMENTS AND AUDITS: the directory name of the ONE business process the
+   * copy is about. A copy is a person's workspace-wide environment; an
    * experiment is a side branch of a single business process, because each
    * business process is its own git repository. gitops refuses to materialize
    * any other process into an experiment (409), so this never changes.
@@ -68,6 +68,14 @@ export interface Copy {
    * still open and discard.
    */
   bp_legacy?: boolean;
+  /**
+   * AUDITS ONLY: the frozen staging image this copy was opened to review, and
+   * the source commit it was built from. The copy holds that version, so an
+   * auditor reads it with the same agent, files and diff as any other copy —
+   * and if they change it, deploying is a NEW version that goes through
+   * Development and its own sign-off. Nothing here can alter the frozen image.
+   */
+  audited?: { sha: string; commit: string };
   /** Display name. An experiment's `name` is an opaque slug — everything the
    *  user sees is this title. */
   title?: string;

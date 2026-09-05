@@ -173,12 +173,6 @@ var socketWorkspaceCallableRoutes = []string{
 	"/bailey/role",  // gitops resolves a user's effectiveRole (utils.py)
 	"/memory/admit", // gitops gates a promote against the reserved budget
 	"/ingress",      // gitops adds/repoints/removes routes
-	// gitops runs the temporary audit agent's lifecycle when an auditor
-	// freezes or unfreezes staging (services/audit_agent.py).
-	"/audit-agent",
-	"/audit-agent/start",
-	"/audit-agent/stop",
-	"/audit-agent/draft",
 }
 
 // setupRoutes configures the HTTP routes
@@ -276,15 +270,6 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// (for the dashboard's Audits panel) list the users a normal member can ask
 	// to review a production promotion. Read-only.
 	mux.HandleFunc("/bailey/auditors", s.authMiddleware(s.handleWorkspaceAuditors))
-
-	// The temporary audit agent (authenticated; socket-trusted): gitops asks
-	// for it when an auditor freezes staging and drops it on unfreeze. The
-	// container reads one audited version and writes one report; see
-	// services/audit_agent.go.
-	mux.HandleFunc("/audit-agent", s.authMiddleware(s.handleAuditAgentState))
-	mux.HandleFunc("/audit-agent/start", s.authMiddleware(s.handleAuditAgentStart))
-	mux.HandleFunc("/audit-agent/stop", s.authMiddleware(s.handleAuditAgentStop))
-	mux.HandleFunc("/audit-agent/draft", s.authMiddleware(s.handleAuditAgentDraft))
 
 	// Memory admission (trusted, socket-auth): gitops calls this to gate a
 	// promote against the reserved budget before deploying.

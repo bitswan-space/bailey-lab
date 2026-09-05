@@ -12,6 +12,8 @@ import {
 import { WorkspaceView } from '@/components/views/WorkspaceView';
 import { DeleteCopyDialog } from '@/components/workspace/DeleteCopyDialog';
 import { BusyOverlay } from '@/components/workspace/BusyOverlay';
+import { useCopyStatus } from '@/hooks/useCopyStatus';
+import { AuditingBanner } from '@/components/workspace/AuditingBanner';
 import { ExperimentBanner } from '@/components/workspace/ExperimentBanner';
 import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { ViewingBanner } from '@/components/workspace/ViewingBanner';
@@ -615,6 +617,13 @@ function Shell() {
   // anything else is somebody else's (or a legacy copy reached by URL) and
   // gets the "you are viewing" banner.
   const isMyCopy = copy !== null && copy === myCopy;
+  // An audit copy is a copy of the version under audit, opened from the Audits
+  // section. It gets its own banner rather than "you are viewing someone's
+  // copy": what matters there is that the frozen image is untouched by
+  // anything done here, and that changing it is a proposal, not a sign-off.
+  const isMyAudit =
+    wt?.kind === 'audit' &&
+    (!wt.owner || !myEmail || wt.owner.toLowerCase() === myEmail.toLowerCase());
   const isMyExperiment =
     wt?.kind === 'experiment' &&
     !!myCopy &&
@@ -622,7 +631,10 @@ function Shell() {
     // gitops also records the owner; when it's there it must agree. An
     // unresolved identity never hides your own experiment from you.
     (!wt.owner || !myEmail || wt.owner.toLowerCase() === myEmail.toLowerCase());
-  const isColleagueView = copy !== null && !isMyCopy && !isMyExperiment;
+  const isColleagueView =
+    copy !== null && !isMyCopy && !isMyExperiment && !isMyAudit;
+  const auditStatus = useCopyStatus(isMyAudit && copy ? copy : '', copyEditNonce);
+  const auditProposedChanges = isMyAudit ? auditStatus.changed.length : 0;
 
   // ── the ONE divergence reading ────────────────────────────────────────────
   // How the business process ON SCREEN stands against its OWN main. Read once,
@@ -1047,6 +1059,20 @@ function Shell() {
             : {})}
         />
       )}
+      {wt && isMyAudit && (
+        <AuditingBanner
+          copy={wt}
+          bpLabel={wt.bp ? bpLabel(wt.bp) : ''}
+          proposedChanges={auditProposedChanges}
+          onLeave={() =>
+            myCopy
+              ? handleEnterCopy(myCopy, 'Leaving the audit…')
+              : undefined
+          }
+          onGoToAudits={() => handleTab('deployments')}
+          onGoToDeploy={() => handleTab('deploy')}
+        />
+      )}
       {wt && isMyExperiment && (
         <ExperimentBanner
           copy={wt}
@@ -1088,6 +1114,7 @@ function Shell() {
         <WorkspaceView
           bp={bp}
           wt={wt}
+          onEnterCopy={handleEnterCopy}
           copyCreating={copyCreating}
           addingBp={addingBp}
           tab={tab}

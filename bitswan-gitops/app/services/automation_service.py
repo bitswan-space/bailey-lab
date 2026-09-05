@@ -39,14 +39,7 @@ from app.utils import (
 )
 from app.deploy_manager import deploy_manager
 from app.services.image_service import ImageService
-from app.services import audit_env
 from app.services import bp_secrets
-from app.services.audit_agent import (
-    audit_agent_state,
-    draft_audit_report,
-    start_audit_agent,
-    stop_audit_agent,
-)
 from app.services import supply_chain_service
 from app.services import firewall_service
 from app.services.bp_git import fetch_main
@@ -2324,133 +2317,6 @@ class AutomationService:
         commits.discard(None)
         return commits.pop() if len(commits) == 1 else None
 
-    async def prepare_audit_env(self, bp: str, sha: str) -> dict:
-        """Materialize the audit environment for a frozen image, and start the
-        temporary audit agent that reads it. Best-effort: a workspace that
-        cannot build the environment is still frozen, and the descriptor says
-        why rather than pretending an auditor has source to read."""
-        audited = self.stage_source_commit(bp, "staging")
-        if not audited:
-            return {
-                "ready": False,
-                "sha": sha,
-                "reason": "staging has no single deployed source version to audit",
-            }
-        production = self.stage_source_commit(bp, "production")
-        clone = os.path.join(_copies_dir(), "main", bp)
-        try:
-            await fetch_main(clone, bp)
-            env = await audit_env.prepare(bp, sha, audited, production, clone)
-        except Exception as e:
-            logger.warning("audit environment for %s@%s failed: %s", bp, sha[:8], e)
-            return {"ready": False, "sha": sha, "reason": str(e)[:300]}
-        env["agent"] = start_audit_agent(self.workspace_name, bp, sha)
-        return env
-
-    def audit_env_state(self, bp: str) -> dict:
-        """The audit environment as it stands: the frozen image it belongs to,
-        the two versions it compares, and whether the source is there."""
-        rec = (
-            (read_bitswan_yaml(self.gitops_dir) or {}).get("staging_gate") or {}
-        ).get(bp) or {}
-        if not rec.get("frozen"):
-            return audit_env.describe(bp, None)
-        sha = rec.get("frozen_sha")
-        env = audit_env.describe(
-            bp,
-            sha,
-            rec.get("frozen_commit") or self.stage_source_commit(bp, "staging"),
-            rec.get("production_commit_at_freeze")
-            or self.stage_source_commit(bp, "production"),
-        )
-        env["frozen_by"] = rec.get("frozen_by")
-        env["frozen_at"] = rec.get("frozen_at")
-        agent = audit_agent_state(self.workspace_name, bp, sha)
-        # An audit agent that is not there while the image is still frozen is
-        # brought back — the container is disposable, the audit is not — and if
-        # it will not come up, this is where the reason becomes visible instead
-        # of dying in a log line at freeze time.
-        if env.get("ready") and not agent.get("running"):
-            agent = start_audit_agent(self.workspace_name, bp, sha)
-        env["agent"] = agent
-        return env
-
-    def _frozen_sha_or_409(self, bp: str) -> str:
-        rec = (
-            (read_bitswan_yaml(self.gitops_dir) or {}).get("staging_gate") or {}
-        ).get(bp) or {}
-        sha = rec.get("frozen_sha") if rec.get("frozen") else None
-        if not sha:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Staging is not frozen for this business process, so there is "
-                    "nothing under audit. Freeze staging to open an audit."
-                ),
-            )
-        return sha
-
-    async def audit_env_tree(self, bp: str) -> dict:
-        validate_bp_name(bp)
-        sha = self._frozen_sha_or_409(bp)
-        root = audit_env.source_dir(bp, sha)
-        if not os.path.isdir(root):
-            raise HTTPException(
-                status_code=409, detail="the audited source is not materialized yet"
-            )
-        rels = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d != ".git")
-            for name in sorted(filenames):
-                rels.append(os.path.relpath(os.path.join(dirpath, name), root))
-        return {"entries": self._nest_tree(sorted(rels))}
-
-    async def audit_env_file(self, bp: str, path: str) -> dict:
-        validate_bp_name(bp)
-        sha = self._frozen_sha_or_409(bp)
-        if not path or path.startswith("/") or ".." in path.split("/"):
-            raise HTTPException(status_code=400, detail="invalid path")
-        root = os.path.realpath(audit_env.source_dir(bp, sha))
-        abs_path = os.path.realpath(os.path.join(root, path))
-        if abs_path != root and not abs_path.startswith(root + os.sep):
-            raise HTTPException(status_code=400, detail="invalid path")
-        if not os.path.isfile(abs_path):
-            raise HTTPException(status_code=404, detail=f"not a file: {path}")
-        if os.path.getsize(abs_path) > 1024 * 1024:
-            return {"path": path, "content": "", "truncated": True}
-        with open(abs_path, "r", encoding="utf-8", errors="replace") as fh:
-            return {"path": path, "content": fh.read(), "truncated": False}
-
-    def audit_env_search(self, bp: str, query: str) -> dict:
-        validate_bp_name(bp)
-        return audit_env.search(bp, self._frozen_sha_or_409(bp), query)
-
-    def audit_env_diff(self, bp: str) -> dict:
-        validate_bp_name(bp)
-        return audit_env.read_diff(bp, self._frozen_sha_or_409(bp))
-
-    def audit_env_report(self, bp: str) -> dict:
-        validate_bp_name(bp)
-        return audit_env.read_report(bp, self._frozen_sha_or_409(bp))
-
-    def draft_audit_env_report(
-        self, bp: str, prompt: str | None, by: str | None
-    ) -> dict:
-        """Have the temporary audit agent write the report for the frozen image."""
-        validate_bp_name(bp)
-        self._require_staging_gate_role(by, "run the audit agent")
-        sha = self._frozen_sha_or_409(bp)
-        if not os.path.isdir(audit_env.source_dir(bp, sha)):
-            raise HTTPException(
-                status_code=409, detail="the audited source is not materialized yet"
-            )
-        return draft_audit_report(self.workspace_name, bp, sha, prompt or "")
-
-    def write_audit_env_report(self, bp: str, content: str, by: str | None) -> dict:
-        validate_bp_name(bp)
-        self._require_staging_gate_role(by, "write the audit report")
-        return audit_env.write_report(bp, self._frozen_sha_or_409(bp), content)
-
     def _bp_stage_members(self, bp: str, stage: str) -> dict:
         """The {deployment_id: {image, image_id}} map for a BP at a stage."""
         return self._bp_stage_node(bp, stage).get("deployments") or {}
@@ -3011,9 +2877,7 @@ class AutomationService:
             await self._persist_bp_state(
                 bs, {bp}, bp, "audit", deployed_by=by, message=message
             )
-            gate = self.read_staging_gate(bp)
-            gate["audit_env"] = await self.prepare_audit_env(bp, sha)
-            return gate
+            return self.read_staging_gate(bp)
         # Unfreeze (role already checked above for the user-initiated path).
         return await self._unfreeze_staging(
             bp, by, "Unfroze staging — re-opened promotion from Development"
@@ -3027,7 +2891,6 @@ class AutomationService:
         rec = bs.setdefault("staging_gate", {}).setdefault(bp, {})
         if not rec.get("frozen"):
             return self.read_staging_gate(bp)
-        was_sha = rec.get("frozen_sha")
         rec["frozen"] = False
         rec["frozen_by"] = None
         rec["frozen_at"] = None
@@ -3035,11 +2898,6 @@ class AutomationService:
         rec["frozen_commit"] = None
         rec["production_commit_at_freeze"] = None
         self._append_gate_log(rec, "unfreeze", by, self._role_of(by), reason)
-        # The audited source was a copy; the diff and the report are evidence
-        # and stay. The agent goes: it exists only for a frozen image.
-        if was_sha:
-            stop_audit_agent(self.workspace_name, bp, was_sha)
-            audit_env.teardown(bp, was_sha)
         await self._persist_bp_state(
             bs, {bp}, bp, "audit", deployed_by=by, message=f"unfreeze staging {bp}"
         )

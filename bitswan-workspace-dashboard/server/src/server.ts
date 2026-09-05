@@ -79,10 +79,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerCopyFilesRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerTemplateRoutes(app, { gitops });
   registerAutomationRoutes(app, { gitops });
-  registerAuditRoutes(app, {
-    gitops,
-    ...(process.env.AUDITS_ROOT ? { auditsRoot: process.env.AUDITS_ROOT } : {}),
-  });
+  registerAuditRoutes(app, { gitops });
   registerSnapshotRoutes(app, { gitops });
   registerDataExplorerRoutes(app, { gitops });
   registerTaskRoutes(app, { gitops });

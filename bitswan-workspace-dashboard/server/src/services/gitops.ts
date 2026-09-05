@@ -1435,28 +1435,35 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
-  /**
-   * The audit environment a frozen staging stage gets: the audited source, the
-   * diff promoting it would apply to production, and the report. One passthrough
-   * for the whole surface — gitops owns the environment, the dashboard only
-   * carries the auditor's identity to it.
-   */
-  async auditEnv(
+  /** `GET /copies/audit?bp=` — this auditor's audit of a business process as
+   *  it stands, creating nothing: whether staging is frozen, which version is
+   *  under audit, whether they already have a copy of it, and what they have
+   *  changed in it. */
+  async auditState(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.copiesAudit('GET', bp);
+  }
+
+  /** `POST /copies/audit` — give this auditor a copy of the version under
+   *  audit, or return the one they already have. */
+  async openAudit(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.copiesAudit('POST', bp);
+  }
+
+  private async copiesAudit(
+    method: 'GET' | 'POST',
     bp: string,
-    path: string,
-    init?: { method?: string; body?: unknown; query?: Record<string, string> },
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
-    const qs = init?.query ? `?${new URLSearchParams(init.query)}` : '';
     const url =
-      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}` +
-      `/audit-env${path}${qs}`;
+      method === 'GET'
+        ? `${this.baseUrl}/copies/audit?bp=${encodeURIComponent(bp)}`
+        : `${this.baseUrl}/copies/audit`;
     const r = await fetch(url, {
-      method: init?.method ?? 'GET',
+      method,
       headers: {
         ...this.authHeaders(),
-        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
       },
-      ...(init?.body ? { body: JSON.stringify(init.body) } : {}),
+      ...(method === 'POST' ? { body: JSON.stringify({ bp }) } : {}),
     });
     let body: unknown = null;
     try {
