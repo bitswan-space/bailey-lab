@@ -96,9 +96,20 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   // Static SPA + SPA-fallback. Registered last so /api and /ws routes
   // resolve before the catch-all.
   const clientDist = path.resolve(__dirname, '../../client/dist');
+  // `wildcard: false` makes @fastify/static enumerate the bundle ONCE, at
+  // registration. That is right for a baked image, where the bundle predates
+  // the process — and wrong for dev mode, where the source tree is mounted and
+  // `npm run build` writes new content-hashed names into it while the server
+  // runs. Those files then have no route: the SPA fallback answers with
+  // index.html, the browser refuses it as a module script ("Expected a
+  // JavaScript-or-Wasm module script but the server responded with a MIME type
+  // of text/html"), and the whole app fails to boot until someone restarts the
+  // container. A rebuilt bundle should just be served.
+  const servingAMountedSourceTree =
+    process.env.BITSWAN_DEV_MODE === 'true' || Boolean(process.env.BITSWAN_DASHBOARD_DEV_DIR);
   await app.register(fastifyStatic, {
     root: clientDist,
-    wildcard: false,
+    wildcard: servingAMountedSourceTree,
     // Cache policy, explicitly — without one the browser applies HEURISTIC
     // caching (a fraction of Last-Modified age) to whatever it likes,
     // including index.html. That pins a browser to the bundle it first saw:

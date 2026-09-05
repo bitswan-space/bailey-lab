@@ -289,14 +289,19 @@ deployment has no terminal to fall back to.
 
 ## One deployment gotcha
 
-The dashboard container reads `client/dist` from the mounted source per
-request, but holds `index.html` from when it started. Rebuild the client
-without restarting the container and it keeps serving an `index.html` that
-names asset hashes the new build deleted: every module script 404s into the SPA
-fallback, the browser refuses `text/html` as a module, and the app renders
-nothing at all — an empty frame inside a perfectly healthy-looking gate. Two
-gated tests "failed" that way before the cause was obvious. Restart the
-container after a client build.
+Rebuild the client while the dashboard container runs, and the app stops
+booting: every module script comes back as `index.html`, the browser refuses
+`text/html` as a module, and you get an empty frame inside a perfectly
+healthy-looking gate. Two gated tests "failed" that way before the cause was
+obvious.
+
+The reason is `@fastify/static`'s `wildcard: false`, which enumerates the
+bundle once at registration: a file written afterwards has no route and falls
+through to the SPA fallback. (The giveaway is that a stylesheet often still
+works — its content hash tends not to change between builds, so its route is
+still the one registered at startup.) The server now uses the wildcard route
+when it is serving a mounted source tree, so a dev rebuild is served without a
+restart; a baked image keeps the enumerated routes.
 
 ## What is not done
 
