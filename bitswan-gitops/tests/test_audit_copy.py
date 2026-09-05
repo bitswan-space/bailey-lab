@@ -162,3 +162,45 @@ async def test_the_state_reports_what_the_auditor_has_changed(
     # Proposing a change is the other exit from an audit, and the panel needs
     # to tell it from signing the frozen version off.
     assert state.proposed_changes == ["invoices/worker.py"]
+
+
+def test_the_report_is_seeded_with_the_two_exits(tmp_path):
+    """An auditor should find the report waiting to be edited, not have to
+    invent a file — and it should say what the two ways out of an audit are."""
+    copy_path = tmp_path / "audit-abc12345-ab12cd"
+    (copy_path / "invoices").mkdir(parents=True)
+    copies._seed_audit_report(
+        str(copy_path), "invoices", "abc12345aa", "9b72ebb34032aa"
+    )
+
+    written = (copy_path / "invoices" / "AUDIT.md").read_text()
+    assert "abc12345" in written
+    assert "9b72ebb34032" in written
+    assert "Nothing you change here alters that image" in written
+    assert "starts a new version in Development" in written
+
+
+def test_seeding_never_overwrites_a_report_that_exists(tmp_path):
+    copy_path = tmp_path / "audit-abc12345-ab12cd"
+    (copy_path / "invoices").mkdir(parents=True)
+    report = copy_path / "invoices" / "AUDIT.md"
+    report.write_text("# My findings\n")
+    copies._seed_audit_report(str(copy_path), "invoices", "abc", "def")
+    assert report.read_text() == "# My findings\n"
+
+
+async def test_the_state_says_whether_the_report_has_been_started(
+    as_auditor, tmp_path, monkeypatch
+):
+    as_auditor(_Service())
+    name = audit_copy_name("abc12345", "auditor@acme.com")
+    (tmp_path / name / "invoices").mkdir(parents=True)
+
+    async def no_changes(copy, bp=None):
+        return {"changed": []}
+
+    monkeypatch.setattr(copies, "get_copy_status", no_changes)
+    assert (await copies.audit_state(bp="invoices")).report_exists is False
+
+    (tmp_path / name / "invoices" / "AUDIT.md").write_text("# Audit\n")
+    assert (await copies.audit_state(bp="invoices")).report_exists is True

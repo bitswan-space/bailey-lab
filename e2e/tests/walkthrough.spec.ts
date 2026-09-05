@@ -2604,60 +2604,44 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       .first()
       .click()
       .catch(() => {});
-    // The audit environment: freezing pinned one image, and the tab now carries
-    // the audit itself — the version under review, the diff promoting it would
-    // apply to production, an agent that can read both, and the report. Assert
-    // the environment is really there (not an "unavailable" card), then have the
-    // agent write the report and check that its answer landed in the file.
-    const auditEnv = d.getByText(/Audit environment/i).first();
-    await auditEnv.waitFor({ state: 'visible', timeout: SLA });
-    await d.getByRole('button', { name: /^Diff vs production$/ }).first().click();
-    await d
-      .getByText(/diff --git|No differences|nothing deployed/i)
-      .first()
-      .waitFor({ state: 'visible', timeout: SLA });
-    await capture(dashPage, 'audit-diff');
-    await d.getByRole('button', { name: /^Source$/ }).first().click();
-    const auditSearch = d.getByPlaceholder(/Search the audited source/i).first();
-    await auditSearch.waitFor({ state: 'visible', timeout: SLA });
-    await auditSearch.fill('def');
-    await dashPage.keyboard.press('Enter');
-    await capture(dashPage, 'audit-source');
-    await d.getByRole('button', { name: /^Report$/ }).first().click();
-    // Say what the audit environment reports before pressing the button: when
-    // the agent has not come up, its own reason is the only thing that explains
-    // an empty report, and it is not on screen.
-    // From INSIDE the dashboard frame: the outer chrome host has no /api route,
-    // so a relative fetch there measures Traefik, not the dashboard.
-    const dashFrame = dashPage.frames().find((f) => f.url().includes('--inner'));
-    console.log(
-      '  audit env      :',
-      (await dashFrame
-        ?.evaluate(async () => {
-          const r = await fetch('/api/audits/invoice-processing/env', { credentials: 'include' });
-          return `${r.status} ${(await r.text()).slice(0, 400)}`;
-        })
-        .catch((e: unknown) => `unreadable: ${String(e).slice(0, 120)}`)) ?? 'no dashboard frame',
+    // The audit happens in a COPY of the version under audit — the same copy
+    // machinery everything else uses. Open it, land in it (the auditing banner
+    // is the proof), write the report that was seeded there, and come back to
+    // sign off. The other exit — change it and deploy, which starts a new
+    // version — is stated on the banner and is an ordinary Deploy.
+    const openAudit = d.getByRole('button', { name: /Open the audit|Continue the audit/i }).first();
+    await openAudit.waitFor({ state: 'visible', timeout: SLA });
+    await capture(dashPage, 'audit-open');
+    await openAudit.click();
+    const auditingBanner = d.getByText(/You are auditing/i).first();
+    await auditingBanner.waitFor({ state: 'visible', timeout: 3 * 60_000 });
+    await capture(dashPage, 'audit-copy');
+
+    // The report is a file in the business process, seeded when the audit
+    // opened, edited with the editor every copy has.
+    await clickTopTab(/Coding Agent/i);
+    await d.getByRole('button', { name: /^Files$/ }).first().click().catch(() => undefined);
+    const auditReport = d.getByText('AUDIT.md', { exact: false }).first();
+    await auditReport.waitFor({ state: 'visible', timeout: SLA });
+    await auditReport.click();
+    const reportEditor = d.locator('.cm-content').first();
+    await reportEditor.waitFor({ state: 'visible', timeout: SLA });
+    await reportEditor.click();
+    await dashPage.keyboard.press('Control+End');
+    await dashPage.keyboard.type(
+      '\n\nVAT validation reviewed against the purchase order; approval threshold is a constant, flagged.',
+      { delay: 8 },
     );
-    await d.getByRole('button', { name: /Draft with the agent/i }).first().click();
-    // The mock Claude endpoint answers, so the agent always writes something —
-    // an empty report here means the audit agent never ran.
-    // Length, not a \S run: the agent writes prose, which has spaces in it.
-    // Lines, too — a report that arrives as one run-on paragraph means the
-    // stream lost its newlines, which is a real defect and not a report.
-    const reportText = async () =>
-      ((await d.locator('textarea').first().inputValue().catch(() => '')) ?? '').trim();
-    await expect
-      .poll(async () => (await reportText()).length, {
-        timeout: 4 * 60_000,
-        intervals: [2000, 3000, 5000],
-      })
-      .toBeGreaterThan(40);
-    expect(
-      (await reportText()).split('\n').length,
-      'the drafted report should be markdown with lines, not one paragraph',
-    ).toBeGreaterThan(3);
+    await dashPage.keyboard.press('Control+s');
     await capture(dashPage, 'audit-report');
+
+    // Back to the frozen image to sign it off. The copy stays where it is.
+    await clickTopTab(/Deployments/i);
+    await d
+      .getByRole('button', { name: /Audits (off|\d+\/\d+)/i })
+      .first()
+      .click()
+      .catch(() => undefined);
 
     const noteBox = d.getByPlaceholder(/Audit note/i).first();
     await noteBox.waitFor({ state: 'visible', timeout: SLA });

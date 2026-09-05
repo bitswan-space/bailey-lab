@@ -2551,6 +2551,7 @@ class AuditStateResponse(BaseModel):
     reason: str | None = None
     name: str | None = None
     exists: bool = False
+    report_exists: bool = False
     audited_sha: str | None = None
     audited_commit: str | None = None
     # Files the auditor has changed in their copy of the audited version. A
@@ -2587,6 +2588,39 @@ def audit_report_path(bp: str) -> str:
     return f"{bp}/AUDIT.md"
 
 
+def _seed_audit_report(copy_path: str, bp: str, sha: str, commit: str) -> None:
+    """Leave the report there to be edited, rather than asking the auditor to
+    invent a file. It is an ordinary file in the business process: the agent
+    fills it in, the editor changes it, and it is versioned with the copy — so
+    if the auditor ends up proposing a fix, their reasoning travels with it."""
+    path = os.path.join(copy_path, audit_report_path(bp))
+    if os.path.exists(path):
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write(
+            f"""# Audit \u2014 {bp} @ {sha[:8]}
+
+Version under audit: `{commit[:12]}`, the source the frozen staging image was
+built from. This copy holds it. Nothing you change here alters that image.
+
+## What this version changes
+
+## Risk
+
+## Verified
+
+## Not verified
+
+---
+
+Two ways out of this audit: sign this version off on the Audits tab, or fix
+what you found and deploy \u2014 which starts a new version in Development,
+with an audit of its own.
+"""
+        )
+
+
 @router.get("/audit", response_model=AuditStateResponse)
 async def audit_state(bp: str = Query(...)):
     """What this auditor's audit of `bp` looks like right now, creating
@@ -2616,11 +2650,13 @@ async def audit_state(bp: str = Query(...)):
     if exists:
         status = await get_copy_status(name, bp=bp)
         changed = [c.get("path") for c in status.get("changed", []) if c.get("path")]
+    report = os.path.join(copy_path, audit_report_path(bp))
     return AuditStateResponse(
         frozen=True,
         bp=bp,
         name=name,
         exists=exists,
+        report_exists=os.path.exists(report),
         audited_sha=sha,
         audited_commit=service.stage_source_commit(bp, "staging") or "",
         report_path=audit_report_path(bp),
@@ -2701,6 +2737,7 @@ async def open_audit(body: OpenAuditRequest):
         # version" already uses: the audited tree on top of main, so the
         # auditor's own fix deploys with no sync first.
         await adopt_version(name, AdoptRequest(bp=bp, source="commit", commit=commit))
+        _seed_audit_report(copy_path, bp, sha, commit)
 
     return OpenAuditResponse(
         name=name,
