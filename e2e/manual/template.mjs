@@ -80,8 +80,26 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .shot.dark{ background:#0a1826; border-color:rgba(255,255,255,.08) }
 .shotcap{ font-size:12px; font-style:italic; color:var(--muted); margin:0 0 26px }
 .shot .ph{ text-align:center; color:#9aa7b3; font-size:14px; font-weight:600; padding:20px }
-.two{ display:grid; grid-template-columns:1.1fr .9fr; gap:40px; margin-top:8px }
-@media (max-width:680px){ .two{ grid-template-columns:1fr; gap:26px } .cover h1{font-size:54px} .chapter h2{font-size:34px} }
+/* Prose with the How-to box set into it. A float, not a grid column: the text
+   runs down the box's left side and then closes over underneath it, which a
+   column cannot do — it can only sit beside the box, leaving the space below it
+   empty for as long as the prose continues. The float also makes the box hug
+   its own content.
+
+   The box is emitted BEFORE the prose in the DOM (see renderChapter), because a
+   float only affects content that follows it. That has a consequence in print:
+   Paged.js fills sheets in DOM order, so a box too tall to share a sheet with
+   the prose would claim the sheet alone. Those chapters are measured at build
+   time and get .full-howto, which unfloats them — see the print rules and
+   collectFullWidthChapters in generate.mjs. */
+.two{ display:block; margin-top:8px }
+.two::after{ content:''; display:table; clear:both }
+.two > .howto{ float:right; width:42%; margin:4px 0 22px 32px;
+  /* A step can carry a long unbreakable token (memory_reservation_policy); in a
+     42% column it would overflow and be clipped. */
+  overflow-wrap:anywhere }
+
+@media (max-width:680px){ .two > .howto{ float:none; width:auto; margin:26px 0 0 } .cover h1{font-size:54px} .chapter h2{font-size:34px} }
 .selltext p{ font-size:16.5px; color:#39454f; margin:0 0 16px } .selltext strong{ color:var(--ink) }
 .howto{ background:var(--paper2); border:1px solid var(--line); border-radius:12px; padding:26px 28px }
 .howto h4{ margin:0 0 18px; font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--steel) }
@@ -209,6 +227,29 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
      header stays with its first rows) so a long chapter fills the foot of its
      page and continues, rather than jumping the whole card to a half-empty page. */
   .shot, .two, .howto, .callout, .specs, .scorecard, .std li, .std-h, .guide table tr{ break-inside:avoid }
+  /* ...except the prose/How-to row. It is routinely taller than a sheet, and an
+     avoid that cannot be honoured is simply ignored — the break then lands
+     wherever it falls, which put ch5's box across two sheets. Letting the
+     CONTAINER break while the box itself keeps its own avoid means the box is
+     moved whole instead of being cut. */
+  /* PRINT: no float. Paged.js fills pages in DOM order, so a floated box that
+     comes first takes the flow before any prose can start — ch5's 880px box
+     claimed a whole sheet with an empty column beside it. Unfloated and
+     full-width it is roughly half as tall (its steps wrap far less), so it fits
+     and the prose follows it on the same sheet. The box therefore leads the
+     chapter's prose in print rather than sitting beside it. */
+  .two{ break-inside:auto }
+  /* Paged.js fills pages in DOM order, and the box is emitted first (a float
+     only affects what follows it). A box short enough to share a sheet with the
+     prose floats here exactly as on screen. One that is not claims the sheet
+     alone, leaving an empty column and pushing the prose to the next — measured:
+     ch10's box (8 steps, 1111 chars) is fine, ch5's (10 steps, 1364) is not. Such
+     a chapter sets howtoFullWidth, which unfloats the box: full width it is about
+     half as tall, so it fits and the prose follows it on the same sheet.
+     Flagged per chapter rather than guessed from a character count, because how
+     tall a box renders depends on how its steps wrap, not on how long they are. */
+  .full-howto{ display:block }
+  .full-howto > .howto{ float:none; width:auto; margin:0 0 20px }
   .std-h{ break-after:avoid }
   .runfoot{ break-before:avoid }
   p{ orphans:2; widows:2 }
@@ -363,7 +404,15 @@ function renderChapter(ch, idx) {
   const sell = (ch.sell || []).map((p) => `<p>${p}</p>`).join('');
   const steps = (ch.steps || []).map((t, i) => `<div class="step"><div class="s">${i + 1}</div><div class="t">${t}</div></div>`).join('');
   const howto = steps ? `<div class="howto"><h4>${esc(ch.howtoTitle || 'How to')}</h4>${steps}</div>` : '';
-  const two = (sell || howto) ? `<div class="two"><div class="selltext">${sell}</div>${howto}</div>` : '';
+  // The How-to box is emitted BEFORE the prose: a float only affects content
+  // that follows it in source order, so with the box last the text could never
+  // wrap around it — it just dropped below. Visual order is unchanged (the box
+  // still sits top-right), but now the prose runs down its left side and closes
+  // over underneath it.
+  // data-ch survives Paged.js's fragmentation, so the PDF pass can find which
+  // chapter a paginated .two fragment belongs to and mark the few whose box
+  // cannot float on a sheet (see measureFullWidthChapters in generate.mjs).
+  const two = (sell || howto) ? `<div class="two" data-ch="${esc(num)}">${howto}<div class="selltext">${sell}</div></div>` : '';
   const callout = ch.callout ? `<div class="callout"><span class="c-k">${esc(ch.callout.kind || 'Why it matters')}</span><p>${ch.callout.text}</p></div>` : '';
   const specs = (ch.specs && ch.specs.length) ? `<div class="specs">${ch.specs.map((s) => `<div class="spec"><div class="v">${s.v}</div><div class="l">${esc(s.l)}</div></div>`).join('')}</div>` : '';
   const extraShots = shots.join('');
