@@ -2620,7 +2620,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // The report is a file in the business process, seeded when the audit
     // opened. It has its own tab where Deploy would be — the same editor the
     // description uses, with the verdict buttons on it.
-    await clickTopTab(/Audit report/i);
+    await clickTopTab(/^Audit report$/);
     const reportEditor = d.locator('.ProseMirror, [contenteditable="true"]').first();
     await reportEditor.waitFor({ state: 'visible', timeout: SLA });
     await expect(
