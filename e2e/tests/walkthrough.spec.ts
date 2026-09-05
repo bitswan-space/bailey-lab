@@ -2640,33 +2640,36 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       reportEditor.getByText(/What this version changes/i).first(),
       'the audit copy did not open with a seeded report',
     ).toBeVisible({ timeout: SLA });
-    // Fill the scaffold in the way an auditor would: findings under the
-    // heading they belong to, not one lump at the end.
-    const FINDINGS: [RegExp, string][] = [
+    // Write the report in one linear pass, headings and all. Clicking each
+    // seeded heading and typing under it looked tidier and was not: an autosave
+    // remount between two clicks moves the caret, and a finding then lands
+    // under the wrong heading — which is what the handbook then showed.
+    await reportEditor.click();
+    await dashPage.keyboard.press('Control+a');
+    await typeMarkdown(
+      dashPage,
       [
-        /^What this version changes$/,
+        '# Audit — invoice-processing',
+        '',
+        'Version under audit: the frozen staging image, checked out in this copy. Nothing changed here alters that image.',
+        '',
+        '## What this version changes',
+        '',
         'Adds VAT validation against the purchase order and holds invoices over €5,000 for approval. Production runs nothing for this process yet, so the whole tree is new rather than a delta.',
-      ],
-      [
-        /^Risk$/,
+        '',
+        '## Risk',
+        '',
         'The approval threshold is a constant in the worker, not configuration — changing it is a code change and another audit. Totals round to whole currency units and the only fixture uses whole units.',
-      ],
-      [
-        /^Verified$/,
+        '',
+        '## Verified',
+        '',
         'Read every file under the process. The worker writes only to the ledger client and the inbound bucket, and reads no credential outside the environment the deployment provides.',
-      ],
-      [
-        /^Not verified$/,
+        '',
+        '## Not verified',
+        '',
         'Behaviour against a real vendor invoice: this copy has the source and the diff, not a running stage.',
-      ],
-    ];
-    for (const [heading, text] of FINDINGS) {
-      const at = reportEditor.getByText(heading).first();
-      await at.click();
-      await dashPage.keyboard.press('End');
-      await dashPage.keyboard.press('Enter');
-      await dashPage.keyboard.type(text, { delay: 5 });
-    }
+      ].join('\n'),
+    );
     await dashPage.keyboard.press('Control+s');
     await d.getByRole('button', { name: /Saving/i }).first()
       .waitFor({ state: 'hidden', timeout: SLA }).catch(() => undefined);
