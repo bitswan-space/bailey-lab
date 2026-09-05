@@ -19,7 +19,6 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useRequirements } from '@/hooks/useRequirements';
-import { useSessions } from '@/components/agents/SessionProvider';
 import { nextStatus } from './StatusBadge';
 import { RequirementsTable } from './RequirementsTable';
 import { useUrlEnum, useUrlParam } from '@/lib/urlState';
@@ -63,7 +62,6 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     remove,
     runTests,
   } = useRequirements(copy, bp);
-  const { sendPrompt } = useSessions();
 
   // Search term and status filter live in the URL so a filtered view is
   // deep-linkable (?filter=fail&q=auth).
@@ -201,12 +199,10 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  // "Write tests" / "Build automation": hand the canned prompt to the BP's
-  // agent — typed into the running session, or seeding a fresh one.
-  const onStartCanned = (kind: 'write-tests' | 'automation') => {
-    sendPrompt(copy, bp, kind).catch((err) => {
-      toast.error(`Failed to hand the task to the agent: ${String(err)}`);
-    });
+  // "Write tests" / "Build automation" open the agent. They used to type a
+  // canned prompt into the terminal session first; the hosted sidebar exposes
+  // no command for injecting one, so they navigate and the user asks.
+  const onStartCanned = (_kind: 'write-tests' | 'automation') => {
     onShowAgents();
   };
 

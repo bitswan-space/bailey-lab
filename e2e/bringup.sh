@@ -123,6 +123,43 @@ BITSWAN_GOPROXY_URL="http://bitswan-goproxy:3000|direct"
 BITSWAN_NPM_REGISTRY_URL="http://bitswan-npmproxy:4873"
 mark "[1b/7] read-through build package proxies (Athens + Verdaccio)"
 
+# A mock Anthropic API for the coding agent. The walkthrough drives a real agent
+# conversation (and the manual shows it), which needs Claude to answer — with no
+# credentials in CI and no outbound network from the agent.
+#
+# It sits on the per-workspace <ws>-agent bridge, exactly where gitops sits, so
+# the agent's reachable surface is unchanged: no host-gateway route, and nothing
+# on bitswan_network. The compose the daemon writes declares that network
+# `external: true`, so pre-creating it here is what the daemon already expects.
+MOCK_CLAUDE_CTR="bitswan-e2e-mock-anthropic"
+MOCK_CLAUDE_PORT=8790
+AGENT_NET="${WORKSPACE_NAME:-finance}-agent"
+echo "=== [1c/7] Mock Anthropic API for the coding agent on ${AGENT_NET} ==="
+docker network create "$AGENT_NET" 2>/dev/null || true
+docker rm -f "$MOCK_CLAUDE_CTR" 2>/dev/null || true
+docker run -d --name "$MOCK_CLAUDE_CTR" --network "$AGENT_NET" --restart unless-stopped \
+  -e MOCK_PORT="$MOCK_CLAUDE_PORT" \
+  -v "$REPO_ROOT/e2e/mock-anthropic/server.mjs:/server.mjs:ro" \
+  node:20-alpine node /server.mjs
+for i in $(seq 1 30); do
+  if docker logs "$MOCK_CLAUDE_CTR" 2>&1 | grep -q "listening on port"; then break; fi
+  sleep 1
+done
+docker logs "$MOCK_CLAUDE_CTR" 2>&1 | tail -2
+# Forwarded daemon -> agent container (init.go allowlist -> coding_agent.go).
+export ANTHROPIC_BASE_URL="http://${MOCK_CLAUDE_CTR}:${MOCK_CLAUDE_PORT}"
+export ANTHROPIC_API_KEY="sk-ant-e2e-mock-0000000000000000000000000000000000"
+export ANTHROPIC_AUTH_TOKEN="sk-ant-e2e-mock-0000000000000000000000000000000000"
+
+CLAUDE_EXTENSION_DIR="$REPO_ROOT/bitswan-workspace-dashboard/.claude-extension"
+if [ -d "$CLAUDE_EXTENSION_DIR" ]; then
+  export BITSWAN_CLAUDE_EXTENSION_DIR="$CLAUDE_EXTENSION_DIR"
+  echo "=== agent chat: mounting the unpacked Claude Code extension from $CLAUDE_EXTENSION_DIR ==="
+else
+  echo "=== agent chat: no unpacked extension at $CLAUDE_EXTENSION_DIR — the Coding Agent chapter will fail ==="
+fi
+mark "[1c/7] mock Anthropic API"
+
 # Pin the daemon to THIS checkout's images so workspaces it creates via the
 # Server Console UI run the branch's gitops/dashboard/coding-agent (with the
 # features the manual documents) instead of Docker Hub 'latest'. sudo strips the
@@ -136,9 +173,30 @@ sudo env \
   BITSWAN_BUILD_NETWORK="$BUILD_PROXY_NET" \
   BITSWAN_GOPROXY="$BITSWAN_GOPROXY_URL" \
   BITSWAN_NPM_REGISTRY="$BITSWAN_NPM_REGISTRY_URL" \
+  ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL" \
+  ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_AUTH_TOKEN" \
+  BITSWAN_CLAUDE_EXTENSION_DIR="${BITSWAN_CLAUDE_EXTENSION_DIR:-}" \
   "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status
+
+MOCK_CLAUDE_DASH_CTR="bitswan-e2e-mock-anthropic-dashboard"
+DASHBOARD_NET="bitswan_network"
+echo "=== [1d/7] Same mock, second copy on ${DASHBOARD_NET} for the dashboard-hosted agent chat ==="
+docker network create "$DASHBOARD_NET" 2>/dev/null || true
+docker rm -f "$MOCK_CLAUDE_DASH_CTR" 2>/dev/null || true
+docker run -d --name "$MOCK_CLAUDE_DASH_CTR" --network "$DASHBOARD_NET" \
+  --network-alias "$MOCK_CLAUDE_CTR" --restart unless-stopped \
+  -e MOCK_PORT="$MOCK_CLAUDE_PORT" \
+  -v "$REPO_ROOT/e2e/mock-anthropic/server.mjs:/server.mjs:ro" \
+  node:20-alpine node /server.mjs
+for i in $(seq 1 30); do
+  if docker logs "$MOCK_CLAUDE_DASH_CTR" 2>&1 | grep -q "listening on port"; then break; fi
+  sleep 1
+done
+docker logs "$MOCK_CLAUDE_DASH_CTR" 2>&1 | tail -1
+mark "[1d/7] mock Anthropic API for the dashboard"
 # `ingress init` makes the daemon pull + start traefik; on a cold host that pull
 # can exceed the daemon client's request deadline. Pre-pull, then retry.
 docker pull traefik:v3.6 >/dev/null 2>&1 || true
@@ -318,6 +376,7 @@ E2E_TEAMMATE_EMAIL=marek.horvath@meridianfoods.cz
 E2E_TEAMMATE_PASSWORD=meridian-member
 E2E_OTLP_HTTP_ENDPOINT=http://${OTEL_CTR}:4318
 E2E_OTLP_GRPC_ENDPOINT=http://${OTEL_CTR}:4317
+E2E_AGENT_CHAT=${BITSWAN_CLAUDE_EXTENSION_DIR:+1}
 ENV
 mark "[7/7] write e2e/.env"
 echo "=== bring-up complete ==="
