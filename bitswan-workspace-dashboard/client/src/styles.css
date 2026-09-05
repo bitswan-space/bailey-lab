@@ -202,6 +202,26 @@
   font-size: inherit;
 }
 
+/* A stored audit report, rendered read-only (AuditReportDialog). Its diagrams
+   get the editor's preview box without the affordances for editing one: React
+   Flow needs a sized container, and the box is where that size comes from. */
+.audit-report .mermaid-preview-static {
+  position: relative;
+  height: 280px;
+  margin: 0 0 14px;
+  overflow: hidden;
+  border: 1px solid #e4e4e7;
+  border-radius: 8px;
+  background: #fafafa;
+}
+.audit-report .mermaid-preview-rf {
+  height: 100%;
+}
+.audit-report table {
+  display: block;
+  overflow-x: auto;
+}
+
 /* Mermaid flowchart preview blocks inside the spec editor */
 .spec-doc .mermaid-preview {
   position: relative;

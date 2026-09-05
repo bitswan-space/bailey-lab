@@ -15,11 +15,12 @@ import {
 import { api, type StagingGate } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { AuditWorkspace } from './AuditWorkspace';
+import { AuditReportDialog } from './AuditReportDialog';
 import { formatRelative } from '@/lib/format-date';
 import { cn } from '@/lib/utils';
 import { RelativeTime } from '@/components/shared/RelativeTime';
-import type { EnterCopy } from '@/types';
 import type { StagingLogEntry, StagingSignoff } from '@/lib/api';
+import type { EnterCopy } from '@/types';
 
 /** Whether a role may freeze staging, edit the audit policy, and sign off. */
 export function isAuditor(role: string | null): boolean {
@@ -339,6 +340,7 @@ function LogRow({ e }: { e: StagingLogEntry }) {
 
 function SignoffRow({ a, mine }: { a: StagingSignoff; mine: boolean }) {
   const ok = a.verdict === 'approve';
+  const [openReport, setOpenReport] = useState(false);
   return (
     <div className="flex items-start gap-3 border-b border-border/60 py-2.5 last:border-b-0">
       <span
@@ -378,15 +380,25 @@ function SignoffRow({ a, mine }: { a: StagingSignoff; mine: boolean }) {
           </div>
         ) : null}
         {a.report ? (
-          <details className="mt-1.5 rounded-md border border-border bg-muted/30">
-            <summary className="cursor-pointer select-none px-2.5 py-1.5 text-[12px] font-semibold text-foreground">
-              <FileText className="mr-1.5 inline size-3.5 align-[-2px]" aria-hidden />
+          <>
+            <button
+              type="button"
+              onClick={() => setOpenReport(true)}
+              className="mt-1.5 inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-[12px] font-medium text-foreground hover:bg-muted"
+            >
+              <FileText className="size-3.5" aria-hidden />
               The report as it was signed off
-            </summary>
-            <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words border-t border-border px-2.5 py-2 font-mono text-[12px] leading-relaxed text-muted-foreground">
-              {a.report}
-            </pre>
-          </details>
+            </button>
+            <AuditReportDialog
+              open={openReport}
+              onOpenChange={setOpenReport}
+              who={a.who}
+              at={a.at}
+              verdict={a.verdict}
+              report={a.report}
+              {...(a.note ? { note: a.note } : {})}
+            />
+          </>
         ) : (
           <div className="mt-1.5 text-[12px] text-muted-foreground">
             No report was recorded with this verdict.

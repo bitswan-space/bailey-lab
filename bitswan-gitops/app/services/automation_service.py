@@ -13,7 +13,7 @@ import time
 import toml
 import uuid
 import yaml
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any, Callable
 from app.models import DeployedAutomation
@@ -3013,8 +3013,12 @@ class AutomationService:
 
     @staticmethod
     def _now_str() -> str:
-        """Human timestamp for freeze/audit records, e.g. 'May 06, 2026 · 14:02'."""
-        return datetime.now().strftime("%b %d, %Y · %H:%M")
+        """When a freeze / policy change / sign-off happened, as an instant the
+        UI can actually render: ISO-8601 UTC, like every other timestamp on the
+        wire. It used to be a pre-formatted 'May 06, 2026 · 14:02', which no
+        date parser accepts — so every audit and freeze in the dashboard read
+        '—' instead of a time."""
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def _assert_promotable(self, bp: str, target_stage: str, by: str | None) -> None:
         """Enforce the freeze + audit gate for a promotion. Raises 403/409 with a

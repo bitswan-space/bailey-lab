@@ -99,3 +99,17 @@ async def test_the_report_is_readable_from_the_gate_long_after(frozen, monkeypat
     # The production promote badge reads `approved_by`; an auditor looking back
     # at a release should find the reasoning there, not only a name.
     assert "approval threshold is a constant" in gate["approved_by"][0]["report"]
+
+
+async def test_a_verdict_is_stamped_with_an_instant_the_ui_can_read(frozen):
+    svc, tmp_path = frozen
+    await svc.record_audit("invoices", "approve", by="auditor@x", report=REPORT)
+
+    # A pre-formatted "May 06, 2026 · 14:02" is not a timestamp to anything but
+    # a human reading YAML: every audit and freeze in the dashboard rendered
+    # "—" because no date parser accepts it.
+    from datetime import datetime
+
+    stamped = _records(tmp_path)[0]["at"]
+    parsed = datetime.fromisoformat(stamped)
+    assert parsed.tzinfo is not None

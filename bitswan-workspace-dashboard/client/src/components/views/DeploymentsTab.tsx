@@ -58,6 +58,7 @@ import {
   type ActiveDeploy,
 } from '@/components/workspace/WorkspaceProvider';
 import { AuditSignOff, isAuditor } from '@/components/audits/AuditSignOff';
+import { AuditReportDialog } from '@/components/audits/AuditReportDialog';
 import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
@@ -1621,8 +1622,12 @@ function DeploymentCard({
     entry.status !== 'failed' &&
     sameCommit(entry.source_commit, liveVersion);
   const audits = entry.audit ?? [];
-  // Which auditors' sign-offs are expanded (the chip reveals what they wrote).
-  const [openNotes, setOpenNotes] = useState<Record<string, boolean>>({});
+  // The auditor whose report is open, if any. A report is a document —
+  // headings, tables, diagrams — so it is read in a dialog that renders it,
+  // not as text squeezed under a chip.
+  // eslint-disable-next-line no-restricted-syntax -- null = no report open
+  const [openReport, setOpenReport] = useState<string | null>(null);
+  const openedAudit = audits.find((a) => a.who === openReport);
   const ver = entry.source_commit ?? entry.commit;
   const members = Object.entries(entry.members ?? {});
   const firstImg = members.find(([, m]) => m.image_id)?.[1]?.image_id;
@@ -1739,50 +1744,37 @@ function DeploymentCard({
         )}
       </div>
       {/* Audited-by badges (production promotes): the auditor(s) who signed off
-          this image; each chip reveals the report they signed off. */}
+          this image; each chip opens the report they signed off. */}
       {audits.length > 0 && (
-        <div className="flex flex-col gap-1.5 border-t border-border/60 pt-2.5">
-          <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
-            <span className="inline-flex items-center gap-1 text-muted-foreground">
-              <ShieldCheck className="size-3.5 text-emerald-600" aria-hidden />
-              Audited by
-            </span>
-            {audits.map((a) => (
-              <button
-                key={a.who}
-                type="button"
-                onClick={() => setOpenNotes((o) => ({ ...o, [a.who]: !o[a.who] }))}
-                title="Show what this auditor signed off"
-                aria-expanded={!!openNotes[a.who]}
-                className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100"
-              >
-                <User className="size-3" aria-hidden />
-                {a.who}
-              </button>
-            ))}
-          </div>
-          {audits
-            .filter((a) => openNotes[a.who])
-            .map((a) => (
-              <div
-                key={a.who}
-                className="max-h-72 overflow-auto rounded-md border-l-2 border-emerald-300 bg-emerald-50/50 px-2.5 py-1.5 text-[12px]"
-              >
-                <div className="text-[11px] font-medium text-foreground">
-                  {a.who}
-                  {a.at ? (
-                    <span className="font-normal text-muted-foreground">
-                      {' · '}
-                      <RelativeTime value={a.at} />
-                    </span>
-                  ) : null}
-                </div>
-                <div className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">
-                  {a.report || a.note || 'Approved without a report.'}
-                </div>
-              </div>
-            ))}
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2.5 text-[12px]">
+          <span className="inline-flex items-center gap-1 text-muted-foreground">
+            <ShieldCheck className="size-3.5 text-emerald-600" aria-hidden />
+            Audited by
+          </span>
+          {audits.map((a) => (
+            <button
+              key={a.who}
+              type="button"
+              onClick={() => setOpenReport(a.who)}
+              title="Read the report this auditor signed off"
+              className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100"
+            >
+              <User className="size-3" aria-hidden />
+              {a.who}
+            </button>
+          ))}
         </div>
+      )}
+      {openedAudit && (
+        <AuditReportDialog
+          open
+          onOpenChange={(next) => !next && setOpenReport(null)}
+          who={openedAudit.who}
+          verdict="approve"
+          {...(openedAudit.at ? { at: openedAudit.at } : {})}
+          {...(openedAudit.report ? { report: openedAudit.report } : {})}
+          {...(openedAudit.note ? { note: openedAudit.note } : {})}
+        />
       )}
     </div>
   );
