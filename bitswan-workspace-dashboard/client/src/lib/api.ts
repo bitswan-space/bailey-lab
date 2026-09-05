@@ -566,9 +566,9 @@ export interface BpHistoryEntry {
   source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup" | "secret"
   members: Record<string, BpHistoryMember>;
   /** Auditors who signed off the image this deploy promoted (production promotes
-   *  only) — {who, at, note}. Empty for unaudited deploys. Drives the "audited
+   *  only) — {who, at, note, report}. Empty for unaudited deploys. Drives the "audited
    *  by" badge on the history row. */
-  audit?: { who: string; at: string; note?: string | null }[];
+  audit?: { who: string; at: string; note?: string | null; report?: string | null }[];
   /** Present on secret-change events: the realm + a one-line summary. The value
    *  itself is never sent — only that it changed (this is a rollback point). */
   secret?: {

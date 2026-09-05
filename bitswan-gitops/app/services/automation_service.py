@@ -1956,13 +1956,17 @@ class AutomationService:
                         "status": status,
                         "source": source,
                         "members": members,
-                        # Auditors who approved this exact image — [{who,at,note}].
-                        # Empty when the image was never audited.
+                        # Auditors who approved this exact image —
+                        # [{who,at,note,report}]. The report travels with the
+                        # deploy record so the reasoning is still readable long
+                        # after the audit copy is gone. Empty when the image was
+                        # never audited.
                         "audit": [
                             {
                                 "who": e.get("who"),
                                 "at": e.get("at"),
                                 "note": e.get("note"),
+                                "report": e.get("report"),
                             }
                             for e in approvals
                         ],
@@ -2808,7 +2812,12 @@ class AutomationService:
             "approvals": len(approvals),
             "rejections": len(rejections),
             "approved_by": [
-                {"who": e.get("who"), "at": e.get("at"), "note": e.get("note")}
+                {
+                    "who": e.get("who"),
+                    "at": e.get("at"),
+                    "note": e.get("note"),
+                    "report": e.get("report"),
+                }
                 for e in approvals
             ],
             "audits_met": audits_met,

@@ -1621,7 +1621,7 @@ function DeploymentCard({
     entry.status !== 'failed' &&
     sameCommit(entry.source_commit, liveVersion);
   const audits = entry.audit ?? [];
-  // Which auditors' notes are expanded (badge is clickable to reveal the note).
+  // Which auditors' sign-offs are expanded (the chip reveals what they wrote).
   const [openNotes, setOpenNotes] = useState<Record<string, boolean>>({});
   const ver = entry.source_commit ?? entry.commit;
   const members = Object.entries(entry.members ?? {});
@@ -1739,7 +1739,7 @@ function DeploymentCard({
         )}
       </div>
       {/* Audited-by badges (production promotes): the auditor(s) who signed off
-          this image; each chip is clickable to reveal their note. */}
+          this image; each chip reveals the report they signed off. */}
       {audits.length > 0 && (
         <div className="flex flex-col gap-1.5 border-t border-border/60 pt-2.5">
           <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
@@ -1752,7 +1752,7 @@ function DeploymentCard({
                 key={a.who}
                 type="button"
                 onClick={() => setOpenNotes((o) => ({ ...o, [a.who]: !o[a.who] }))}
-                title="Show this auditor's note"
+                title="Show what this auditor signed off"
                 aria-expanded={!!openNotes[a.who]}
                 className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100"
               >
@@ -1766,7 +1766,7 @@ function DeploymentCard({
             .map((a) => (
               <div
                 key={a.who}
-                className="rounded-md border-l-2 border-emerald-300 bg-emerald-50/50 px-2.5 py-1.5 text-[12px]"
+                className="max-h-72 overflow-auto rounded-md border-l-2 border-emerald-300 bg-emerald-50/50 px-2.5 py-1.5 text-[12px]"
               >
                 <div className="text-[11px] font-medium text-foreground">
                   {a.who}
@@ -1778,7 +1778,7 @@ function DeploymentCard({
                   ) : null}
                 </div>
                 <div className="mt-0.5 whitespace-pre-wrap break-words text-muted-foreground">
-                  {a.note || 'Approved (no note left).'}
+                  {a.report || a.note || 'Approved without a report.'}
                 </div>
               </div>
             ))}

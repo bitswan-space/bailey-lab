@@ -3,7 +3,8 @@
 Promoting to production requires an auditor to freeze staging and sign off. The
 sign-off was the whole feature: a verdict and a note recorded against the
 image's content hash. An auditor had nowhere to *do* the audit — the workspace
-could show them a deployment history, but not the version under review.
+could show them a deployment history, but not the version under review — and
+the note was a summary of reasoning that lived nowhere.
 
 The first attempt at fixing that built an environment of its own: an extracted
 source tree, a diff file, a report file, a temporary container to read them
@@ -32,6 +33,21 @@ From there nothing is special:
 One audit copy per (image, auditor): two auditors reviewing the same image work
 in their own copies, and re-opening returns to the one already there.
 
+## The report is what gets signed
+
+Where a copy offers **Deploy**, an audit copy offers **Audit report**. The
+report is `<bp>/AUDIT.md` — an ordinary file, edited with the same editor the
+description uses, so the coding agent in the copy reads and writes it too. It
+is seeded when the audit opens, under the four headings that are the method:
+what this version changes, risk, verified, not verified.
+
+**Approve** and **Request changes** sit on that tab, on the report itself.
+Pressing one saves the document, reads it back, and records it *with* the
+verdict — in `bitswan.yaml`, keyed by the image's content hash, capped at 64 KiB
+so one audit cannot bloat a file every workspace operation reads. There is no
+note box: what is stored is the argument, and it is still readable from the
+staging gate and from the production deploy record long after the copy is gone.
+
 ## The two exits
 
 An audit ends in one of two places, and the banner says both:
@@ -55,7 +71,10 @@ names the deploy as a proposal.
   creating nothing: frozen or not, which version, whether they have a copy of
   it, and what they have changed in it.
 - `POST /copies/audit` — give them that copy, or return the one they have.
-- `AuditingBanner`, and an entry point in the Audits section.
+- `AuditingBanner`, an entry point in the Audits section, and the
+  `AuditReportTab` that takes Deploy's place.
+- `report` on a sign-off: stored by `record_audit`, surfaced on the gate's
+  `signoffs` and `approved_by`, and on each deploy record's `audit` entries.
 
 gitops owns the rules (admin/auditor, staging frozen, which commit is under
 audit) and resolves the auditor from the identity the gate verified. The

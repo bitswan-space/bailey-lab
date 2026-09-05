@@ -87,3 +87,15 @@ async def test_signing_off_still_needs_a_frozen_image(tmp_path, monkeypatch):
             "invoices", "approve", by="a@x", report=REPORT
         )
     assert ei.value.status_code == 409
+
+
+async def test_the_report_is_readable_from_the_gate_long_after(frozen, monkeypatch):
+    svc, tmp_path = frozen
+    monkeypatch.setattr(svc, "staging_content_sha", lambda bp: "abc123")
+    await svc.record_audit("invoices", "approve", by="auditor@x", report=REPORT)
+
+    gate = svc.read_staging_gate("invoices")
+    assert gate["signoffs"][0]["report"].startswith("# Audit")
+    # The production promote badge reads `approved_by`; an auditor looking back
+    # at a release should find the reasoning there, not only a name.
+    assert "approval threshold is a constant" in gate["approved_by"][0]["report"]
