@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { GitBranch, GitMerge, Loader2, Plus, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
 import { GetStartedTab } from '@/components/views/GetStartedTab';
@@ -12,7 +12,7 @@ import { ReadmeCard } from '@/components/workspace/ReadmeCard';
 import { SpecificationTab } from '@/components/workspace/SpecificationTab';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { api } from '@/lib/api';
+import { handOffToAgent } from '@/lib/agent-handoff';
 import { toast } from '@/lib/notify';
 import type { BpDivergence } from '@/lib/api';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
@@ -105,8 +105,6 @@ export function WorkspaceView({
   onTakeMain,
 }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
-  const [agentReloadNonce, setAgentReloadNonce] = useState(0);
-
   // Opening the agent, optionally with something to say. A running session has
   // no command for typing into it, so a prompt is handed over the only way the
   // extension offers: it is seeded for the panel's next load, and the panel is
@@ -115,10 +113,9 @@ export function WorkspaceView({
     (prompt?: string) => {
       onTab('agent');
       if (!prompt || !wt || !bp) return;
-      api
-        .seedAgentPrompt(wt.name, bp.name, prompt)
-        .then(() => setAgentReloadNonce((n) => n + 1))
-        .catch(() => toast.error('Couldn’t hand the prompt to the agent — type it yourself.'));
+      handOffToAgent(wt.name, bp.name, prompt).catch(() =>
+        toast.error('Couldn’t hand the prompt to the agent — type it yourself.'),
+      );
     },
     [onTab, wt, bp],
   );
@@ -162,7 +159,6 @@ export function WorkspaceView({
               bp={bp.name}
               branch={wt.branch || wt.name}
               tabVisible={tab === 'agent'}
-              agentReloadNonce={agentReloadNonce}
             />
           </div>
           <EnvironmentPanel bp={bp.name} copy={wt.name} />

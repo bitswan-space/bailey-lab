@@ -21,6 +21,7 @@ import {
   TakeVersionDialog,
   type TakeVersionSource,
 } from '@/components/workspace/TakeVersionDialog';
+import { handOffToAgent } from '@/lib/agent-handoff';
 import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { watchDeployTask } from '@/lib/deployBp';
@@ -495,16 +496,15 @@ function Shell() {
         if (res.status === 'needs_rebase') {
           toast.error(`${bpLabelForCopy}: ${res.message}`, { id, duration: 10000 });
           // Hand off to the Coding Agent on this copy to resolve the conflict.
-          // HANDING OFF MEANS GIVING IT THE TASK. Opening the tab was all this
-          // did, so the user arrived at an agent that had been told nothing,
-          // sitting at an empty prompt, with no way to know that finishing a
-          // rebase was now their job to describe. Both hand-offs sent a prompt
-          // until the terminal session layer was removed.
-          // REGRESSION, KNOWINGLY TAKEN: the prompt hand-off went with the
-          // terminal session layer. This opens the tab and tells the agent
-          // nothing, which is the state the paragraph above was written about.
-          // Restoring it needs a way to seed the hosted sidebar's composer.
+          // HANDING OFF MEANS GIVING IT THE TASK: the agent is opened with the
+          // rebase already described in its composer, so the user is not left
+          // in front of an agent that was told nothing.
           setCopy(copyName);
+          void handOffToAgent(
+            copyName,
+            bpDir,
+            `Pulling main into ${bpDir} stopped on a rebase conflict: ${res.message} Finish the rebase in this copy — resolve the conflicted files, keeping both sides' intent, and tell me what you decided.`,
+          ).catch(() => undefined);
           handleTab('agent');
           return;
         }
@@ -800,9 +800,13 @@ function Shell() {
         toast.error(`“${label}”: ${res.message}`, { id, duration: 10000 });
         if (bpId) {
           // The agent works inside the experiment, rebasing it onto the
-          // parent branch; the merge fast-forwards once it's done. The prompt
-          // that used to describe that task went with the terminal session
-          // layer, so the user has to ask for it themselves for now.
+          // parent branch; the merge fast-forwards once it's done. It is
+          // opened with that task already in its composer.
+          void handOffToAgent(
+            name,
+            bpId,
+            `Merging “${label}” back stopped on a rebase conflict: ${res.message} Rebase this experiment onto its parent branch here — resolve the conflicts, keep both sides' intent, and tell me what you decided. The merge fast-forwards once that is done.`,
+          ).catch(() => undefined);
         }
         handleTab('agent');
         return;
