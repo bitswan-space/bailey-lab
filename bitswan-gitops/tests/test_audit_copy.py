@@ -179,7 +179,8 @@ def test_the_report_is_seeded_with_the_two_exits(tmp_path):
     assert "abc12345" in written
     assert "9b72ebb34032" in written
     assert "Nothing you change here alters that image" in written
-    assert "starts a new version in Development" in written
+    assert "deploys a new version to" in written
+    assert "both on this tab" in written
 
 
 def test_seeding_never_overwrites_a_report_that_exists(tmp_path):

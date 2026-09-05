@@ -92,6 +92,9 @@ export type FlowTab =
   | 'get-started'
   | 'sync'
   | 'description'
+  // Only in an audit copy, where it takes Deploy's place: the report and the
+  // sign-off it argues for.
+  | 'audit'
   | 'agent'
   | 'requirements'
   | 'deploy'

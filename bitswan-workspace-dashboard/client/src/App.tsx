@@ -56,6 +56,7 @@ const FLOW_TABS: FlowTab[] = [
   'agent',
   'requirements',
   'deploy',
+  'audit',
   'deployments',
 ];
 
@@ -725,6 +726,9 @@ function Shell() {
   }, [tab, behindResolved, syncVisible, handleTab]);
   useEffect(() => {
     if (tab === 'deploy' && isMyExperiment) handleTab('description');
+    // Deploy is not a step in an audit copy — the Audit report took its place.
+    if (tab === 'deploy' && isMyAudit) handleTab('audit');
+    if (tab === 'audit' && !isMyAudit) handleTab('description');
   }, [tab, isMyExperiment, handleTab]);
 
   // Merge an experiment back into the copy it branched off. A clean merge
@@ -1039,6 +1043,7 @@ function Shell() {
         myCopy={myCopy}
         syncVisible={syncVisible}
         isMyExperiment={isMyExperiment}
+        isMyAudit={isMyAudit}
         tab={tab}
         onTab={handleTab}
         role={role}
@@ -1069,8 +1074,8 @@ function Shell() {
               ? handleEnterCopy(myCopy, 'Leaving the audit…')
               : undefined
           }
-          onGoToAudits={() => handleTab('deployments')}
-          onGoToDeploy={() => handleTab('deploy')}
+          onGoToAudits={() => handleTab('audit')}
+          onGoToDeploy={() => handleTab('audit')}
         />
       )}
       {wt && isMyExperiment && (
@@ -1114,6 +1119,8 @@ function Shell() {
         <WorkspaceView
           bp={bp}
           wt={wt}
+          meEmail={myEmail}
+          role={role}
           onEnterCopy={handleEnterCopy}
           copyCreating={copyCreating}
           addingBp={addingBp}

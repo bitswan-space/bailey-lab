@@ -2628,9 +2628,9 @@ built from. This copy holds it. Nothing you change here alters that image.
 
 ---
 
-Two ways out of this audit: sign this version off on the Audits tab, or fix
-what you found and deploy \u2014 which starts a new version in Development,
-with an audit of its own.
+Two ways out of this audit, both on this tab: sign this version off, or fix
+what you found and propose it \u2014 which deploys a new version to
+Development, with an audit of its own.
 """
         )
 

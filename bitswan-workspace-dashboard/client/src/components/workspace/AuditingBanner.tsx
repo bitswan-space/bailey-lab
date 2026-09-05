@@ -70,7 +70,7 @@ export function AuditingBanner({
         className="shrink-0 border-violet-400 bg-white text-violet-900 hover:bg-violet-100"
         onClick={onGoToAudits}
       >
-        Sign off
+        Open the audit report
       </Button>
       <Button
         size="sm"

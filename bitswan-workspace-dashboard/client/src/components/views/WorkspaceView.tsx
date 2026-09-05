@@ -2,6 +2,7 @@ import { GitBranch, GitMerge, Loader2, Plus, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
 import { GetStartedTab } from '@/components/views/GetStartedTab';
 import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
+import { AuditReportTab } from '@/components/views/AuditReportTab';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
 import { SyncTab } from '@/components/views/SyncTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
@@ -14,6 +15,10 @@ import type { BpDivergence } from '@/lib/api';
 import type { BusinessProcess, FlowTab, Copy } from '@/types';
 
 interface WorkspaceViewProps {
+  /** The signed-in user's email and role — the audit sign-off needs both. */
+  meEmail: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = unknown role
+  role: string | null;
   /** Enter a copy. An audit is opened in one, from the Audits section. */
   onEnterCopy: (name: string, label: string) => void;
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected
@@ -77,6 +82,8 @@ interface WorkspaceViewProps {
 export function WorkspaceView({
   bp,
   wt,
+  meEmail,
+  role,
   onEnterCopy,
   copyCreating = false,
   addingBp = null,
@@ -185,6 +192,26 @@ export function WorkspaceView({
           />
         ) : (
           <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="sync with main" />
+        ))}
+
+      {tab === 'audit' &&
+        (wt && bpInWt ? (
+          <AuditReportTab
+            bp={bp}
+            copy={wt.name}
+            wt={wt}
+            divergence={divergence}
+            divergenceError={divergenceError}
+            divergenceStale={divergenceStale}
+            onDeployed={() => onTab('deployments')}
+            role={role}
+            meEmail={meEmail}
+            onShowAgents={() => onTab('agent')}
+            editNonce={editNonce}
+            {...(onCopyEdited ? { onEdited: onCopyEdited } : {})}
+          />
+        ) : (
+          <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="audit" />
         ))}
 
       {tab === 'deploy' &&
