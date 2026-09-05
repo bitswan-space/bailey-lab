@@ -29,7 +29,7 @@ interface Props {
   copy: string;
   bp: string;
   /** Caller-controlled handler to flip the workspace to the Coding Agent tab. */
-  onShowAgents: () => void;
+  onShowAgents: (prompt?: string) => void;
 }
 
 type Filter = 'all' | ReqStatus;
@@ -199,11 +199,14 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  // "Write tests" / "Build automation" open the agent. They used to type a
-  // canned prompt into the terminal session first; the hosted sidebar exposes
-  // no command for injecting one, so they navigate and the user asks.
-  const onStartCanned = (_kind: 'write-tests' | 'automation') => {
-    onShowAgents();
+  // "Write tests" / "Build automation" open the agent with the ask already
+  // typed into its composer — the person reads it and presses send.
+  const onStartCanned = (kind: 'write-tests' | 'automation') => {
+    onShowAgents(
+      kind === 'write-tests'
+        ? `Write tests for ${bp} that cover the requirements in this business process, and run them.`
+        : `Build the automation for ${bp} from its requirements and description, staying inside this business process.`,
+    );
   };
 
   return (

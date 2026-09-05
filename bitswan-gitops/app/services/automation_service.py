@@ -13,7 +13,7 @@ import time
 import toml
 import uuid
 import yaml
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any, Callable
 from app.models import DeployedAutomation
@@ -48,6 +48,11 @@ from app.task_queue import current_requester
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+# An audit report is prose, and it is versioned in bitswan.yaml with the verdict
+# it justifies. Long enough for a real review, bounded so one audit cannot
+# bloat the state every workspace operation reads.
+MAX_AUDIT_REPORT_CHARS = 64 * 1024
 
 # Placeholder returned instead of a secret env value the caller may not see
 # (Inspect → env view). Masking happens HERE, server-side — the real value
@@ -1951,13 +1956,17 @@ class AutomationService:
                         "status": status,
                         "source": source,
                         "members": members,
-                        # Auditors who approved this exact image — [{who,at,note}].
-                        # Empty when the image was never audited.
+                        # Auditors who approved this exact image —
+                        # [{who,at,note,report}]. The report travels with the
+                        # deploy record so the reasoning is still readable long
+                        # after the audit copy is gone. Empty when the image was
+                        # never audited.
                         "audit": [
                             {
                                 "who": e.get("who"),
                                 "at": e.get("at"),
                                 "note": e.get("note"),
+                                "report": e.get("report"),
                             }
                             for e in approvals
                         ],
@@ -2305,6 +2314,17 @@ class AutomationService:
             cwd=clone,
         )
         return {"diff": out if rc == 0 else "", "from": from_sha, "to": to_sha}
+
+    def stage_source_commit(self, bp: str, stage: str) -> str | None:
+        """The source commit a stage is running. Members of one deployment share
+        it; when they disagree (a half-finished promotion) there is no single
+        version to audit, so say None rather than pick one."""
+        commits = {
+            (m or {}).get("source_commit")
+            for m in self._bp_stage_members(bp, stage).values()
+        }
+        commits.discard(None)
+        return commits.pop() if len(commits) == 1 else None
 
     def _bp_stage_members(self, bp: str, stage: str) -> dict:
         """The {deployment_id: {image, image_id}} map for a BP at a stage."""
@@ -2792,7 +2812,12 @@ class AutomationService:
             "approvals": len(approvals),
             "rejections": len(rejections),
             "approved_by": [
-                {"who": e.get("who"), "at": e.get("at"), "note": e.get("note")}
+                {
+                    "who": e.get("who"),
+                    "at": e.get("at"),
+                    "note": e.get("note"),
+                    "report": e.get("report"),
+                }
                 for e in approvals
             ],
             "audits_met": audits_met,
@@ -2855,6 +2880,10 @@ class AutomationService:
             rec["frozen_by"] = by or "unknown"
             rec["frozen_at"] = self._now_str()
             rec["frozen_sha"] = sha
+            rec["frozen_commit"] = self.stage_source_commit(bp, "staging")
+            rec["production_commit_at_freeze"] = self.stage_source_commit(
+                bp, "production"
+            )
             message = f"freeze staging {bp} @ {sha[:8]}"
             self._append_gate_log(
                 rec, "freeze", by, role, "Froze staging for audit", sha=sha
@@ -2880,6 +2909,8 @@ class AutomationService:
         rec["frozen_by"] = None
         rec["frozen_at"] = None
         rec["frozen_sha"] = None
+        rec["frozen_commit"] = None
+        rec["production_commit_at_freeze"] = None
         self._append_gate_log(rec, "unfreeze", by, self._role_of(by), reason)
         await self._persist_bp_state(
             bs, {bp}, bp, "audit", deployed_by=by, message=f"unfreeze staging {bp}"
@@ -2928,6 +2959,7 @@ class AutomationService:
         verdict: str,
         note: str | None = None,
         by: str | None = None,
+        report: str | None = None,
     ) -> dict:
         """Record one audit sign-off on the frozen staging IMAGE (admin/auditor
         only). `verdict` is 'approve' or 'reject' ("request changes"). Stored in
@@ -2961,6 +2993,11 @@ class AutomationService:
                 "verdict": verdict,
                 "at": self._now_str(),
                 "note": (note or "").strip() or None,
+                # The report the auditor wrote, stored WITH the verdict. A
+                # verdict on its own is a checkbox; what makes it evidence is
+                # the reasoning, and that has to still be there when the copy
+                # it was written in is long gone.
+                "report": (report or "").strip()[:MAX_AUDIT_REPORT_CHARS] or None,
             },
         )
         low = "approved" if verdict == "approve" else "requested changes on"
@@ -2976,8 +3013,12 @@ class AutomationService:
 
     @staticmethod
     def _now_str() -> str:
-        """Human timestamp for freeze/audit records, e.g. 'May 06, 2026 · 14:02'."""
-        return datetime.now().strftime("%b %d, %Y · %H:%M")
+        """When a freeze / policy change / sign-off happened, as an instant the
+        UI can actually render: ISO-8601 UTC, like every other timestamp on the
+        wire. It used to be a pre-formatted 'May 06, 2026 · 14:02', which no
+        date parser accepts — so every audit and freeze in the dashboard read
+        '—' instead of a time."""
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def _assert_promotable(self, bp: str, target_stage: str, by: str | None) -> None:
         """Enforce the freeze + audit gate for a promotion. Raises 403/409 with a

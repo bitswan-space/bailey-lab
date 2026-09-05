@@ -1,7 +1,9 @@
+import { useCallback } from 'react';
 import { GitBranch, GitMerge, Loader2, Plus, Rocket } from 'lucide-react';
 import { AgentFilesTab } from '@/components/views/AgentFilesTab';
 import { GetStartedTab } from '@/components/views/GetStartedTab';
 import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
+import { AuditReportTab } from '@/components/views/AuditReportTab';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
 import { SyncTab } from '@/components/views/SyncTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
@@ -10,10 +12,18 @@ import { ReadmeCard } from '@/components/workspace/ReadmeCard';
 import { SpecificationTab } from '@/components/workspace/SpecificationTab';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { handOffToAgent } from '@/lib/agent-handoff';
+import { toast } from '@/lib/notify';
 import type { BpDivergence } from '@/lib/api';
-import type { BusinessProcess, FlowTab, Copy } from '@/types';
+import type { BusinessProcess, Copy, EnterCopy, FlowTab } from '@/types';
 
 interface WorkspaceViewProps {
+  /** The signed-in user's email and role — the audit sign-off needs both. */
+  meEmail: string;
+  // eslint-disable-next-line no-restricted-syntax -- null = unknown role
+  role: string | null;
+  /** Enter a copy. An audit is opened in one, from the Audits section. */
+  onEnterCopy: EnterCopy;
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected
   bp: BusinessProcess | null;
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
@@ -75,6 +85,9 @@ interface WorkspaceViewProps {
 export function WorkspaceView({
   bp,
   wt,
+  meEmail,
+  role,
+  onEnterCopy,
   copyCreating = false,
   addingBp = null,
   tab,
@@ -92,6 +105,20 @@ export function WorkspaceView({
   onTakeMain,
 }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
+  // Opening the agent, optionally with something to say. A running session has
+  // no command for typing into it, so a prompt is handed over the only way the
+  // extension offers: it is seeded for the panel's next load, and the panel is
+  // reloaded. The person reads it and presses send.
+  const showAgents = useCallback(
+    (prompt?: string) => {
+      onTab('agent');
+      if (!prompt || !wt || !bp) return;
+      handOffToAgent(wt.name, bp.name, prompt).catch(() =>
+        toast.error('Couldn’t hand the prompt to the agent — type it yourself.'),
+      );
+    },
+    [onTab, wt, bp],
+  );
 
   // Orientation page — always reachable, even before any business process
   // exists (a brand-new operator opens here), so it precedes the empty state.
@@ -146,7 +173,7 @@ export function WorkspaceView({
         (bpInWt && wt ? (
           // Copy scope: the spec is editable — writes the copy's
           // README.md. Main scope below stays read-only (no write path).
-          <SpecificationTab bp={bp} copy={wt.name} onShowAgents={() => onTab('agent')} onSaved={onCopyEdited} />
+          <SpecificationTab bp={bp} copy={wt.name} onShowAgents={showAgents} onSaved={onCopyEdited} />
         ) : (
           <div className="flex-1 overflow-auto bg-background">
             <div className="mx-auto max-w-4xl px-7 py-6">
@@ -160,7 +187,7 @@ export function WorkspaceView({
           <RequirementsTab
             copy={wt.name}
             bp={bp.name}
-            onShowAgents={() => onTab('agent')}
+            onShowAgents={showAgents}
           />
         ) : (
           <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="manage requirements" />
@@ -184,6 +211,26 @@ export function WorkspaceView({
           <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="sync with main" />
         ))}
 
+      {tab === 'audit' &&
+        (wt && bpInWt ? (
+          <AuditReportTab
+            bp={bp}
+            copy={wt.name}
+            wt={wt}
+            divergence={divergence}
+            divergenceError={divergenceError}
+            divergenceStale={divergenceStale}
+            onDeployed={() => onTab('deployments')}
+            role={role}
+            meEmail={meEmail}
+            onShowAgents={showAgents}
+            editNonce={editNonce}
+            {...(onCopyEdited ? { onEdited: onCopyEdited } : {})}
+          />
+        ) : (
+          <CopyGate bp={bp} wt={wt} creating={copyCreating} adding={addingBp === bp.id} what="audit" />
+        ))}
+
       {tab === 'deploy' &&
         (wt && bpInWt ? (
           <SyncDeployTab
@@ -203,7 +250,7 @@ export function WorkspaceView({
 
       {tab === 'deployments' &&
         (bp.inMain ? (
-          <DeploymentsTab bp={bp} />
+          <DeploymentsTab bp={bp} onEnterCopy={onEnterCopy} />
         ) : (
           <CenteredNote
             icon={<GitMerge className="size-5 text-primary" aria-hidden />}
