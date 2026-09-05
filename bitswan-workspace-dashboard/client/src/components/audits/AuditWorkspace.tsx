@@ -45,7 +45,10 @@ export function AuditWorkspace({ bp, onEnterCopy }: AuditWorkspaceProps) {
     });
     try {
       const opened = await work;
-      onEnterCopy(opened.name, 'Opening the code for auditing…', { landOn: 'agent' });
+      onEnterCopy(opened.name, 'Opening the code for auditing…', {
+        landOn: 'agent',
+        landOnView: 'files',
+      });
     } catch {
       /* toast handled */
     } finally {

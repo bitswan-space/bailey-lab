@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { signInThroughGate } from './gated.js';
+import { signInThroughGate, stagingIsFrozen } from './gated.js';
 
 const AUDITS =
   'https://playground-dashboard.tims-dev-server.bswn.io/?bp=test&copy=timothy-hobbs-harmonum-ai' +
@@ -11,6 +11,11 @@ test('the audit is one door in, and the sign-off lives beside the report', async
 
   // The Audits section keeps the record and one way in — no sign-off form, no
   // explainer about where the audit happens.
+  test.skip(
+    !(await stagingIsFrozen(page)),
+    'staging is not frozen on the playground, so there is no image under audit',
+  );
+
   const door = d.getByRole('button', { name: /Open the code for auditing/i }).first();
   await door.waitFor({ state: 'visible', timeout: 120_000 });
   await expect(d.getByText(/Add your audit|Update your audit/i)).toHaveCount(0);

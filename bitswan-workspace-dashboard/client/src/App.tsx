@@ -349,9 +349,12 @@ function Shell() {
 
   // Switching tabs drops the previous page's scoped params so the URL stays
   // a clean, faithful description of what's on screen.
-  const handleTab = useCallback((next: FlowTab) => {
+  const handleTab = useCallback((next: FlowTab, page?: Record<string, string>) => {
     setTab(next);
-    setUrlParams(Object.fromEntries(PAGE_SCOPED_PARAMS.map((k) => [k, null])));
+    setUrlParams({
+      ...Object.fromEntries(PAGE_SCOPED_PARAMS.map((k) => [k, null])),
+      ...(page ?? {}),
+    });
   }, []);
 
 
@@ -1019,7 +1022,7 @@ function Shell() {
       // Where the caller wants to arrive, before anything can bail out: a
       // door that opens the code has to open it even when the copy behind it
       // is the one already in view.
-      if (opts?.landOn) handleTab(opts.landOn);
+      if (opts?.landOn) handleTab(opts.landOn, opts.landOnView ? { sub: opts.landOnView } : undefined);
       const after = opts?.after;
       if (name === copy && !after) return;
       uiLock.lock(label, BUSY_TIMEOUT_SWITCH_MS, name);

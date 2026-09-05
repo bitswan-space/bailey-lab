@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { signInThroughGate } from './gated.js';
+import { signInThroughGate, stagingIsFrozen } from './gated.js';
 
 const AUDITS =
   'https://playground-dashboard.tims-dev-server.bswn.io/?bp=test&copy=timothy-hobbs-harmonum-ai' +
@@ -8,6 +8,11 @@ const AUDITS =
 test('an auditor opens the audit and lands in a copy of the audited version', async ({ page }) => {
   await signInThroughGate(page, AUDITS);
   const d = page.frameLocator('iframe').first();
+
+  test.skip(
+    !(await stagingIsFrozen(page)),
+    'staging is not frozen on the playground, so there is no image under audit',
+  );
 
   const open = d.getByRole('button', { name: /Open the code for auditing/i }).first();
   await open.waitFor({ state: 'visible', timeout: 120_000 });

@@ -102,10 +102,11 @@ export type FlowTab =
 
 /** Enter a copy: the transition every copy switch goes through. `after` is
  *  work the destination is not usable without (a business process being
- *  cloned into it), and `landOn` is where to arrive — the audit door opens
- *  the code, not the page the button was on. */
+ *  cloned into it). `landOn` is where to arrive and `landOnView` the sub-view
+ *  inside it — the audit door opens the code, not the page the button was on,
+ *  and not the chat next to it either. */
 export type EnterCopy = (
   name: string,
   label: string,
-  opts?: { after?: () => Promise<void>; landOn?: FlowTab },
+  opts?: { after?: () => Promise<void>; landOn?: FlowTab; landOnView?: string },
 ) => void;
