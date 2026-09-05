@@ -300,7 +300,7 @@ export const MANUAL = {
       slots: [
         { id: 'freeze-staging', label: 'Live capture', caption: 'Freeze staging \u00b7 an auditor locks the staging image for review \u2014 dev \u2192 staging is closed until it is unfrozen' },
         { id: 'audit-open', label: 'Live capture', caption: 'Audits \u00b7 the audit opens in a copy of the exact version the frozen image was built from' },
-        { id: 'audit-copy', label: 'Live capture', caption: 'Auditing \u00b7 a copy like any other \u2014 the agent, the files and the diff \u2014 holding the version under audit; changing it proposes a new version rather than approving this one' },
+        { id: 'audit-copy', label: 'Live capture', caption: 'Auditing \u00b7 a copy like any other, holding the exact version under audit \u2014 here its file explorer; the coding agent and the diff are in it too, and changing anything proposes a new version rather than approving this one' },
         { id: 'audit-report', label: 'Live capture', caption: 'Audit report \u00b7 a file in the business process, written with the same editor as anything else and versioned with the copy' },
         { id: 'audit-signoff', label: 'Live capture', caption: 'Audit sign-off \u00b7 Approve and Request changes sit on the report itself \u2014 there is no separate box to fill in, and the verdict is stored with the report that argued for it' },
         { id: 'audit-log', label: 'Live capture', caption: 'Audit log \u00b7 every verdict recorded with who, when and the report they signed off \u2014 persisted in bitswan.yaml' },

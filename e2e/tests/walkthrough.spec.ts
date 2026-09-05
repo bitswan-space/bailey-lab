@@ -2615,6 +2615,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await openAudit.click();
     const auditingBanner = d.getByText(/You are auditing/i).first();
     await auditingBanner.waitFor({ state: 'visible', timeout: 3 * 60_000 });
+    // Show what an audit copy actually is: the version under audit, in the file
+    // explorer every copy has. Best-effort — the banner above is the assertion,
+    // this is the picture.
+    try {
+      await clickTopTab(/Coding Agent/i);
+      await d.getByRole('button', { name: /^Files$/ }).first().click({ timeout: 30_000 });
+      await d.getByText('README.md', { exact: false }).first().waitFor({ timeout: 60_000 });
+    } catch {
+      /* leave the shot on whatever the copy is showing */
+    }
     await capture(dashPage, 'audit-copy');
 
     // The report is a file in the business process, seeded when the audit
