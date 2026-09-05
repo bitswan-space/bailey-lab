@@ -29,7 +29,7 @@ import { SessionExpiredError } from '@/lib/session';
 import { useBpDivergence } from '@/hooks/useBpDivergence';
 import { useBpLabel } from '@/hooks/useBpLabel';
 import { getUrlParam, setUrlParams } from '@/lib/urlState';
-import type { BusinessProcess, Copy, FlowTab } from '@/types';
+import type { BusinessProcess, Copy, EnterCopy, FlowTab } from '@/types';
 
 export function App() {
   return (
@@ -353,6 +353,7 @@ function Shell() {
     setTab(next);
     setUrlParams(Object.fromEntries(PAGE_SCOPED_PARAMS.map((k) => [k, null])));
   }, []);
+
 
   // A just-created BP: its name is selected optimistically the instant the
   // create call returns, but it isn't in the `processes` SSE snapshot yet. The
@@ -734,7 +735,9 @@ function Shell() {
     // Deploy is not a step in an audit copy — the Audit report took its place.
     if (tab === 'deploy' && isMyAudit) handleTab('audit');
     if (tab === 'audit' && !isMyAudit) handleTab('description');
-  }, [tab, isMyExperiment, handleTab]);
+    // isMyAudit belongs in the deps: entering an audit copy changes it without
+    // changing the tab, and without it the redirect off Deploy never ran.
+  }, [tab, isMyExperiment, isMyAudit, handleTab]);
 
   // Merge an experiment back into the copy it branched off. A clean merge
   // fast-forwards the parent branch and redeploys the parent's live-dev; a
@@ -1011,8 +1014,13 @@ function Shell() {
   // Move to another copy — a colleague's, one of your experiments, or back to
   // your own. The destination already exists, so the only thing the lock waits
   // for is any business process being materialized into it on the way.
-  const handleEnterCopy = useCallback(
-    (name: string, label: string, after?: () => Promise<void>) => {
+  const handleEnterCopy = useCallback<EnterCopy>(
+    (name, label, opts) => {
+      // Where the caller wants to arrive, before anything can bail out: a
+      // door that opens the code has to open it even when the copy behind it
+      // is the one already in view.
+      if (opts?.landOn) handleTab(opts.landOn);
+      const after = opts?.after;
       if (name === copy && !after) return;
       uiLock.lock(label, BUSY_TIMEOUT_SWITCH_MS, name);
       setCopy(name);
@@ -1025,7 +1033,7 @@ function Shell() {
       // only cares that it is over.
       void after().finally(() => uiLock.settling());
     },
-    [copy, uiLock],
+    [copy, uiLock, handleTab],
   );
 
   const isLoading = processes === null;

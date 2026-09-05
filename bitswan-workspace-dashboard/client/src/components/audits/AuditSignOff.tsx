@@ -18,6 +18,7 @@ import { AuditWorkspace } from './AuditWorkspace';
 import { formatRelative } from '@/lib/format-date';
 import { cn } from '@/lib/utils';
 import { RelativeTime } from '@/components/shared/RelativeTime';
+import type { EnterCopy } from '@/types';
 import type { StagingLogEntry, StagingSignoff } from '@/lib/api';
 
 /** Whether a role may freeze staging, edit the audit policy, and sign off. */
@@ -46,7 +47,7 @@ export function AuditSignOff({
   role: string | null;
   meEmail: string;
   onChange: () => void;
-  onEnterCopy: (name: string, label: string) => void;
+  onEnterCopy: EnterCopy;
 }) {
   const canAudit = isAuditor(role);
   const roleKnown = role !== null;

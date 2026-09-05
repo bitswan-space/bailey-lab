@@ -18,7 +18,7 @@ import { useCopyIdentities } from '@/lib/identity';
 import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { cn } from '@/lib/utils';
-import type { BusinessProcess, Copy } from '@/types';
+import type { BusinessProcess, Copy, EnterCopy } from '@/types';
 
 export interface AdvancedMenuProps {
   copies: Copy[];
@@ -37,7 +37,7 @@ export interface AdvancedMenuProps {
   selectedBp: BusinessProcess | null;
   /** Move to another copy with the interface locked until it is renderable.
    *  `after` is work that must finish before the lock lifts. */
-  onEnterCopy: (name: string, label: string, after?: () => Promise<void>) => void;
+  onEnterCopy: EnterCopy;
   onSelectBp: (id: string) => void;
   /** Start an experiment on the business process in view (the shell owns the
    *  request and the lock; this menu only opens the dialog). */
@@ -167,8 +167,9 @@ export function AdvancedMenu({
       onEnterCopy(name, label);
       return;
     }
-    onEnterCopy(name, label, () =>
-      api.copyFiles
+    onEnterCopy(name, label, {
+      after: () =>
+        api.copyFiles
         .ensureBp(name, bpName)
         .then(() => undefined)
         .catch((err: unknown) => {
@@ -191,8 +192,8 @@ export function AdvancedMenu({
               { duration: 8000 },
             );
           }
-        }),
-    );
+          }),
+    });
   };
 
   const sectionLabel = (text: string) => (

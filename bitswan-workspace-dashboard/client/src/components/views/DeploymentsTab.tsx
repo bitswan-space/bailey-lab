@@ -98,7 +98,7 @@ import { cn } from '@/lib/utils';
 import { RelativeTime } from '@/components/shared/RelativeTime';
 import { formatAbsolute, formatRelative } from '@/lib/format-date';
 import { setUrlParams, useUrlEnum, useUrlParam } from '@/lib/urlState';
-import type { BusinessProcess, SnapshotStage } from '@/types';
+import type { BusinessProcess, EnterCopy, SnapshotStage } from '@/types';
 import { StageSnapshotsSection } from '@/components/views/StageSnapshotsSection';
 import { ObjectBrowser } from '@/components/data-explorer/ObjectBrowser';
 import { SqlExplorer } from '@/components/data-explorer/SqlExplorer';
@@ -1803,7 +1803,7 @@ export function DeploymentsTab({
 }: {
   bp: BusinessProcess;
   /** Enter a copy — the audit opens in one. */
-  onEnterCopy: (name: string, label: string) => void;
+  onEnterCopy: EnterCopy;
 }) {
   const { automations } = useAutomations();
   // Stage, section, the open Inspect modal and the rollback confirmation all

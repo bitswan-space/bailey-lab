@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { FolderOpen, Loader2 } from 'lucide-react';
 import { api, errorMessage, type AuditState } from '@/lib/api';
 import { toast } from '@/lib/notify';
+import type { EnterCopy } from '@/types';
 
 export interface AuditWorkspaceProps {
   bp: string;
   /** Enter the audit copy — the same copy switch the rest of the app uses. */
-  onEnterCopy: (copy: string, message: string) => void;
+  onEnterCopy: EnterCopy;
 }
 
 /**
@@ -44,7 +45,7 @@ export function AuditWorkspace({ bp, onEnterCopy }: AuditWorkspaceProps) {
     });
     try {
       const opened = await work;
-      onEnterCopy(opened.name, 'Opening the code for auditing…');
+      onEnterCopy(opened.name, 'Opening the code for auditing…', { landOn: 'agent' });
     } catch {
       /* toast handled */
     } finally {

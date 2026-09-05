@@ -21,7 +21,7 @@ import { RenameBusinessProcessDialog } from '@/components/workspace/RenameBusine
 import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { cn } from '@/lib/utils';
-import type { BusinessProcess, FlowTab, Copy } from '@/types';
+import type { BusinessProcess, Copy, EnterCopy, FlowTab } from '@/types';
 
 type Role = 'admin' | 'auditor' | 'member';
 const ROLE_META: Record<Role, { label: string; cls: string; hint: string }> = {
@@ -60,7 +60,7 @@ interface TopNavProps {
   copies: Copy[];
   /** Move to another copy WITH the interface locked until the destination is
    *  fully renderable — the only way the chrome should ever change copy. */
-  onEnterCopy: (name: string, label: string, after?: () => Promise<void>) => void;
+  onEnterCopy: EnterCopy;
   /** Start an experiment on a business process. Owned by the shell (it is a
    *  copy transition, not a dialog's private business). */
   onStartExperiment: (title: string, bp: BusinessProcess) => void;

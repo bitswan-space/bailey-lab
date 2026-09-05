@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils';
 import { handOffToAgent } from '@/lib/agent-handoff';
 import { toast } from '@/lib/notify';
 import type { BpDivergence } from '@/lib/api';
-import type { BusinessProcess, FlowTab, Copy } from '@/types';
+import type { BusinessProcess, Copy, EnterCopy, FlowTab } from '@/types';
 
 interface WorkspaceViewProps {
   /** The signed-in user's email and role — the audit sign-off needs both. */
@@ -23,7 +23,7 @@ interface WorkspaceViewProps {
   // eslint-disable-next-line no-restricted-syntax -- null = unknown role
   role: string | null;
   /** Enter a copy. An audit is opened in one, from the Audits section. */
-  onEnterCopy: (name: string, label: string) => void;
+  onEnterCopy: EnterCopy;
   // eslint-disable-next-line no-restricted-syntax -- null = no BP selected
   bp: BusinessProcess | null;
   // eslint-disable-next-line no-restricted-syntax -- null = no copy selected
