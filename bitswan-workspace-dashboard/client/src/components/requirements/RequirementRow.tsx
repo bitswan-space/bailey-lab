@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { Loader2, Pencil, Play, Plus, Trash2 } from 'lucide-react';
+import { Check, Loader2, Pencil, Play, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Requirement } from '@/lib/api';
-import { StatusBadge, nextStatus } from './StatusBadge';
+import { StatusBadge } from './StatusBadge';
 
 interface Props {
   req: Requirement;
@@ -14,7 +14,10 @@ interface Props {
    */
   editOnMount?: boolean;
   onEditDone?: () => void;
-  onCycleStatus: () => void;
+  /** Accept an AI- proposal into the contract (`proposed` → `pending`). */
+  onAcceptProposal: () => void;
+  /** Put a passing requirement back in front of the agent (`pass` → `retest`). */
+  onSendBack: () => void;
   onUpdateDescription: (text: string) => void;
   onAddChild: () => void;
   onDelete: () => void;
@@ -34,7 +37,8 @@ export function RequirementRow({
   depth,
   editOnMount,
   onEditDone,
-  onCycleStatus,
+  onAcceptProposal,
+  onSendBack,
   onUpdateDescription,
   onAddChild,
   onDelete,
@@ -94,7 +98,7 @@ export function RequirementRow({
         <span className="font-mono text-[11px] font-semibold text-foreground">{req.id}</span>
       </div>
       <div className="flex w-16 shrink-0 items-center pt-0.5">
-        <StatusBadge status={req.status} onClick={onCycleStatus} />
+        <StatusBadge status={req.status} />
       </div>
       <div className="min-w-0 flex-1 pt-0.5">
         {editing ? (
@@ -130,6 +134,27 @@ export function RequirementRow({
         )}
       </div>
       <div className="flex w-[140px] shrink-0 items-center justify-end gap-0.5 pt-0.5 opacity-70 transition-opacity group-hover:opacity-100">
+        {/* The two status changes a person can honestly make (#448). Neither is
+            shown where it would not apply: a proposal is accepted, a passing
+            requirement is sent back to be re-checked. `pass` and `fail` are the
+            last test run's verdict and are no longer settable by hand. */}
+        {req.status === 'proposed' && (
+          <IconButton
+            title="Accept this proposal — it joins the contract and gets tested"
+            onClick={onAcceptProposal}
+            className="hover:text-green-700"
+          >
+            <Check className="size-3.5" />
+          </IconButton>
+        )}
+        {req.status === 'pass' && (
+          <IconButton
+            title="Send back to be re-checked — the agent picks it up again"
+            onClick={onSendBack}
+          >
+            <RotateCcw className="size-3.5" />
+          </IconButton>
+        )}
         <IconButton title="Edit description" onClick={() => setEditing(true)}>
           <Pencil className="size-3.5" />
         </IconButton>

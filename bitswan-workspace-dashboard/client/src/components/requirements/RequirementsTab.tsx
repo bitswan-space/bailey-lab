@@ -20,7 +20,6 @@ import {
 } from '@/components/ui/tooltip';
 import { useRequirements } from '@/hooks/useRequirements';
 import { useSessions } from '@/components/agents/SessionProvider';
-import { nextStatus } from './StatusBadge';
 import { RequirementsTable } from './RequirementsTable';
 import { useUrlEnum, useUrlParam } from '@/lib/urlState';
 import { cn } from '@/lib/utils';
@@ -127,14 +126,19 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  const onCycleStatus = async (r: Requirement) => {
-    const target = nextStatus(r.status);
+  // #448: two intent-named actions instead of cycling the badge through all
+  // five states. `pass` and `fail` are the last test run's verdict and are not
+  // settable by hand here; `proposed` is the agent's and is accepted or
+  // deleted, not cycled.
+  const setStatus = async (r: Requirement, status: ReqStatus, what: string) => {
     try {
-      await update(r.id, { status: target });
+      await update(r.id, { status });
     } catch (err) {
-      toast.error(`Failed to update status: ${String(err)}`);
+      toast.error(`Failed to ${what}: ${String(err)}`);
     }
   };
+  const onAcceptProposal = (r: Requirement) => setStatus(r, 'pending', 'accept the proposal');
+  const onSendBack = (r: Requirement) => setStatus(r, 'retest', 'send it back to be re-checked');
 
   const onUpdateDescription = async (r: Requirement, text: string) => {
     try {
@@ -344,7 +348,8 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
           loading={loading}
           pendingEditId={pendingEditId}
           onEditDone={() => setPendingEditId(null)}
-          onCycleStatus={onCycleStatus}
+          onAcceptProposal={onAcceptProposal}
+          onSendBack={onSendBack}
           onUpdateDescription={onUpdateDescription}
           onAddChild={(parent) => void onNew(parent)}
           onAddRoot={() => void onNew()}
