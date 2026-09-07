@@ -166,16 +166,20 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   // five states. `pass` and `fail` are the last test run's verdict and are not
   // settable by hand here; `proposed` is the agent's and is accepted or
   // deleted, not cycled.
-  const setStatus = async (r: Requirement, status: ReqStatus, what: string) => {
+  // Returns false when the write failed, so callers don't record a send-back
+  // (or forget one) on the strength of a status change that never landed.
+  const setStatus = async (r: Requirement, status: ReqStatus, what: string): Promise<boolean> => {
     try {
       await update(r.id, { status });
+      return true;
     } catch (err) {
       toast.error(`Failed to ${what}: ${String(err)}`);
+      return false;
     }
   };
   const onAcceptProposal = (r: Requirement) => setStatus(r, 'pending', 'accept the proposal');
   const onSendBack = async (r: Requirement) => {
-    await setStatus(r, 'retest', 'send it back to be re-checked');
+    if (!(await setStatus(r, 'retest', 'send it back to be re-checked'))) return;
     // Sending back is the one status change with no way back through the UI:
     // `retest` offers nothing, and Run test — the only other route to `pass` —
     // is disabled for a requirement that has no test yet. So the row keeps an
@@ -186,12 +190,11 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   };
 
   const onUndoSendBack = async (r: Requirement) => {
-    await setStatus(r, 'pass', 'undo');
+    if (!(await setStatus(r, 'pass', 'undo'))) return;
     const next = new Set(sentBack);
     next.delete(r.id);
     rememberSentBack(next);
   };
-
 
   const onUpdateDescription = async (r: Requirement, text: string) => {
     try {
