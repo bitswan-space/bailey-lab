@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { Check, Loader2, Pencil, Play, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { Check, Loader2, Pencil, Play, Plus, RotateCcw, Trash2, Undo2 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Requirement } from '@/lib/api';
 import { StatusBadge } from './StatusBadge';
@@ -18,6 +18,10 @@ interface Props {
   onAcceptProposal: () => void;
   /** Put a passing requirement back in front of the agent (`pass` → `retest`). */
   onSendBack: () => void;
+  /** Revert a send-back this person just made (`retest` → `pass`). */
+  onUndoSendBack: () => void;
+  /** True only while this row is still `retest` AND this person sent it back. */
+  canUndoSendBack: boolean;
   onUpdateDescription: (text: string) => void;
   onAddChild: () => void;
   onDelete: () => void;
@@ -39,6 +43,8 @@ export function RequirementRow({
   onEditDone,
   onAcceptProposal,
   onSendBack,
+  onUndoSendBack,
+  canUndoSendBack,
   onUpdateDescription,
   onAddChild,
   onDelete,
@@ -97,8 +103,27 @@ export function RequirementRow({
       <div className="flex w-[70px] shrink-0 items-center pt-0.5">
         <span className="font-mono text-[11px] font-semibold text-foreground">{req.id}</span>
       </div>
-      <div className="flex w-16 shrink-0 items-center pt-0.5">
+      {/* Undo sits beside the badge, not in a toast: it belongs to the row whose
+          state it would change, and it disappears on its own the moment that
+          state moves on (a test ran, someone else touched it). */}
+      <div className="flex w-24 shrink-0 items-center gap-1 pt-0.5">
         <StatusBadge status={req.status} />
+        {canUndoSendBack && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={onUndoSendBack}
+                className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <Undo2 className="size-3" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              Undo — put it back to <b>pass</b> as the tests left it
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
       <div className="min-w-0 flex-1 pt-0.5">
         {editing ? (

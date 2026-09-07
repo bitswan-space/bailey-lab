@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FlaskConical, Loader2, Play, Search, X } from 'lucide-react';
 import { toast } from '@/lib/notify';
 import {
@@ -63,6 +63,42 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     runTests,
   } = useRequirements(copy, bp);
   const { sendPrompt } = useSessions();
+  // Ids this person sent back, per (copy, bp). The row offers Undo only for
+  // these: any other `retest` row was put there by a test run, the agent, or
+  // somebody else, and offering to mark it `pass` would be the hand-set verdict
+  // this control exists to avoid — not an undo.
+  //
+  // Persisted, because component state made the button vanish on reload — which
+  // silently restored the dead end it exists to remove. No expiry: the row's own
+  // status is the lifetime. While it is still `retest` the send-back stands and
+  // undoing it is still meaningful; the moment a test run or anyone else moves
+  // it, `canUndoSendBack` goes false and the stored id is pruned on next read.
+  // localStorage, so it is this browser's memory of its own action — a colleague
+  // does not see an Undo for something they did not do.
+  const sentBackKey = `dashboard.requirements.sentBack.${copy}.${bp}`;
+  const [sentBack, setSentBack] = useState<ReadonlySet<string>>(() => readSentBack(sentBackKey));
+  const rememberSentBack = useCallback(
+    (next: ReadonlySet<string>) => {
+      setSentBack(next);
+      writeSentBack(sentBackKey, next);
+    },
+    [sentBackKey],
+  );
+  // Prune ids that have moved off `retest` — a test ran, or somebody else
+  // changed it — so the store doesn't grow for the life of the browser and a
+  // requirement sent back, re-passed and sent back again isn't offered a stale
+  // Undo. Runs on every list refresh; a no-op when nothing needs dropping.
+  useEffect(() => {
+    if (sentBack.size === 0 || requirements.length === 0) return;
+    const live = new Set(
+      requirements.filter((r) => r.status === 'retest').map((r) => r.id),
+    );
+    const kept = [...sentBack].filter((id) => live.has(id));
+    if (kept.length === sentBack.size) return;
+    const next = new Set(kept);
+    setSentBack(next);
+    writeSentBack(sentBackKey, next);
+  }, [requirements, sentBack, sentBackKey]);
 
   // Search term and status filter live in the URL so a filtered view is
   // deep-linkable (?filter=fail&q=auth).
@@ -138,7 +174,24 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
   const onAcceptProposal = (r: Requirement) => setStatus(r, 'pending', 'accept the proposal');
-  const onSendBack = (r: Requirement) => setStatus(r, 'retest', 'send it back to be re-checked');
+  const onSendBack = async (r: Requirement) => {
+    await setStatus(r, 'retest', 'send it back to be re-checked');
+    // Sending back is the one status change with no way back through the UI:
+    // `retest` offers nothing, and Run test — the only other route to `pass` —
+    // is disabled for a requirement that has no test yet. So the row keeps an
+    // Undo for as long as it is still `retest`, rather than a dialog guarding
+    // the way in: a confirm would tax every deliberate use to catch the rare
+    // misclick, and would not help the person who changes their mind after.
+    rememberSentBack(new Set(sentBack).add(r.id));
+  };
+
+  const onUndoSendBack = async (r: Requirement) => {
+    await setStatus(r, 'pass', 'undo');
+    const next = new Set(sentBack);
+    next.delete(r.id);
+    rememberSentBack(next);
+  };
+
 
   const onUpdateDescription = async (r: Requirement, text: string) => {
     try {
@@ -350,6 +403,8 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
           onEditDone={() => setPendingEditId(null)}
           onAcceptProposal={onAcceptProposal}
           onSendBack={onSendBack}
+          onUndoSendBack={onUndoSendBack}
+          sentBack={sentBack}
           onUpdateDescription={onUpdateDescription}
           onAddChild={(parent) => void onNew(parent)}
           onAddRoot={() => void onNew()}
@@ -390,4 +445,27 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     </div>
     </TooltipProvider>
   );
+}
+
+
+// eslint-disable-next-line no-restricted-syntax -- localStorage parse boundary
+function readSentBack(key: string): ReadonlySet<string> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+// eslint-disable-next-line no-restricted-syntax -- localStorage write boundary
+function writeSentBack(key: string, ids: ReadonlySet<string>): void {
+  try {
+    if (ids.size === 0) localStorage.removeItem(key);
+    else localStorage.setItem(key, JSON.stringify([...ids]));
+  } catch {
+    // ignore quota / unavailable — Undo is a convenience, not state of record
+  }
 }

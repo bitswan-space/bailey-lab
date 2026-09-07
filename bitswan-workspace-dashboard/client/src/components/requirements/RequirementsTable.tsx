@@ -12,6 +12,9 @@ interface Props {
   onEditDone: () => void;
   onAcceptProposal: (req: Requirement) => void;
   onSendBack: (req: Requirement) => void;
+  onUndoSendBack: (req: Requirement) => void;
+  /** Ids this person sent back in this tab — the only rows offered Undo. */
+  sentBack: ReadonlySet<string>;
   onUpdateDescription: (req: Requirement, text: string) => void;
   onAddChild: (parent: Requirement) => void;
   /** Create a new root-level requirement (the dashed add-row at the bottom). */
@@ -60,6 +63,8 @@ export function RequirementsTable({
   onEditDone,
   onAcceptProposal,
   onSendBack,
+  onUndoSendBack,
+  sentBack,
   onUpdateDescription,
   onAddChild,
   onAddRoot,
@@ -96,6 +101,8 @@ export function RequirementsTable({
             onEditDone={onEditDone}
             onAcceptProposal={() => onAcceptProposal(req)}
             onSendBack={() => onSendBack(req)}
+            onUndoSendBack={() => onUndoSendBack(req)}
+            canUndoSendBack={req.status === 'retest' && sentBack.has(req.id)}
             onUpdateDescription={(text) => onUpdateDescription(req, text)}
             onAddChild={() => onAddChild(req)}
             onDelete={() => onDelete(req)}
