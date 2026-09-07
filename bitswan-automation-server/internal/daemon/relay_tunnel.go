@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
@@ -28,10 +29,29 @@ func relayLocalTarget() string {
 	return "traefik:443"
 }
 
-// startRelayTunnel launches the reverse-proxy tunnel client when this server is
-// on the relay path (force-proxy config OR the AOC reports it proxied). It is a
-// no-op otherwise, and idempotent — safe to call both at daemon startup and
-// again from register once the AOC has provisioned the proxy path.
+// relayTunnelStarter lets the gate's publish handler bring the tunnel up. The
+// gate is free functions all the way down (its tests call them directly), so
+// the running daemon leaves its starter here rather than threading a *Server
+// through it.
+var relayTunnelStarter atomic.Value // func()
+
+func setRelayTunnelStarter(start func()) { relayTunnelStarter.Store(start) }
+
+// ensureRelayTunnel starts the tunnel if this server now needs one. Safe before
+// the daemon has registered a starter (nothing to start yet) and idempotent
+// afterwards.
+func ensureRelayTunnel() {
+	if start, ok := relayTunnelStarter.Load().(func()); ok && start != nil {
+		start()
+	}
+}
+
+// startRelayTunnel launches the reverse-proxy tunnel client when this server
+// needs one: its own domain is reached through the relay (force-proxy config OR
+// the AOC reports it proxied), or it has published a public endpoint, whose host
+// lives in the AOC's namespace and is served through the relay however this
+// server's own domain resolves. It is a no-op otherwise, and idempotent — safe
+// to call at daemon startup, from register, and after a publish.
 func (s *Server) startRelayTunnel() {
 	s.relayMu.Lock()
 	if s.relayStarted {
@@ -75,13 +95,20 @@ func (s *Server) startRelayTunnel() {
 			fmt.Printf("relay: could not fetch relay info from AOC: %v\n", ierr)
 			return
 		}
-		if !info.Proxied {
+		// A directly-addressed server keeps its own DNS and its own ingress;
+		// the tunnel it holds here carries nothing but its published hosts.
+		published := hasPublishedEndpoints()
+		if !info.Proxied && !published {
 			s.relayMu.Unlock()
-			return // AOC says this server is directly addressed — no tunnel
+			return // directly addressed and publishing nothing — no tunnel
 		}
 		if info.RelayAddr == "" || info.RelayFingerprint == "" {
 			s.relayMu.Unlock()
-			fmt.Printf("relay: AOC marks this server proxied but advertises no relay endpoint; cannot start tunnel\n")
+			reason := "marks this server proxied"
+			if !info.Proxied {
+				reason = "has a published endpoint for this server"
+			}
+			fmt.Printf("relay: AOC %s but advertises no relay endpoint; cannot start tunnel\n", reason)
 			return
 		}
 		relayAddr, relayFingerprint = info.RelayAddr, info.RelayFingerprint
@@ -99,8 +126,7 @@ func (s *Server) startRelayTunnel() {
 	s.relayStarted = true
 	s.relayMu.Unlock()
 
-	fmt.Printf("relay: server is on the reverse-proxy path; dialing relay %s for %s\n",
-		relayAddr, settings.Domain)
+	fmt.Printf("relay: dialing relay %s for %s\n", relayAddr, settings.Domain)
 
 	ctx := context.Background()
 	go func() {

@@ -543,9 +543,12 @@ func (s *Server) Run() error {
 		// already exists — nothing here creates one.
 		reconcileProtectedProxyConfig()
 
-		// If this server is on the AOC reverse-proxy path (NAT'd or
-		// --force-proxy), keep an outbound tunnel to the relay so the public URL
-		// reaches us. No-op otherwise, and idempotent.
+		// Keep an outbound tunnel to the relay when this server needs one: it
+		// is on the AOC reverse-proxy path (NAT'd or --force-proxy), or it has
+		// published a public endpoint, which is served through the relay either
+		// way. No-op otherwise, and idempotent. The starter is published so the
+		// gate can bring the tunnel up on the first publish.
+		setRelayTunnelStarter(s.startRelayTunnel)
 		s.startRelayTunnel()
 
 		// Tell the AOC which build we are, so a disaster recovery can rebuild
