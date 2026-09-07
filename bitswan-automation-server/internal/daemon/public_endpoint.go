@@ -46,6 +46,23 @@ var (
 	publicHostCache map[string]string // public_host(lower) -> endpoint_host(lower)
 )
 
+// hasPublishedEndpoints reports whether this server publishes anything — one of
+// the two reasons it needs a relay tunnel (see startRelayTunnel). Reads the
+// same cache the gate consults per request, warming it on first use like
+// publicHostUnderlying does.
+func hasPublishedEndpoints() bool {
+	publicHostMu.RLock()
+	c := publicHostCache
+	publicHostMu.RUnlock()
+	if c == nil {
+		refreshPublicHostCache()
+		publicHostMu.RLock()
+		c = publicHostCache
+		publicHostMu.RUnlock()
+	}
+	return len(c) > 0
+}
+
 // refreshPublicHostCache reloads the published-host lookup from the DB. Called
 // at startup and after every create/revoke.
 func refreshPublicHostCache() {
@@ -368,6 +385,9 @@ func handlePublicCreate(w http.ResponseWriter, r *http.Request, email string, gr
 		return
 	}
 	_ = recordEvent(email, auditPublicCreate, host)
+	// The first publish is also what makes this server need a tunnel, so it
+	// serves the new URL now rather than after the next daemon restart.
+	ensureRelayTunnel()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":          true,
