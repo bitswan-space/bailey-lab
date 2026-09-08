@@ -2004,8 +2004,7 @@ class AutomationService:
                     # unique, and resolving it must not depend on agreeing about
                     # which content hash the deployment had.
                     approvals = [
-                        {**(audits_by_id.get(e.get("id")) or {}), **e}
-                        for e in stamped
+                        {**(audits_by_id.get(e.get("id")) or {}), **e} for e in stamped
                     ]
                 else:
                     approvals, _ = self.audit_verdicts(audits_store.get(csha) or [])

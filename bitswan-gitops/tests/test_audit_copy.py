@@ -346,9 +346,7 @@ async def test_an_audit_copy_opened_before_this_is_repaired_when_read(
 async def test_only_an_audit_copy_gets_the_rule(tmp_path, monkeypatch):
     clone = _clone_with_report(tmp_path)
     copy_path = clone.parent
-    (copy_path / copies.COPY_META_FILE).write_text(
-        json.dumps({"kind": COPY_KIND_USER})
-    )
+    (copy_path / copies.COPY_META_FILE).write_text(json.dumps({"kind": COPY_KIND_USER}))
     monkeypatch.setattr(copies, "_copies_dir", lambda: str(tmp_path))
 
     async def no_changes(clone_path, bp):

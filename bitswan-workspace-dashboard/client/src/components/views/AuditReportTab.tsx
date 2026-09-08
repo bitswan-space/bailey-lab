@@ -141,38 +141,16 @@ export function AuditReportTab({
           {...(onEdited ? { onSaved: onEdited } : {})}
         />
       </div>
-      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border px-4 py-2">
+      {/* The verdict sits under the report, and to the LEFT: the task-queue
+          panel is pinned to the bottom-right corner of every screen, and a
+          primary action underneath it is a primary action nobody can press. */}
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-4 py-2 pr-20">
         {released ? (
           <span className="inline-flex items-center gap-1 rounded bg-muted px-2 py-1 text-[11px] text-muted-foreground">
             Released to production — the sign-offs on this version are closed
           </span>
         ) : canAudit ? (
           <>
-            <span className="mr-auto text-[11px] text-muted-foreground">
-              Your verdict is recorded with this report as it stands.
-            </span>
-            {myVerdict && (
-              <span
-                className={cn(
-                  'inline-flex items-center gap-1 rounded px-2 py-1 text-[11px]',
-                  myVerdict === 'approve'
-                    ? 'bg-emerald-100 text-emerald-700'
-                    : 'bg-red-100 text-red-700',
-                )}
-              >
-                You {myVerdict === 'approve' ? 'approved' : 'requested changes on'} this image —
-                signing again replaces it
-              </span>
-            )}
-            <button
-              type="button"
-              onClick={() => void sign('reject')}
-              disabled={signing}
-              className="inline-flex h-8 items-center gap-1.5 rounded border border-red-300 bg-red-50 px-3 text-[12px] text-red-800 hover:bg-red-100 disabled:opacity-50"
-              title="Record this report as a request for changes"
-            >
-              <X className="size-3.5" aria-hidden /> Request changes
-            </button>
             <button
               type="button"
               onClick={() => void sign('approve')}
@@ -187,8 +165,33 @@ export function AuditReportTab({
               )}
               Approve
             </button>
-        </>
-      ) : null}
+            <button
+              type="button"
+              onClick={() => void sign('reject')}
+              disabled={signing}
+              className="inline-flex h-8 items-center gap-1.5 rounded border border-red-300 bg-red-50 px-3 text-[12px] text-red-800 hover:bg-red-100 disabled:opacity-50"
+              title="Record this report as a request for changes"
+            >
+              <X className="size-3.5" aria-hidden /> Request changes
+            </button>
+            {myVerdict && (
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1 rounded px-2 py-1 text-[11px]',
+                  myVerdict === 'approve'
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : 'bg-red-100 text-red-700',
+                )}
+              >
+                You {myVerdict === 'approve' ? 'approved' : 'requested changes on'} this image —
+                signing again replaces it
+              </span>
+            )}
+            <span className="text-[11px] text-muted-foreground">
+              Your verdict is recorded with this report as it stands.
+            </span>
+          </>
+        ) : null}
       </div>
     </div>
   );

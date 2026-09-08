@@ -2662,7 +2662,9 @@ def _keep_report_out_of_the_source(copy_path: str, bp: str) -> None:
     if line in existing.splitlines():
         return
     with open(path, "a") as fh:
-        fh.write(("" if existing.endswith("\n") or not existing else "\n") + line + "\n")
+        fh.write(
+            ("" if existing.endswith("\n") or not existing else "\n") + line + "\n"
+        )
 
 
 @router.get("/audit", response_model=AuditStateResponse)
