@@ -285,13 +285,30 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
       // the first check and is never nudged at all; and a nudge whose repaint
       // the clear happens to swallow is simply reissued on the next round.
       const nudge = () => {
-        const rows = term.rows;
-        const cols = term.cols;
-        term.resize(cols, rows - 1);
+        if (term.cols === 0) return;
+        term.resize(term.cols, term.rows - 1);
         sendResize();
         laterNudge(NUDGE_RESTORE_MS, () => {
           if (ws.readyState !== WebSocket.OPEN) return;
-          term.resize(cols, rows);
+          // Restore by re-fitting to the host rather than to the size we
+          // captured before the shrink: the pane may genuinely have been
+          // resized during the hold, and the ResizeObserver won't fire again
+          // to correct a stale size we'd have pinned back on.
+          //
+          // Except when the host measures 0×0, which is what a pane the user
+          // has switched away from measures. Fitting to that pushes
+          // {cols:0, rows:0} at the PTY and the remote renders its next reply
+          // at width zero (the same trap the ResizeObserver below sidesteps).
+          // Leave the terminal a row short instead; the observer re-fits it
+          // the moment the pane is on screen again.
+          const rect = host.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return;
+          try {
+            fit.fit();
+          } catch {
+            // host may be detached
+          }
+          if (term.cols === 0) return;
           sendResize();
         });
       };
