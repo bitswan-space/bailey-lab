@@ -3,6 +3,7 @@ import {
   ArrowDownToLine,
   Bot,
   CheckSquare,
+  Gavel,
   ChevronRight,
   Compass,
   FileText,
@@ -20,7 +21,7 @@ import { RenameBusinessProcessDialog } from '@/components/workspace/RenameBusine
 import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { cn } from '@/lib/utils';
-import type { BusinessProcess, FlowTab, Copy } from '@/types';
+import type { BusinessProcess, Copy, EnterCopy, FlowTab } from '@/types';
 
 type Role = 'admin' | 'auditor' | 'member';
 const ROLE_META: Record<Role, { label: string; cls: string; hint: string }> = {
@@ -59,7 +60,7 @@ interface TopNavProps {
   copies: Copy[];
   /** Move to another copy WITH the interface locked until the destination is
    *  fully renderable — the only way the chrome should ever change copy. */
-  onEnterCopy: (name: string, label: string, after?: () => Promise<void>) => void;
+  onEnterCopy: EnterCopy;
   /** Start an experiment on a business process. Owned by the shell (it is a
    *  copy transition, not a dialog's private business). */
   onStartExperiment: (title: string, bp: BusinessProcess) => void;
@@ -72,6 +73,8 @@ interface TopNavProps {
   /** The copy in view is one of the user's own experiments: experiments merge
    *  back into their parent copy, never into main, so Deploy is absent. */
   isMyExperiment: boolean;
+  /** In an audit copy the Deploy step becomes the Audit report. */
+  isMyAudit?: boolean;
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
   role: Role;
@@ -118,6 +121,16 @@ const DEPLOY_STEP: FlowStep = {
   id: 'deploy',
   label: 'Deploy',
   Icon: Rocket,
+  needsCopy: true,
+};
+
+// In an AUDIT copy the last step is not publishing the copy — it is the audit
+// itself: the report, and the sign-off it argues for. Proposing a fix is still
+// a deploy, offered from inside that tab and named for what it means.
+const AUDIT_REPORT_STEP: FlowStep = {
+  id: 'audit',
+  label: 'Audit report',
+  Icon: Gavel,
   needsCopy: true,
 };
 
@@ -172,6 +185,7 @@ export function TopNav({
   myCopy,
   syncVisible,
   isMyExperiment,
+  isMyAudit = false,
   tab,
   onTab,
   role,
@@ -207,9 +221,10 @@ export function TopNav({
     const steps: FlowStep[] = [];
     if (syncVisible) steps.push(SYNC_STEP);
     steps.push(...IN_COPY_STEPS);
-    if (!isMyExperiment) steps.push(DEPLOY_STEP);
+    if (isMyAudit) steps.push(AUDIT_REPORT_STEP);
+    else if (!isMyExperiment) steps.push(DEPLOY_STEP);
     return steps;
-  }, [syncVisible, isMyExperiment]);
+  }, [syncVisible, isMyExperiment, isMyAudit]);
 
   const currentCopy = useMemo(
     () => (copy ? (copies.find((c) => c.name === copy) ?? null) : null),
