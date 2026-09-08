@@ -68,8 +68,8 @@ function PreviewNote({ text, destructive = false }: { text: string; destructive?
  * editor tree. Contain it to the block and reset when the diagram source
  * changes, so fixing the source recovers the preview.
  */
-class PreviewErrorBoundary extends Component<
-  { resetKey: string; children: ReactNode },
+export class PreviewErrorBoundary extends Component<
+  { resetKey: string; children: ReactNode; hint?: string },
   { failed: boolean }
 > {
   override state = { failed: false };
@@ -86,25 +86,28 @@ class PreviewErrorBoundary extends Component<
 
   override render() {
     if (this.state.failed) {
-      return <PreviewNote text="Invalid diagram — click to edit" destructive />;
+      return (
+        <PreviewNote text={`Invalid diagram${this.props.hint ?? ' — click to edit'}`} destructive />
+      );
     }
     return this.props.children;
   }
 }
 
-function MermaidPreview({ source }: { source: string }) {
+export function MermaidPreview({ source, hint }: { source: string; hint?: string }) {
+  const aside = hint ?? ' — click to edit';
   if (!source.trim()) {
-    return <PreviewNote text="Empty diagram — click to edit" />;
+    return <PreviewNote text={`Empty diagram${aside}`} />;
   }
   let nodes: FlowchartNode[];
   let edges: Edge[];
   try {
     ({ nodes, edges } = parseMermaidToReactFlow(source));
   } catch {
-    return <PreviewNote text="Invalid diagram — click to edit" destructive />;
+    return <PreviewNote text={`Invalid diagram${aside}`} destructive />;
   }
   if (nodes.length === 0) {
-    return <PreviewNote text="Empty diagram — click to edit" />;
+    return <PreviewNote text={`Empty diagram${aside}`} />;
   }
   return (
     <ReactFlowProvider>
