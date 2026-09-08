@@ -80,8 +80,34 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
 .shot.dark{ background:#0a1826; border-color:rgba(255,255,255,.08) }
 .shotcap{ font-size:12px; font-style:italic; color:var(--muted); margin:0 0 26px }
 .shot .ph{ text-align:center; color:#9aa7b3; font-size:14px; font-weight:600; padding:20px }
-.two{ display:grid; grid-template-columns:1.1fr .9fr; gap:40px; margin-top:8px }
-@media (max-width:680px){ .two{ grid-template-columns:1fr; gap:26px } .cover h1{font-size:54px} .chapter h2{font-size:34px} }
+/* Prose with the How-to box set into it. A float, not a grid column: the text
+   runs down the box's left side and then closes over underneath it, which a
+   column cannot do — it can only sit beside the box, leaving the space below it
+   empty for as long as the prose continues. The float also makes the box hug
+   its own content.
+
+   The box is emitted BEFORE the prose in the DOM (see renderChapter), because a
+   float only affects content that follows it. That has a consequence in print:
+   Paged.js fills sheets in DOM order, so a box too tall to share a sheet with
+   the prose would claim the sheet alone. Those chapters are measured at build
+   time and get .full-howto, which unfloats them — see the print rules and
+   collectFullWidthChapters in generate.mjs. */
+.two{ display:block; margin-top:8px }
+.two::after{ content:''; display:table; clear:both }
+.two > .howto{ float:right; width:42%; margin:4px 0 22px 32px;
+  /* A step can carry a long unbreakable token (memory_reservation_policy); in a
+     42% column it would overflow and be clipped. */
+  overflow-wrap:anywhere }
+
+/* A chapter that interleaves shots into its prose (afterPara) cannot also wrap
+   that prose around the box: interleaving cuts the prose into runs, so only the
+   FIRST run is beside the box, and a tall box then leaves the same empty column
+   the float exists to remove — measured on ch5, 1771px of box against 808px of
+   first run. Those chapters get the box full width instead, in both media. */
+.wide-howto{ display:block }
+.wide-howto > .howto{ float:none; width:auto; margin:0 0 20px }
+
+@media (max-width:680px){ .two > .howto{ float:none; width:auto; margin:26px 0 0 } .cover h1{font-size:54px} .chapter h2{font-size:34px} }
 .selltext p{ font-size:16.5px; color:#39454f; margin:0 0 16px } .selltext strong{ color:var(--ink) }
 .howto{ background:var(--paper2); border:1px solid var(--line); border-radius:12px; padding:26px 28px }
 .howto h4{ margin:0 0 18px; font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--steel) }
@@ -209,15 +235,22 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
      header stays with its first rows) so a long chapter fills the foot of its
      page and continues, rather than jumping the whole card to a half-empty page. */
   .shot, .two, .howto, .callout, .specs, .scorecard, .std li, .std-h, .guide table tr{ break-inside:avoid }
-  /* Interleaved chapters pair a SHORT run of prose with the How-to box, so the
-     grid no longer has a tall text column to absorb the page break — and a
-     10-step How-to in the narrow .9fr column is taller than break-inside:avoid
-     can honour, which split the box mid-list (step 10 alone on the next sheet).
-     In print only, stack that one block so How-to spans the full width (roughly
-     half the height) and let the CONTAINER break: the box's own avoid then moves
-     it whole instead of being overridden. Screen layout is untouched. */
-  .two.interleaved{ display:block; break-inside:auto }
-  .two.interleaved .howto{ margin-top:18px }
+  /* ...except the prose/How-to row. It is routinely taller than a sheet, and an
+     avoid that cannot be honoured is simply ignored, so the break lands wherever
+     it falls — which cut ch5's box mid-list. Letting the CONTAINER break while
+     the box keeps its own avoid means the box is moved whole instead. */
+  .two{ break-inside:auto }
+  /* Paged.js fills sheets in DOM order and the box is emitted first (a float
+     only affects what follows it), so a box short enough to share a sheet with
+     the prose floats in print exactly as on screen, while one that is not would
+     claim the sheet alone — an empty column beside it and the prose pushed to
+     the next. Those chapters are MEASURED at build time and get .full-howto,
+     which unfloats the box: full width it is about half as tall, so it fits and
+     the prose follows it. See collectFullWidthChapters in generate.mjs — it is
+     measured rather than predicted from a step count, because how tall a box
+     renders depends on how its steps wrap. */
+  .full-howto{ display:block }
+  .full-howto > .howto{ float:none; width:auto; margin:0 0 20px }
   .std-h{ break-after:avoid }
   .runfoot{ break-before:avoid }
   p{ orphans:2; widows:2 }
@@ -386,16 +419,27 @@ function renderChapter(ch, idx) {
   const steps = (ch.steps || []).map((t, i) => `<div class="step"><div class="s">${i + 1}</div><div class="t">${t}</div></div>`).join('');
   const howto = steps ? `<div class="howto"><h4>${esc(ch.howtoTitle || 'How to')}</h4>${steps}</div>` : '';
 
+  // The How-to box is emitted BEFORE the prose: a float only affects content
+  // that follows it in source order, so with the box last the text could never
+  // wrap around it — it would just drop below. Visual order is unchanged.
+  //
+  // data-ch survives Paged.js's fragmentation, so the PDF pass can find which
+  // chapter a paginated .two fragment belongs to and unfloat the few whose box
+  // cannot share a sheet (see collectFullWidthChapters in generate.mjs).
+  // .wide-howto when this chapter interleaves: see the CSS — a cut-short run
+  // of prose cannot wrap a tall box, so the box spans the full width instead.
+  const twoOpen = `<div class="two${placed.length ? ' wide-howto' : ''}" data-ch="${esc(num)}">`;
+
   let two;
   if (placed.length === 0) {
-    // Unchanged path: all prose in one two-column block beside "How to".
+    // Unchanged path: the whole chapter's prose in one block, wrapping the box.
     const sell = paras.map((p) => `<p>${p}</p>`).join('');
-    two = (sell || howto) ? `<div class="two"><div class="selltext">${sell}</div>${howto}</div>` : '';
+    two = (sell || howto) ? `${twoOpen}${howto}<div class="selltext">${sell}</div></div>` : '';
   } else {
-    // Interleaved: a full-width shot cannot live inside the `.two` grid without
-    // breaking the text/How-to pairing, so the chapter becomes a sequence of
-    // blocks. "How to" stays paired with the first block, where it has always
-    // been; every later run of paragraphs is full-width prose.
+    // Interleaved: a full-width shot cannot sit inside the block whose prose
+    // wraps the box, so the chapter becomes a sequence. The FIRST run of
+    // paragraphs carries the How-to box and wraps around it; every later run is
+    // plain full-width prose, with each shot between the runs it sits between.
     const byPara = new Map();
     for (const sh of placed) {
       if (!byPara.has(sh.afterPara)) byPara.set(sh.afterPara, []);
@@ -408,7 +452,7 @@ function renderChapter(ch, idx) {
       if (run.length === 0) return;
       const sell = run.map((p) => `<p>${p}</p>`).join('');
       blocks.push(first
-        ? `<div class="two interleaved"><div class="selltext">${sell}</div>${howto}</div>`
+        ? `${twoOpen}${howto}<div class="selltext">${sell}</div></div>`
         : `<div class="selltext">${sell}</div>`);
       first = false;
       run = [];
@@ -422,7 +466,7 @@ function renderChapter(ch, idx) {
     });
     flush();
     // A chapter with only shots and a How-to still needs the How-to rendered.
-    if (blocks.length === 0 && howto) blocks.push(`<div class="two interleaved"><div class="selltext"></div>${howto}</div>`);
+    if (blocks.length === 0 && howto) blocks.push(`${twoOpen}${howto}<div class="selltext"></div></div>`);
     two = blocks.join('');
   }
   const callout = ch.callout ? `<div class="callout"><span class="c-k">${esc(ch.callout.kind || 'Why it matters')}</span><p>${ch.callout.text}</p></div>` : '';
