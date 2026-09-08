@@ -71,7 +71,7 @@ func (s *Server) handleAdminUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 	updates := []wsUpdate{}
 	actionable := 0
-	if full, err := GetWorkspaceList(false, false); err == nil && full != nil {
+	if full, err := workspaceInventory(); err == nil && full != nil {
 		for _, ws := range full.Workspaces {
 			wv := detectWorkspaceVersions(ws.Name)
 			if !wv.UpdateAvailable {

@@ -61,6 +61,44 @@ func handleBaileyDevicesRemoveAPI(w http.ResponseWriter, r *http.Request, email 
 	w.Write([]byte(`{"ok":true}`))
 }
 
+// handleBaileyDevicesRenameAPI renames one of the caller's own devices.
+//
+// The device list is how you find the row to revoke when a laptop goes
+// missing, and the auto-derived "Chrome on macOS" names don't tell three
+// browsers apart — so the handbook tells operators to keep their devices
+// named (Ch. 04, "Your devices"). This is the endpoint that makes that
+// possible.
+//
+// Authorisation is the same shape as remove: the UPDATE is scoped to the
+// caller's email, so an id belonging to somebody else matches no row and comes
+// back 404. There is no admin variant — a device name is its owner's to set.
+func handleBaileyDevicesRenameAPI(w http.ResponseWriter, r *http.Request, email string) {
+	if err := r.ParseForm(); err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(r.FormValue("id"))
+	if id == "" {
+		writeJSONError(w, "id required", http.StatusBadRequest)
+		return
+	}
+	name, err := validDeviceName(r.FormValue("name"))
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	renamed, err := renameDevice(email, id, name)
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !renamed {
+		writeJSONError(w, "device not found", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "id": id, "name": name})
+}
+
 type baileyApprovalDTO struct {
 	Email      string `json:"email"`
 	IssuedAt   string `json:"issued_at"`

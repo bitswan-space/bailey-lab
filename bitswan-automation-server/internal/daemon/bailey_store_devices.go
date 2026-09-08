@@ -87,6 +87,29 @@ func dbAddDevice(email, name, origin string) (*deviceRecord, error) {
 	return &rec, nil
 }
 
+// dbRenameDevice sets a device's display name. The WHERE clause is scoped to
+// the owner's email exactly like dbRemoveDevice, so a caller can only ever
+// rename their own device — the id alone never authorises the write.
+//
+// Reports whether a row actually changed, so the caller can answer 404 for an
+// id that isn't the caller's rather than a silent 200 that renamed nothing.
+func dbRenameDevice(email, id, name string) (bool, error) {
+	db, err := openBaileyDB()
+	if err != nil {
+		return false, err
+	}
+	res, err := db.Exec(`UPDATE devices SET name = ? WHERE id = ? AND email = ? COLLATE NOCASE`,
+		name, id, email)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func dbRemoveDevice(email, id string) error {
 	db, err := openBaileyDB()
 	if err != nil {

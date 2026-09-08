@@ -125,7 +125,7 @@ func buildEndpointListing(callerEmail string, callerGroups []string, r *http.Req
 // the map is just empty and entries go out ungrouped.
 func workspaceByDashboardHost() map[string]string {
 	out := map[string]string{}
-	full, err := GetWorkspaceList(false, false)
+	full, err := workspaceInventory()
 	if err != nil || full == nil {
 		return out
 	}

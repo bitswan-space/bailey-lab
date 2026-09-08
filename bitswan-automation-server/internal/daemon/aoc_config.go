@@ -26,11 +26,20 @@ type AOCConfigRequest struct {
 	AccessToken        string `json:"access_token"`
 	ExpiresAt          string `json:"expires_at,omitempty"`
 	Domain             string `json:"domain,omitempty"`
+	// DNSManaged is the AOC's answer to "do you control this domain's DNS", which
+	// decides whether the ACME bridge can issue for it at all. Pointer: nil means
+	// the AOC did not say (see the config struct docs).
+	DNSManaged *bool `json:"dns_managed,omitempty"`
 	// Proxied / RelayAddr / RelayFingerprint configure the reverse-proxy relay
 	// path for a NAT'd (or --force-proxy) server; see the config struct docs.
 	Proxied          bool   `json:"proxied,omitempty"`
 	RelayAddr        string `json:"relay_addr,omitempty"`
 	RelayFingerprint string `json:"relay_fingerprint,omitempty"`
+	// Private marks a server reached over a private network (VPN/ZTNA/LAN); the
+	// daemon then never dials the relay, whatever the AOC says. PrivateAddress is
+	// the address the AOC publishes for it. See the config struct docs.
+	Private        bool   `json:"private,omitempty"`
+	PrivateAddress string `json:"private_address,omitempty"`
 	// Force overwrites an existing registration instead of failing with 409.
 	Force bool `json:"force,omitempty"`
 }
@@ -43,6 +52,12 @@ type AOCStatusResponse struct {
 	AOCUrl             string `json:"aoc_url,omitempty"`
 	AutomationServerId string `json:"automation_server_id,omitempty"`
 	Domain             string `json:"domain,omitempty"`
+	// Private / PrivateAddress mirror the stored registration so a caller on the
+	// host can tell that this server must never be put on the relay without
+	// parsing the daemon's config volume itself. A disaster recovery reads it to
+	// re-declare the position it is restoring into.
+	Private        bool   `json:"private,omitempty"`
+	PrivateAddress string `json:"private_address,omitempty"`
 }
 
 // AOCCredentialsRequest replaces ONLY the AOC credentials, leaving the rest of
@@ -91,6 +106,8 @@ func (s *Server) handleAOCStatus(w http.ResponseWriter, r *http.Request) {
 		resp.AOCUrl = settings.AOCUrl
 		resp.AutomationServerId = settings.AutomationServerId
 		resp.Domain = settings.Domain
+		resp.Private = settings.Private
+		resp.PrivateAddress = settings.PrivateAddress
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -184,6 +201,16 @@ func (s *Server) handleAOCConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, "aoc_url, automation_server_id and access_token are required", http.StatusBadRequest)
 		return
 	}
+	// Private and Proxied are opposite answers to the same question. Storing both
+	// would leave the relay decision depending on which check ran first, so refuse
+	// here rather than pick a winner silently.
+	if req.Private && req.Proxied {
+		writeJSONError(w,
+			"private and proxied are mutually exclusive: a private server is reached over its own "+
+				"network and must never be published through the AOC relay",
+			http.StatusBadRequest)
+		return
+	}
 
 	cfg := config.NewAutomationServerConfig()
 
@@ -208,9 +235,12 @@ func (s *Server) handleAOCConfig(w http.ResponseWriter, r *http.Request) {
 		AccessToken:        req.AccessToken,
 		ExpiresAt:          req.ExpiresAt,
 		Domain:             req.Domain,
+		DNSManaged:         req.DNSManaged,
 		Proxied:            req.Proxied,
 		RelayAddr:          req.RelayAddr,
 		RelayFingerprint:   req.RelayFingerprint,
+		Private:            req.Private,
+		PrivateAddress:     req.PrivateAddress,
 	}); err != nil {
 		writeJSONError(w, "failed to persist AOC config: "+err.Error(), http.StatusInternalServerError)
 		return

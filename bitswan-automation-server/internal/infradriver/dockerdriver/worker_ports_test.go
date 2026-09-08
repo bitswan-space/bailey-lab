@@ -48,10 +48,10 @@ func TestWorkerPortCollisionInFirewallNetns(t *testing.T) {
 
 	// Workers are visited in sorted depID order (aworker, bworker); both default
 	// to :8080, so the second one in scope must shift to :8081.
-	if got := ports[workerPortKey{"acme", "dev", "", "aworker"}]; got != 8080 {
+	if got := ports[workerPortKey{"acme", "dev", "", "aworker"}].app; got != 8080 {
 		t.Errorf("aworker port = %d; want 8080", got)
 	}
-	if got := ports[workerPortKey{"acme", "dev", "", "bworker"}]; got != 8081 {
+	if got := ports[workerPortKey{"acme", "dev", "", "bworker"}].app; got != 8081 {
 		t.Errorf("bworker port = %d; want 8081 (collision-free)", got)
 	}
 
@@ -100,7 +100,7 @@ func TestWorkerPortNoFirewallKeepsDeclaredPort(t *testing.T) {
 	hosts, ports := c.computeWorkerHosts(bs.Deployments, map[fwKey]*fwGroup{})
 
 	for _, name := range []string{"aworker", "bworker"} {
-		if got := ports[workerPortKey{"acme", "dev", "", name}]; got != 8080 {
+		if got := ports[workerPortKey{"acme", "dev", "", name}].app; got != 8080 {
 			t.Errorf("%s port = %d; want 8080 (own netns, no shift)", name, got)
 		}
 	}

@@ -197,6 +197,7 @@ function adaptOverview(o) {
 const ACTIVITY_KINDS = {
   'device.approve':   { icon: 'shield-check', tone: 'success', verb: 'approved a device for' },
   'device.revoke':    { icon: 'user-x',       tone: 'danger',  verb: 'revoked a device for' },
+  'device.rename':    { icon: 'pencil',       tone: 'neutral', verb: 'renamed a device for' },
   'totp.enrol':       { icon: 'key-round',    tone: 'warning', verb: 'enrolled an authenticator' },
   'server.claim':     { icon: 'flag',         tone: 'primary', verb: 'claimed this server' },
   // target = "<from> → <to>" (or "rolled back <from> → <to>"); see the daemon's
@@ -601,42 +602,16 @@ function GateUnknownScene({ error, onRetry }) {
   );
 }
 
-// LEAVING_LATCH guards the one reload LeavingScene performs. Without it a
-// disagreement between gate-state ("trusted") and the daemon's cookie check
-// ("not trusted") would reload forever; with it we reload once and then say
-// what happened instead of spinning.
-const LEAVING_LATCH = 'bailey_onboard_leave_attempted';
-
 // The onboarding host's job is finished: this device is trusted, so it must not
-// linger on the PUBLIC host (which carries no chrome wrap and no console). We
-// re-request the document; the daemon answers a trusted device on this host with
-// a 303 to the saved origin, else the console host (chromeWrapMiddleware). The
-// server owns that decision, so the client deliberately doesn't compute a target.
-function LeavingScene() {
-  const [stuck, setStuck] = useA(false);
+// linger on the PUBLIC host (which carries no chrome wrap and no console). The
+// server owns the destination and hands it over as gate-state's `leave_to` (the
+// saved origin, else the console root); we navigate there. That target is
+// always a DIFFERENT host, so the hand-off cannot loop back here (#425).
+function LeavingScene({ leaveTo }) {
   useAE(() => {
-    let attempted = false;
-    try { attempted = sessionStorage.getItem(LEAVING_LATCH) === '1'; } catch (e) { /* storage unavailable */ }
-    if (attempted) {
-      try { sessionStorage.removeItem(LEAVING_LATCH); } catch (e) { /* noop */ }
-      setStuck(true);
-      return;
-    }
-    try { sessionStorage.setItem(LEAVING_LATCH, '1'); } catch (e) { /* noop */ }
-    window.location.reload();
-  }, []);
+    if (leaveTo) window.location.replace(leaveTo);
+  }, [leaveTo]);
 
-  if (stuck) {
-    return (
-      <SceneCard icon="shield-alert" title="This device is already set up" tone="danger">
-        <p style={{ margin: 0 }}>
-          Device setup is complete, but this page couldn't hand you on to the
-          server console. Open the console directly from your Bailey server's
-          address.
-        </p>
-      </SceneCard>
-    );
-  }
   return (
     <SceneCard icon="check" title="This device is trusted">
       <p style={{ margin: 0 }}>Taking you to your server…</p>
@@ -1010,7 +985,7 @@ function App() {
         </div>
       )}
       {scene === 'unknown' && <GateUnknownScene error={gate.error} onRetry={reloadGate} />}
-      {scene === 'leave' && <LeavingScene />}
+      {scene === 'leave' && <LeavingScene leaveTo={gate.state && gate.state.leave_to} />}
       {scene === 'waiting' && <WaitingScene />}
       {scene === 'bootstrap' && <BootstrapScene
         onClaim={() => { showToast('Server claimed — you are the root admin', 'success'); reloadGate(); }} />}

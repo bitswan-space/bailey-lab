@@ -216,9 +216,17 @@ func EmptyTrashFor(callerEmail string, callerGroups []string, writer io.Writer) 
 		}
 		// Only empty trash entries the caller owns. The workspace's ACL anchor
 		// is its dashboard endpoint (see workspaceRoleFor) — the same surface
-		// the UI and every other owner check use. An errored lookup skips the
-		// entry: never delete on a role we couldn't confirm.
-		if role, err := workspaceRoleFor(name, domain, callerEmail, callerGroups); err != nil || role != roleOwner {
+		// the UI and every other owner check use.
+		role, roleErr := workspaceRoleFor(name, domain, callerEmail, callerGroups)
+		// An errored lookup skips the entry: never delete on a role we could
+		// not confirm. It is reported as unconfirmed rather than as "not
+		// owner", because that is what happened — the caller may well be the
+		// owner; we could not read the ACL to find out.
+		if roleErr != nil {
+			fmt.Fprintf(writer, "Skipping %s (ownership could not be confirmed: %v).\n", name, roleErr)
+			continue
+		}
+		if role != roleOwner {
 			fmt.Fprintf(writer, "Skipping %s (not owner).\n", name)
 			continue
 		}

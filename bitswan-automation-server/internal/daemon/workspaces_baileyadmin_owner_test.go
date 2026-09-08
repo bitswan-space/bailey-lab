@@ -300,6 +300,190 @@ func breakBaileyDBForTest(t *testing.T) {
 	}
 }
 
+// breakEndpointRowForTest makes ONE endpoint row unreadable while every other
+// row in the store still reads cleanly: it relaxes the NOT NULL on
+// endpoints.owner_email — the column getEndpoint scans without a COALESCE —
+// and nulls it for hostname, so getEndpoint(hostname) comes back with a scan
+// error. That is the shape of a partially unreadable ACL store, and it is the
+// only fault that can hit a SINGLE lookup.
+//
+// It exists because breakBaileyDBForTest (close the whole handle) cannot prove
+// the fail-closed guards: with every read failing, the FIRST read fails, so
+// the role arrives already laundered into roleNone and the pre-existing
+// "no role ⇒ omit" rule catches it. The interesting shapes — an unreadable
+// dashboard row whose fallback would hand the workspace to the gitops
+// endpoint's owner, and a readable child whose PARENT row cannot be read,
+// which yields (roleAccess, err) — both need exactly one bad row.
+func breakEndpointRowForTest(t *testing.T, hostname string) {
+	t.Helper()
+	db, err := openBaileyDB()
+	if err != nil {
+		t.Fatalf("open bailey db: %v", err)
+	}
+	// The relaxation is a schema edit, so it needs writable_schema and a
+	// reopen before the connection will honour it. It is permanent for the
+	// rest of the package run and harmless: nothing in production writes a
+	// NULL owner, and registerEndpoint rejects an empty one.
+	for _, stmt := range []string{
+		`PRAGMA writable_schema=ON`,
+		`UPDATE sqlite_master SET sql = replace(sql,
+		    'owner_email     TEXT NOT NULL COLLATE NOCASE',
+		    'owner_email     TEXT COLLATE NOCASE')
+		 WHERE type='table' AND name='endpoints'`,
+		`PRAGMA writable_schema=OFF`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("relax owner_email NOT NULL (%s): %v", stmt, err)
+		}
+	}
+	reopenBaileyDBForTest(t)
+	if db, err = openBaileyDB(); err != nil {
+		t.Fatalf("reopen bailey db: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE endpoints SET owner_email = NULL WHERE hostname = ?`, hostname); err != nil {
+		t.Fatalf("null out %s: %v", hostname, err)
+	}
+	t.Cleanup(func() {
+		db, err := openBaileyDB()
+		if err != nil {
+			return
+		}
+		_, _ = db.Exec(`UPDATE endpoints SET owner_email = 'unreadable-row-restored@example.com'
+		                WHERE hostname = ? AND owner_email IS NULL`, hostname)
+	})
+	// Fail loudly rather than silently testing nothing if the schema text
+	// this depends on ever drifts.
+	if ep, err := getEndpoint(hostname); err == nil {
+		t.Fatalf("fault injection did not take: getEndpoint(%q) = %v, <nil>", hostname, ep)
+	}
+}
+
+// TestWorkspaceACLHost_UnreadableDashboardRowNeverAnchorsOnGitops is the
+// regression guard for the swallowed lookup error in workspaceACLHost.
+//
+// The ACL anchor is the DASHBOARD endpoint; gitops is an internal service
+// endpoint and must never be the anchor when a dashboard exists. The fallback
+// to gitops is legitimate for exactly one input — a legacy --no-dashboard
+// workspace, where the dashboard row is genuinely ABSENT. When the dashboard
+// lookup ERRORS, "absent" is not what happened, and taking the fallback
+// anyway resolved the workspace on gitops: measured on the swallowing
+// version, the gitops-only owner got role="owner", err=<nil>, owns=true — a
+// clean success, so no caller could fail closed on it.
+func TestWorkspaceACLHost_UnreadableDashboardRowNeverAnchorsOnGitops(t *testing.T) {
+	domain := writeTestConfig(t)
+	ws := "aclfaultws"
+	mkWorkspaceDir(t, ws, true)
+	dash := ws + "-dashboard." + domain
+	gitops := ws + "-gitops." + domain
+	const gitopsOwner = "gitopsonly@example.com"
+	if _, err := registerEndpoint(dash, "creator@example.com", "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerEndpoint(gitops, gitopsOwner, "", dash, endpointKindService, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Preconditions with a healthy store: the anchor is the dashboard, and
+	// owning only gitops owns nothing.
+	if host, err := workspaceACLHost(ws, domain); err != nil || host != dash {
+		t.Fatalf("precondition: workspaceACLHost = %q, %v; want %q, <nil>", host, err, dash)
+	}
+	if callerOwnsWorkspace(gitopsOwner, nil, ws) {
+		t.Fatal("precondition: the gitops-only owner already owns the workspace")
+	}
+
+	breakEndpointRowForTest(t, dash)
+
+	// There is no host to answer with: the row that decides the anchor could
+	// not be read.
+	if host, err := workspaceACLHost(ws, domain); err == nil {
+		t.Errorf("workspaceACLHost = %q, <nil>; want an error — an unreadable dashboard row must not fall through to the gitops host", host)
+	} else if host != "" {
+		t.Errorf("workspaceACLHost returned host %q alongside an error; want no host", host)
+	}
+
+	// ...so the role resolution errors instead of reporting a role, and the
+	// callers that gate on it can fail closed.
+	role, err := workspaceRoleFor(ws, domain, gitopsOwner, nil)
+	if err == nil {
+		t.Errorf("workspaceRoleFor = %q, <nil>; want the lookup error to reach the caller", role)
+	}
+	if role == roleOwner {
+		t.Errorf("workspaceRoleFor = %q for the gitops-only owner; the ACL moved to the gitops endpoint", role)
+	}
+	if callerOwnsWorkspace(gitopsOwner, nil, ws) {
+		t.Error("the gitops endpoint's owner was treated as the workspace owner because the dashboard row could not be read")
+	}
+
+	// The workspace list must not disclose it either.
+	if entry := findWorkspace(listWorkspacesAs(t, gitopsOwner, ""), ws); entry != nil {
+		t.Errorf("workspace listed to the gitops-only owner on an unreadable dashboard row: %+v", entry)
+	}
+
+	// And the trash sweep — which permanently deletes — must skip it, saying
+	// what actually happened rather than claiming the caller is not the owner.
+	if err := MarkWorkspaceTrashed(ws); err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	if err := EmptyTrashFor(gitopsOwner, nil, &sb); err != nil {
+		t.Fatalf("EmptyTrashFor: %v", err)
+	}
+	if !strings.Contains(sb.String(), "Skipping "+ws+" (ownership could not be confirmed") {
+		t.Errorf("trash sweep did not report %s as unconfirmed:\n%s", ws, sb.String())
+	}
+	if !strings.Contains(sb.String(), "Emptied 0 workspace(s)") {
+		t.Errorf("trash sweep removed something it could not confirm ownership of:\n%s", sb.String())
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".config", "bitswan", "workspaces", ws)); err != nil {
+		t.Errorf("workspace dir gone after a sweep that could not confirm ownership: %v", err)
+	}
+}
+
+// TestListAccessibleWorkspaces_UnconfirmedRoleOmits pins the one input shape
+// where the ERROR is the only thing that distinguishes a grant from a
+// non-grant: roleFor returns the child's direct role alongside the parent
+// lookup's error (acl.go, parent delegation), i.e. (roleAccess, err). The role
+// is real and non-empty, so the "no role ⇒ omit" rule does not catch it — only
+// the `roleErr != nil` guard does. Deleting that guard lists a workspace whose
+// membership the server could not read.
+func TestListAccessibleWorkspaces_UnconfirmedRoleOmits(t *testing.T) {
+	domain := writeTestConfig(t)
+	ws := "parentfaultws"
+	mkWorkspaceDir(t, ws, true)
+	dash := ws + "-dashboard." + domain
+	hub := "hub-" + ws + "." + domain
+	const wsOwner = "hubowner@example.com"
+	const member = "hubmember@example.com"
+	if _, err := registerEndpoint(hub, wsOwner, "", "", endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	// The dashboard delegates membership to a recorded parent, so resolving a
+	// role on it reads two rows.
+	if _, err := registerEndpoint(dash, wsOwner, "", hub, endpointKindWorkspace, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := addGrant(dash, "email", member, "access", wsOwner); err != nil {
+		t.Fatal(err)
+	}
+	if entry := findWorkspace(listWorkspacesAs(t, member, ""), ws); entry == nil {
+		t.Fatal("precondition: the granted member cannot see the workspace with a healthy store")
+	}
+
+	breakEndpointRowForTest(t, hub)
+
+	// The shape this test exists for. If it ever stops being reachable, fail
+	// loudly instead of asserting an outcome that holds for another reason.
+	role, err := workspaceRoleFor(ws, domain, member, nil)
+	if role != roleAccess || err == nil {
+		t.Fatalf("this test needs the (access, error) shape; got role=%q err=%v", role, err)
+	}
+
+	if entry := findWorkspace(listWorkspacesAs(t, member, ""), ws); entry != nil {
+		t.Errorf("workspace listed on a membership the server could not read: %+v", entry)
+	}
+}
+
 // listWorkspacesAs performs GET /bailey/api/workspaces as email. host, when
 // non-empty, is the bailey host the request is addressed to.
 func listWorkspacesAs(t *testing.T, email, host string) *listAccessibleResponse {

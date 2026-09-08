@@ -51,6 +51,33 @@ function DevicesView({ ctx }) {
   const myPending = (data.pending || []).filter(
     p => (p.userEmail || '').toLowerCase() === (currentUser.email || '').toLowerCase());
 
+  // Inline rename. The default names come from the User-Agent, so three
+  // browsers on one laptop all read "Chrome on macOS" — useless at the moment
+  // you need to pick the one to sign out. `editing` holds the device id being
+  // renamed; only one row is editable at a time.
+  const [editing, setEditing] = useD(null);
+  const [draft, setDraft] = useD('');
+  const [saving, setSaving] = useD(false);
+
+  const startRename = (dev) => { setEditing(dev.id); setDraft(dev.name); };
+  const cancelRename = () => { setEditing(null); setDraft(''); };
+
+  // Live: POST /bailey/api/devices/rename, then re-fetch so the list shows what
+  // the server stored (the backend trims, and rejects what it won't keep).
+  const doRename = async (dev) => {
+    const name = draft.trim();
+    if (!name || name === dev.name) { cancelRename(); return; }
+    setSaving(true);
+    try {
+      await DApi.renameDevice(dev.id, name);
+      setEditing(null); setDraft('');
+      toast(`Device renamed to ${name}`, 'success');
+      await refresh('devices');
+    } catch (e) {
+      toast(`Couldn't rename device: ${e.message}`, 'danger');
+    } finally { setSaving(false); }
+  };
+
   // Live: remove the device via POST /bailey/api/devices/remove, then
   // re-fetch the device list so the UI reflects the backend.
   const doRevoke = async (dev) => {
@@ -106,9 +133,35 @@ function DevicesView({ ctx }) {
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 14.5, fontWeight: 600, color: DC.fg }}>{dev.name}</span>
-                  {dev.current && <DPill tone="success" size="xs">● This device</DPill>}
-                  <DPill tone={badge.tone} size="xs">{badge.label}</DPill>
+                  {editing === dev.id ? (
+                    <form style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                      onSubmit={(e) => { e.preventDefault(); doRename(dev); }}>
+                      <input autoFocus value={draft} disabled={saving}
+                        aria-label={`Name for ${dev.name}`}
+                        maxLength={60}
+                        onChange={(e) => setDraft(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Escape') cancelRename(); }}
+                        style={{ height: 28, width: 220, maxWidth: '100%', padding: '0 8px',
+                          border: `1px solid ${DC.borderHi}`, borderRadius: 6, background: '#fff',
+                          fontFamily: 'inherit', fontSize: 14, fontWeight: 600, color: DC.fg, outline: 'none' }} />
+                      <DBtn variant="primary" size="xs" disabled={saving} onClick={() => doRename(dev)}>
+                        {saving ? 'Saving…' : 'Save'}
+                      </DBtn>
+                      <DBtn variant="ghost" size="xs" disabled={saving} onClick={cancelRename}>Cancel</DBtn>
+                    </form>
+                  ) : (
+                    <>
+                      <span style={{ fontSize: 14.5, fontWeight: 600, color: DC.fg }}>{dev.name}</span>
+                      <button type="button" onClick={() => startRename(dev)}
+                        title="Rename this device" aria-label={`Rename ${dev.name}`}
+                        style={{ border: 0, background: 'transparent', padding: 2, cursor: 'pointer',
+                          color: DC.mutedFg, display: 'inline-flex', alignItems: 'center' }}>
+                        <DIcon name="pencil" size={13} />
+                      </button>
+                      {dev.current && <DPill tone="success" size="xs">● This device</DPill>}
+                      <DPill tone={badge.tone} size="xs">{badge.label}</DPill>
+                    </>
+                  )}
                 </div>
                 {(dev.browser || dev.os || dev.location || dev.ip) && (
                   <div style={{ fontSize: 12.5, color: DC.muted, marginTop: 3, display: 'flex', gap: 14, flexWrap: 'wrap' }}>

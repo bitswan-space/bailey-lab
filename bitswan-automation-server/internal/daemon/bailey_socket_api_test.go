@@ -16,9 +16,10 @@ import (
 // so we exercise them directly with httptest against the test bailey.db that
 // TestMain provisions.
 
-// tSockAdminTok is the admin bearer the mutating socket handlers now require
-// (#189). jsonReq sends it so the existing happy/again-error paths still
-// reach their handlers; the rejection path is covered separately.
+// tSockAdminTok is the admin bearer every operator-only socket handler requires
+// — the mutations since #189, and the pending-device / ACL reads since #234.
+// jsonReq sends it so the happy/again-error paths still reach their handlers;
+// the rejection paths are covered by TestSocketPrivilegedRoutes.
 const tSockAdminTok = "test-admin-token"
 
 func jsonReq(method, path string, body any) *http.Request {
@@ -163,7 +164,7 @@ func TestHandleDevicesPending(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	s.handleDevicesPending(w, httptest.NewRequest(http.MethodGet, "/bailey/devices/pending", nil))
+	s.handleDevicesPending(w, jsonReq(http.MethodGet, "/bailey/devices/pending", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("pending = %d", w.Code)
 	}
@@ -183,7 +184,7 @@ func TestHandleDevicesPending(t *testing.T) {
 
 	// Wrong method → 405.
 	w = httptest.NewRecorder()
-	s.handleDevicesPending(w, httptest.NewRequest(http.MethodPost, "/bailey/devices/pending", nil))
+	s.handleDevicesPending(w, jsonReq(http.MethodPost, "/bailey/devices/pending", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST pending = %d, want 405", w.Code)
 	}
@@ -220,7 +221,7 @@ func TestHandleAccessGrantRevokeList(t *testing.T) {
 
 	// List shows the owner + grant.
 	w = httptest.NewRecorder()
-	s.handleAccessList(w, httptest.NewRequest(http.MethodGet, "/bailey/access/list?host="+host, nil))
+	s.handleAccessList(w, jsonReq(http.MethodGet, "/bailey/access/list?host="+host, nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("list = %d", w.Code)
 	}
@@ -271,68 +272,191 @@ func TestHandleAccessGrantErrors(t *testing.T) {
 
 	// Wrong method → 405.
 	w = httptest.NewRecorder()
-	s.handleAccessGrant(w, httptest.NewRequest(http.MethodGet, "/bailey/access/grant", nil))
+	s.handleAccessGrant(w, jsonReq(http.MethodGet, "/bailey/access/grant", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET grant = %d, want 405", w.Code)
 	}
 
 	// List with no host param → 400.
 	w = httptest.NewRecorder()
-	s.handleAccessList(w, httptest.NewRequest(http.MethodGet, "/bailey/access/list", nil))
+	s.handleAccessList(w, jsonReq(http.MethodGet, "/bailey/access/list", nil))
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("list no host = %d, want 400", w.Code)
 	}
 
 	// List unknown host → 404.
 	w = httptest.NewRecorder()
-	s.handleAccessList(w, httptest.NewRequest(http.MethodGet, "/bailey/access/list?host=nope.example.com", nil))
+	s.handleAccessList(w, jsonReq(http.MethodGet, "/bailey/access/list?host=nope.example.com", nil))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("list unknown host = %d, want 404", w.Code)
 	}
 
 	// Revoke wrong method → 405.
 	w = httptest.NewRecorder()
-	s.handleAccessRevoke(w, httptest.NewRequest(http.MethodGet, "/bailey/access/revoke", nil))
+	s.handleAccessRevoke(w, jsonReq(http.MethodGet, "/bailey/access/revoke", nil))
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET revoke = %d, want 405", w.Code)
 	}
 }
 
-// TestSocketMutationsRequireAdminToken pins the #189 / BSY-13 fix: the device
-// approval and ACL grant/revoke socket handlers must reject a caller that
-// reaches the socket without a valid admin token (a first-party container),
-// even though authMiddleware trusts the socket transport itself.
-func TestSocketMutationsRequireAdminToken(t *testing.T) {
+// privilegedRouteCase is how to drive one socketPrivilegedRoutes entry: the
+// method its handler accepts, the handler itself, and a minimal request shape
+// that would otherwise reach the work (so a 403 proves the gate fired, not that
+// the request was malformed).
+type privilegedRouteCase struct {
+	method  string
+	handler func(http.ResponseWriter, *http.Request)
+	query   string
+	body    any
+}
+
+// TestSocketPrivilegedRoutes pins the operator-only set of the Unix-socket mux
+// declared as socketPrivilegedRoutes: every one of those routes must answer 403
+// to a socket peer that presents no admin token (or a wrong one), even though
+// authMiddleware trusts the socket transport itself.
+//
+// This is the shape the #226 review asked for over a blanket "every socket
+// handler needs the token" invariant, which would be wrong — most routes on this
+// mux are deliberately open to first-party containers
+// (socketWorkspaceCallableRoutes). #189 gated the three mutations; #234 adds the
+// two reads that leaked the pending approval codes and an endpoint's ACL.
+func TestSocketPrivilegedRoutes(t *testing.T) {
 	s := &Server{token: tSockAdminTok}
-	noAuth := func(path string, body any) *http.Request {
-		b, _ := json.Marshal(body)
-		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(b)))
-		r.Header.Set("Content-Type", "application/json")
-		return r // deliberately NO Authorization header
+
+	cases := map[string]privilegedRouteCase{
+		"/bailey/devices/approve": {method: http.MethodPost, handler: s.handleDeviceApprove,
+			body: map[string]string{"code": "123456"}},
+		"/bailey/devices/pending": {method: http.MethodGet, handler: s.handleDevicesPending},
+		"/bailey/access/grant": {method: http.MethodPost, handler: s.handleAccessGrant,
+			body: map[string]string{"host": "h.example.com", "principal": "x@example.com"}},
+		"/bailey/access/revoke": {method: http.MethodPost, handler: s.handleAccessRevoke,
+			body: map[string]string{"host": "h.example.com", "principal": "x@example.com"}},
+		"/bailey/access/list": {method: http.MethodGet, handler: s.handleAccessList,
+			query: "?host=h.example.com"},
 	}
-	cases := []struct {
-		name string
-		fn   func(http.ResponseWriter, *http.Request)
-		path string
-		body any
-	}{
-		{"device-approve", s.handleDeviceApprove, "/bailey/devices/approve", map[string]string{"code": "123456"}},
-		{"access-grant", s.handleAccessGrant, "/bailey/access/grant", map[string]string{"host": "h.example.com", "principal": "x@example.com"}},
-		{"access-revoke", s.handleAccessRevoke, "/bailey/access/revoke", map[string]string{"host": "h.example.com", "principal": "x@example.com"}},
+
+	// The table and the declared list must not drift: a route added to
+	// socketPrivilegedRoutes without a case here would otherwise go untested.
+	if len(cases) != len(socketPrivilegedRoutes) {
+		t.Fatalf("cases cover %d routes, socketPrivilegedRoutes declares %d", len(cases), len(socketPrivilegedRoutes))
 	}
-	for _, c := range cases {
-		w := httptest.NewRecorder()
-		c.fn(w, noAuth(c.path, c.body))
-		if w.Code != http.StatusForbidden {
-			t.Errorf("%s without admin token = %d, want 403", c.name, w.Code)
+	for _, route := range socketPrivilegedRoutes {
+		if _, ok := cases[route]; !ok {
+			t.Fatalf("socketPrivilegedRoutes lists %q with no case in this test", route)
 		}
 	}
-	// A wrong bearer is rejected too (not just a missing one).
+
+	noAuth := func(route string, c privilegedRouteCase) *http.Request {
+		if c.body == nil {
+			return httptest.NewRequest(c.method, route+c.query, nil) // deliberately NO Authorization header
+		}
+		b, _ := json.Marshal(c.body)
+		r := httptest.NewRequest(c.method, route+c.query, strings.NewReader(string(b)))
+		r.Header.Set("Content-Type", "application/json")
+		return r
+	}
+
+	for _, route := range socketPrivilegedRoutes {
+		c := cases[route]
+
+		w := httptest.NewRecorder()
+		c.handler(w, noAuth(route, c))
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s without admin token = %d, want 403 (body=%s)", route, w.Code, w.Body.String())
+		}
+
+		// A wrong bearer is rejected too, not just a missing one.
+		w = httptest.NewRecorder()
+		r := noAuth(route, c)
+		r.Header.Set("Authorization", "Bearer not-the-admin-token")
+		c.handler(w, r)
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s with wrong token = %d, want 403", route, w.Code)
+		}
+	}
+}
+
+// TestSocketRouteClassesResolveOnMux checks both declared route classes against
+// the mux setupRoutes actually builds, so a renamed or removed path cannot leave
+// either list quietly describing a route that no longer exists.
+//
+// It cannot catch the opposite drift — a NEW route registered in setupRoutes and
+// classified in neither list — because net/http exposes no way to enumerate a
+// ServeMux's patterns. Closing that needs setupRoutes to be built from this data
+// instead of alongside it (the remaining half of the #226 mux note).
+func TestSocketRouteClassesResolveOnMux(t *testing.T) {
+	mux := (&Server{token: tSockAdminTok}).setupRoutes()
+	for _, class := range [][]string{socketPrivilegedRoutes, socketWorkspaceCallableRoutes} {
+		for _, route := range class {
+			_, pattern := mux.Handler(httptest.NewRequest(http.MethodGet, route, nil))
+			if pattern == "" {
+				t.Errorf("route %q is declared but not registered on the socket mux", route)
+			}
+		}
+	}
+}
+
+// TestDevicesPendingDoesNotLeakCodeWhenGated is the #234 disclosure assertion
+// proper: an ungated caller must not learn a live 6-digit approval code. The
+// status assertion above would still pass if a future handler answered 403 with
+// the list attached, and the code is the whole point of the finding.
+func TestDevicesPendingDoesNotLeakCodeWhenGated(t *testing.T) {
+	s := &Server{token: tSockAdminTok}
+	email := "pending-leak@example.com"
+	_ = dbDeletePendingPairByEmail(email)
+	e, err := generatePendingPair(email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dbDeletePendingPairByEmail(email) })
+
 	w := httptest.NewRecorder()
-	r := noAuth("/bailey/access/grant", map[string]string{"host": "h.example.com", "principal": "x@example.com"})
-	r.Header.Set("Authorization", "Bearer not-the-admin-token")
-	s.handleAccessGrant(w, r)
+	s.handleDevicesPending(w, httptest.NewRequest(http.MethodGet, "/bailey/devices/pending", nil))
 	if w.Code != http.StatusForbidden {
-		t.Errorf("access-grant with wrong token = %d, want 403", w.Code)
+		t.Fatalf("ungated pending = %d, want 403", w.Code)
+	}
+	if body := w.Body.String(); strings.Contains(body, e.Code) || strings.Contains(body, email) {
+		t.Errorf("403 response disclosed the pending code or email: %s", body)
+	}
+
+	// With the token the operator still sees the code — the gate must not have
+	// broken the flow it exists to protect.
+	w = httptest.NewRecorder()
+	s.handleDevicesPending(w, jsonReq(http.MethodGet, "/bailey/devices/pending", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorized pending = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), e.Code) {
+		t.Error("authorized pending list is missing the code the operator needs to approve")
+	}
+}
+
+// TestAccessListDoesNotLeakOwnerWhenGated is the ACL half of #234: the owner
+// address and grant list are the reconnaissance value, so assert they are absent
+// from the rejection and present once the token is supplied.
+func TestAccessListDoesNotLeakOwnerWhenGated(t *testing.T) {
+	s := &Server{token: tSockAdminTok}
+	host := "acl-leak.example.com"
+	owner := "acl-leak-owner@example.com"
+	if _, err := registerEndpoint(host, owner, "ACL Leak App", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	s.handleAccessList(w, httptest.NewRequest(http.MethodGet, "/bailey/access/list?host="+host, nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("ungated list = %d, want 403", w.Code)
+	}
+	if body := w.Body.String(); strings.Contains(body, owner) {
+		t.Errorf("403 response disclosed the endpoint owner: %s", body)
+	}
+
+	w = httptest.NewRecorder()
+	s.handleAccessList(w, jsonReq(http.MethodGet, "/bailey/access/list?host="+host, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("authorized list = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), owner) {
+		t.Error("authorized list is missing the owner the operator asked for")
 	}
 }

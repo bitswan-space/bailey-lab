@@ -402,11 +402,40 @@ func (config *DockerComposeConfig) buildDriverService(token string, wsVolume fun
 	}
 }
 
+// traefikPublishedPorts renders the global Traefik port publishes, optionally
+// bound to a single host address.
+//
+// Docker publishes on every interface by default, and its DNAT rules are
+// installed AHEAD of the host INPUT chain — so a ufw/nftables rule cannot close
+// a published port, and a server that is meant to be reachable only over a VPN
+// is still listening on its public interface. Naming the host address in the
+// publish is what actually stops that. Empty bindAddress keeps the historical
+// "every interface" behaviour, and must render byte-identically to what the
+// daemon wrote before this option existed: the daemon compares the rendered
+// compose against the file on disk to detect drift, so a cosmetic change here
+// would recreate the Traefik container on every existing server.
+//
+// Caveat worth knowing at the call site: binding to a VPN address means Docker
+// cannot create the container until that interface exists. The container's
+// restart policy makes it retry, so a server whose tunnel comes up late
+// recovers on its own, but it does fail closed rather than open.
+func traefikPublishedPorts(bindAddress string) []string {
+	if bindAddress == "" {
+		return []string{"80:80", "443:443"}
+	}
+	return []string{
+		bindAddress + ":80:80",
+		bindAddress + ":443:443",
+	}
+}
+
 // CreateTraefikDockerComposeFile creates a docker-compose file for global Traefik.
 // env, when non-nil, is added to the traefik service environment (used to
 // configure lego's httpreq DNS-01 provider for wildcard certificates).
+// bindAddress, when non-empty, narrows the HOST address the public entrypoints
+// publish on (see traefikPublishedPorts).
 // networks parameter is optional - if provided, adds those networks along with bitswan_network.
-func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, networks ...string) (string, error) {
+func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, bindAddress string, networks ...string) (string, error) {
 	// Traefik's config lives in the daemon's config volume at
 	// <volume>/traefik/... (the daemon mounts the `bitswan` volume at
 	// /root/.config/bitswan). Mount those files into Traefik as named-volume
@@ -456,7 +485,7 @@ func CreateTraefikDockerComposeFile(traefikPath string, env map[string]string, n
 		// unused. Publishing ONLY 80/443 (never the admin :8080/:9080) is the second
 		// layer of defence: even a mistaken port-publish cannot leak the routing
 		// topology, because nothing is listening on the admin port.
-		"ports":    []string{"80:80", "443:443"},
+		"ports":    traefikPublishedPorts(bindAddress),
 		"networks": traefikNetworks,
 		"volumes":  traefikVolumes,
 	}

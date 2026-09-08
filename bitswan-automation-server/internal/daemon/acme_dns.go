@@ -30,6 +30,11 @@ const (
 	// wildcard certificates via the DNS-01 challenge.
 	dnsCertResolverName = "letsencrypt-dns"
 
+	// httpCertResolverName is the per-hostname HTTP-01 resolver. Used for hosts
+	// outside the wildcard domain, and for every host under a domain whose DNS the
+	// AOC does not manage — where the DNS-01 challenge cannot be written at all.
+	httpCertResolverName = "letsencrypt"
+
 	// acmeBridgeUsername is the basic-auth username Traefik uses against the
 	// daemon's ACME DNS-01 bridge endpoints.
 	acmeBridgeUsername = "traefik"
@@ -107,15 +112,28 @@ func loadACMEBridgeSecret() (string, error) {
 // Hostnames covered by the automation server's wildcard domain share one
 // DNS-01 wildcard certificate; anything else gets a per-hostname HTTP-01
 // certificate. Returns ("", nil) for .localhost hostnames, which use local
-// certificates instead of ACME.
+// certificates instead of ACME — and for every hostname when the server's TLS
+// mode does not use a CA at all, which is the single place that decision is made
+// (see tls_mode.go).
 func certResolverForHostname(hostname string) (string, []traefikapi.TLSDomain) {
 	if strings.HasSuffix(hostname, ".localhost") {
 		return "", nil
 	}
-	if domain := getWildcardCertDomain(); domain != "" && traefikapi.HostCoveredByWildcard(hostname, domain) {
-		return dnsCertResolverName, traefikapi.WildcardTLSDomains(domain)
+	mode := currentTLSMode()
+	if !mode.usesACME() {
+		return "", nil
 	}
-	return "letsencrypt", nil
+	// The shared wildcard is only claimable when the mode's DNS-01 backend can
+	// actually write the challenge. On a domain the AOC does not manage it cannot,
+	// so these hosts fall through to a per-host HTTP-01 certificate — which is
+	// exactly what dns_managed exists to select, and which works on a publicly
+	// reachable server.
+	if aocDNSUsable(mode) {
+		if domain := getWildcardCertDomain(); domain != "" && traefikapi.HostCoveredByWildcard(hostname, domain) {
+			return dnsCertResolverName, traefikapi.WildcardTLSDomains(domain)
+		}
+	}
+	return httpCertResolverName, nil
 }
 
 // acmeChallengeFQDNAllowed reports whether an ACME DNS-01 challenge FQDN is
@@ -136,13 +154,12 @@ func acmeChallengeFQDNAllowed(fqdn, domain string) bool {
 	if rest == domain || strings.HasSuffix(rest, "."+domain) {
 		return true
 	}
-	// Published public endpoints (issue #220) live under the AOC's
-	// *.public.<aoc-id> namespace, not this server's own domain, but the gate
-	// still terminates their TLS — so authorise DNS-01 challenges for hosts
-	// THIS server has actually published, plus the namespace base itself (the
-	// ONE wildcard cert for *.public.<aoc-id> challenges at the base). Nothing
-	// else under that namespace is authorised.
-	return isPublicEndpointHost(rest) || isPublicNamespaceBase(rest)
+	// A published public endpoint (issue #220) is one label under this server's
+	// own domain now, so the wildcard challenge above already covers it and
+	// nothing else needs authorising. Published hosts stay listed here for the
+	// deployments whose certificates predate that — their published names are
+	// still in the AOC's old namespace, and a renewal must not start failing.
+	return isPublicEndpointHost(rest)
 }
 
 // acmeDNSChallengeRequest matches the body lego's httpreq provider sends.

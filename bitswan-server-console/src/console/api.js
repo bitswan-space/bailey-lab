@@ -231,6 +231,10 @@ export const Api = {
   removeTotp: () => postJSON('/bailey/api/totp/remove', {}),
   devices: () => getJSON('/bailey/api/devices'),
   removeDevice: (id) => postForm('/bailey/api/devices/remove', { id }),
+  // Rename one of your own devices. The auto-derived "Chrome on macOS" names
+  // don't tell three browsers apart, and the handbook (Ch. 04) tells operators
+  // to keep devices named so the one to revoke is obvious.
+  renameDevice: (id, name) => postForm('/bailey/api/devices/rename', { id, name }),
   approvals: () => getJSON('/bailey/api/approvals'),
   // Deny (permanently remove) a pending device-pair request — the persistent
   // "Dismiss". Unlike a local hide, it deletes the request server-side so it

@@ -25,6 +25,22 @@ type Config struct {
 	// domain. Empty falls back to the AOC domain.
 	ProtectedDomain string `toml:"protected_domain,omitempty"`
 
+	// IngressBindAddress narrows the HOST address Traefik's :80/:443 publishes
+	// bind to (e.g. "10.8.0.7", the server's VPN address). Empty publishes on
+	// every interface — Docker's default and the historical behaviour.
+	//
+	// This is the only thing that actually keeps a private server off a public
+	// interface: Docker's port publish installs its DNAT ahead of the host INPUT
+	// chain, so a ufw/nftables rule cannot close a published port, and DNS
+	// pointing elsewhere is not access control (anyone scanning the public
+	// address with the right SNI still reaches the ingress).
+	IngressBindAddress string `toml:"ingress_bind_address,omitempty"`
+
+	// TLSMode selects how the server's public hostnames get their certificates
+	// ("aoc-dns", "manual", …; see daemon.TLSMode). Empty means the default,
+	// which every server registered before this option existed relies on.
+	TLSMode string `toml:"tls_mode,omitempty"`
+
 	AutomationOperationsCenter AutomationOperationsCenterSettings `toml:"aoc"`
 	LocalServer                LocalServerSettings                `toml:"local_server"`
 }
@@ -57,6 +73,21 @@ type AutomationOperationsCenterSettings struct {
 	// obtain a DNS-01 wildcard certificate for *.<domain> via the AOC.
 	Domain string `toml:"domain,omitempty"`
 
+	// DNSManaged records whether the AOC controls Domain's DNS, as the AOC
+	// reported it at registration. It decides whether the ACME bridge can issue
+	// anything at all: the bridge writes into the AOC's own hosted zone, so on a
+	// domain the AOC does not manage every DNS-01 challenge fails — and fails as
+	// a 502 from a DNS endpoint, several minutes into a registration, rather than
+	// as anything that names the cause.
+	//
+	// A POINTER because three states differ. True and false are what the AOC
+	// said; nil means nothing said so — an older AOC, or a server registered
+	// before this was recorded — and must behave exactly as before, since
+	// assuming "not managed" would take every existing server off the wildcard
+	// certificate it is already using. Captured at registration; re-register (or
+	// set the TLS mode explicitly) if the domain later changes hands.
+	DNSManaged *bool `toml:"dns_managed,omitempty"`
+
 	// Proxied means this server has no public inbound route (NAT) — or was
 	// forced onto the relay path with `register --force-proxy` — so instead of
 	// the AOC pointing an A record straight at us, the AOC points our wildcard
@@ -70,6 +101,24 @@ type AutomationOperationsCenterSettings struct {
 	// certificate, pinned by the daemon so the AOC token in the tunnel handshake
 	// can't be intercepted.
 	RelayFingerprint string `toml:"relay_fingerprint,omitempty"`
+
+	// Private marks a server that is reached over a private network — a VPN, a
+	// ZTNA overlay, or a plain on-prem LAN — rather than the public internet.
+	//
+	// It is a HARD LOCAL OVERRIDE of the relay decision, not a hint: while it is
+	// set the daemon never dials the AOC relay, whatever the AOC reports. That
+	// matters because pointing the relay at a NAT'd server is the AOC's uniform
+	// default for its own domains (it cannot reliably probe direct
+	// reachability), so without this flag a private deployment would be
+	// re-exposed through the public relay on the next daemon restart — the one
+	// thing a VPN deployment exists to prevent.
+	Private bool `toml:"private,omitempty"`
+	// PrivateAddress is the address the AOC publishes in DNS for this server
+	// (e.g. the VM's VPN address, 10.8.0.7). Recorded so a re-registration or a
+	// disaster recovery re-declares the same address instead of relying on an
+	// operator to remember it. Informational on the daemon side — the DNS record
+	// itself is the AOC's to write.
+	PrivateAddress string `toml:"private_address,omitempty"`
 }
 
 // GetRealUserHomeDir returns the home directory of the actual user,
@@ -243,6 +292,57 @@ func (m *AutomationServerConfig) SetLocalServerToken(token string) error {
 	}
 
 	config.LocalServer.Token = token
+	return m.SaveConfig(config)
+}
+
+// GetIngressBindAddress returns the host address the global Traefik publishes
+// its :80/:443 on, or "" for every interface. A missing config file is not an
+// error: an unregistered server still runs an ingress, and "no config" means
+// "no override".
+func (m *AutomationServerConfig) GetIngressBindAddress() string {
+	config, err := m.LoadConfig()
+	if err != nil {
+		return ""
+	}
+	return config.IngressBindAddress
+}
+
+// SetIngressBindAddress records the host address Traefik publishes on. Empty
+// clears the override (back to every interface). Applying it is the ingress
+// init's job — the rendered compose changes, which the drift check turns into a
+// container recreate.
+func (m *AutomationServerConfig) SetIngressBindAddress(addr string) error {
+	config, err := m.LoadConfig()
+	if err != nil {
+		// If no config exists, create a new one
+		config = &Config{}
+	}
+
+	config.IngressBindAddress = addr
+	return m.SaveConfig(config)
+}
+
+// GetTLSMode returns the configured certificate mode, or "" when the server has
+// never set one (the caller substitutes the default). A missing config file is
+// not an error for the same reason as GetIngressBindAddress.
+func (m *AutomationServerConfig) GetTLSMode() string {
+	config, err := m.LoadConfig()
+	if err != nil {
+		return ""
+	}
+	return config.TLSMode
+}
+
+// SetTLSMode records the certificate mode. Validation belongs to the caller (the
+// daemon owns the set of known modes); this only persists the string.
+func (m *AutomationServerConfig) SetTLSMode(mode string) error {
+	config, err := m.LoadConfig()
+	if err != nil {
+		// If no config exists, create a new one
+		config = &Config{}
+	}
+
+	config.TLSMode = mode
 	return m.SaveConfig(config)
 }
 

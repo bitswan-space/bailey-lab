@@ -76,8 +76,17 @@ func gateExemptPath(p string) bool {
 // rendered gate scene. Subresource fetches, XHR, and non-GET methods must
 // NOT get an HTML doc back (that would corrupt an asset / API response).
 func isTopLevelHTMLGet(r *http.Request) bool {
-	return r.Method == http.MethodGet &&
-		strings.Contains(r.Header.Get("Accept"), "text/html")
+	if r.Method != http.MethodGet {
+		return false
+	}
+	switch r.Header.Get("Sec-Fetch-Dest") {
+	case "document", "iframe", "frame":
+		return true
+	case "":
+		return strings.Contains(r.Header.Get("Accept"), "text/html")
+	default:
+		return false
+	}
 }
 
 // enforceMFAGate runs the Bailey DEVICE-TRUST phase. Returns true if the
@@ -286,9 +295,12 @@ func safeOriginTarget(target string) string {
 	return target
 }
 
-// originRedirect sends the user back to the URL stashed by rememberOrigin
-// (defaulting to the console root), clearing the cookie on the way.
-func originRedirect(w http.ResponseWriter, r *http.Request) {
+// originTarget is the URL a request that has just cleared the gate belongs at:
+// the one stashed by rememberOrigin, else the console root. Always same-site
+// (safeOriginTarget) and always absolute on the onboarding host, so it is safe
+// both as a Location header (originRedirect) and as a value handed to the SPA
+// to navigate itself (gate-state's leave_to).
+func originTarget(r *http.Request) string {
 	target := ""
 	if c, err := r.Cookie(gateOriginCookie); err == nil && c.Value != "" {
 		target = c.Value
@@ -303,6 +315,26 @@ func originRedirect(w http.ResponseWriter, r *http.Request) {
 			target = "https://" + serverConsoleHost(dom) + target
 		}
 	}
-	http.SetCookie(w, &http.Cookie{Name: gateOriginCookie, Value: "", Path: "/", MaxAge: -1})
+	return target
+}
+
+// clearOriginCookie expires the stashed origin. rememberOrigin scopes the
+// cookie to the protected domain when there is one, so the deletion must carry
+// the SAME Domain — a host-only expiry addresses a different cookie and leaves
+// the domain-scoped one live for its full MaxAge, which would then hijack the
+// next gate clearance to a stale target.
+func clearOriginCookie(w http.ResponseWriter) {
+	c := &http.Cookie{Name: gateOriginCookie, Value: "", Path: "/", MaxAge: -1}
+	if dom := cookieDomainForProtected(); dom != "" {
+		c.Domain = dom
+	}
+	http.SetCookie(w, c)
+}
+
+// originRedirect sends the user back to the URL stashed by rememberOrigin
+// (defaulting to the console root), clearing the cookie on the way.
+func originRedirect(w http.ResponseWriter, r *http.Request) {
+	target := originTarget(r)
+	clearOriginCookie(w)
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
