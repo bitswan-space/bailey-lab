@@ -735,8 +735,6 @@ function Shell() {
   }, [tab, behindResolved, syncVisible, handleTab]);
   useEffect(() => {
     if (tab === 'deploy' && isMyExperiment) handleTab('description');
-    // Deploy is not a step in an audit copy — the Audit report took its place.
-    if (tab === 'deploy' && isMyAudit) handleTab('audit');
     if (tab === 'audit' && !isMyAudit) handleTab('description');
     // isMyAudit belongs in the deps: entering an audit copy changes it without
     // changing the tab, and without it the redirect off Deploy never ran.
@@ -1094,8 +1092,7 @@ function Shell() {
               ? handleEnterCopy(myCopy, 'Leaving the audit…')
               : undefined
           }
-          onGoToAudits={() => handleTab('audit')}
-          onGoToDeploy={() => handleTab('audit')}
+          onGoToDeploy={() => handleTab('deploy')}
         />
       )}
       {wt && isMyExperiment && (

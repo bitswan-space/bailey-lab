@@ -216,11 +216,6 @@ export function WorkspaceView({
           <AuditReportTab
             bp={bp}
             copy={wt.name}
-            wt={wt}
-            divergence={divergence}
-            divergenceError={divergenceError}
-            divergenceStale={divergenceStale}
-            onDeployed={() => onTab('deployments')}
             role={role}
             meEmail={meEmail}
             onShowAgents={showAgents}
