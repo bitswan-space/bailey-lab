@@ -5,7 +5,8 @@
   "scripts": {
     "test": "playwright test",
     "test:headed": "playwright test --headed",
-    "report": "playwright show-report"
+    "report": "playwright show-report",
+    "test:device-trust": "playwright test -c playwright.device-trust.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0"

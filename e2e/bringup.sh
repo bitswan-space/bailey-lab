@@ -29,7 +29,8 @@ else
 fi
 
 DOMAIN="bs-e2e.localhost"
-KC_HOST="keycloak.${DOMAIN}"
+KC_DOMAIN="${E2E_KC_DOMAIN:-$DOMAIN}"
+KC_HOST="keycloak.${KC_DOMAIN}"
 KC_PORT="8088"
 BAILEY_URL="https://bailey.${DOMAIN}"
 ONBOARD_URL="https://bailey-onboard.${DOMAIN}"
@@ -72,7 +73,11 @@ BITSWAN="$REPO_ROOT/bitswan-automation-server/bitswan"
 # egress-gateway, infra-driver) as bitswan/<svc>-dev:latest in one parallel pass
 # — the same script developers run locally. The daemon is pinned to these -dev
 # tags below, so the Server Console UI creates workspaces on this checkout's code.
-"$REPO_ROOT/build-dev-images.sh"
+if [ "${E2E_SKIP_WORKSPACE_IMAGES:-0}" = "1" ]; then
+  echo "  (skipping workspace-service images: E2E_SKIP_WORKSPACE_IMAGES=1)"
+else
+  "$REPO_ROOT/build-dev-images.sh"
+fi
 mark "[1/7] build-dev-images.sh: gitops/dashboard/coding-agent/egress/infra-driver"
 
 # The daemon container itself runs this image (debian + docker CLI + git +
@@ -163,7 +168,8 @@ mark "[2/7] daemon + traefik ingress"
 # before handing off to the walkthrough. Moving these pulls into the
 # non-interactive setup keeps the first deploy from stalling a user on a
 # registry pull. Best-effort — a miss just falls back to a click-time pull.
-( for img in postgres:16 dxflrs/garage:v2.3.0 rclone/rclone:1.68 couchdb:3.3 node:24-alpine golang:1.25-alpine; do
+( if [ "${E2E_SKIP_WORKSPACE_IMAGES:-0}" = "1" ]; then exit 0; fi
+  for img in postgres:16 dxflrs/garage:v2.3.0 rclone/rclone:1.68 couchdb:3.3 node:24-alpine golang:1.25-alpine; do
     docker pull "$img" >/dev/null 2>&1 || true
   done
   # Prebuild the BP-template frontend + backend base images so their EXPENSIVE
