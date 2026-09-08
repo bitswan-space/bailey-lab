@@ -18,10 +18,12 @@ import {
   runRequirementTests,
 } from '../services/agent-exec.js';
 import { emailFromRequest } from '../lib/user.js';
+import { bufferedUploadLimit, tooLargeMessage } from '../services/upload-limits.js';
 import type { GitopsClient } from '../services/gitops.js';
 
 export interface BusinessProcessRoutesOptions {
   workspaceRoot: string;
+  uploadLimit?: typeof bufferedUploadLimit;
   gitops: GitopsClient | null;
 }
 
@@ -39,7 +41,11 @@ export interface BusinessProcessRoutesOptions {
  */
 export function registerBusinessProcessRoutes(
   app: FastifyInstance,
-  { workspaceRoot, gitops }: BusinessProcessRoutesOptions,
+  {
+    workspaceRoot,
+    gitops,
+    uploadLimit = bufferedUploadLimit,
+  }: BusinessProcessRoutesOptions,
 ): void {
   app.post<{
     Body: { name?: string; copy?: string };
@@ -90,13 +96,28 @@ export function registerBusinessProcessRoutes(
     let copy = '';
     let filename = '';
     let content: Buffer | null = null;
+    let limit;
     try {
-      // Bundles outgrow the global 5 MiB multipart cap (server.ts) — allow
-      // up to 100 MB for THIS route only (gitops enforces the same cap).
-      for await (const part of req.parts({ limits: { fileSize: 100 * 1024 * 1024 } })) {
+      limit = await uploadLimit(workspaceRoot);
+    } catch (err) {
+      app.log.warn({ err }, 'free-space probe failed');
+      return reply.code(500).send({ error: 'could not determine free disk space' });
+    }
+    let tooLarge = false;
+    try {
+      // Bundles outgrow the global 5 MiB multipart cap (server.ts) — this route
+      // allows whatever fits, up to the in-memory ceiling gitops shares.
+      for await (const part of req.parts({
+        limits: { fileSize: limit.maxBytes },
+        throwFileSizeLimit: false,
+      } as Parameters<typeof req.parts>[0])) {
         if (part.type === 'file' && part.fieldname === 'file') {
           filename = (part.filename ?? 'bundle.tar.gz').split('/').pop() || 'bundle.tar.gz';
           content = await part.toBuffer();
+          if (part.file.truncated) {
+            content = null;
+            tooLarge = true;
+          }
         } else if (part.type === 'field') {
           if (part.fieldname === 'name') name = String(part.value);
           else if (part.fieldname === 'copy') copy = String(part.value);
@@ -104,11 +125,14 @@ export function registerBusinessProcessRoutes(
       }
     } catch (err) {
       app.log.warn({ err }, 'bp restore-from-bundle parse failed');
-      const code = (err as { code?: string } | null)?.code;
-      if (code === 'FST_REQ_FILE_TOO_LARGE') {
-        return reply.code(413).send({ error: 'bundle too large (max 100 MB)' });
-      }
       return reply.code(400).send({ error: 'could not read upload' });
+    }
+    if (tooLarge) {
+      return reply.code(413).send({
+        error: tooLargeMessage([filename], limit),
+        rejected: [filename],
+        maxBytes: limit.maxBytes,
+      });
     }
     if (!content) {
       return reply.code(400).send({ error: 'file is required' });

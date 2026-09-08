@@ -35,16 +35,6 @@ export interface AttachmentRow {
   path: string;
 }
 
-/**
- * Per-file upload cap. Mirrors the server's multipart `fileSize` limit
- * (server/src/server.ts) so the entry points can reject an oversized file
- * with a readable message instead of letting the request fail mid-stream.
- */
-export const ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
-
-/** `ATTACHMENT_MAX_BYTES` as MiB, for user-facing messages. */
-export const ATTACHMENT_MAX_MB = ATTACHMENT_MAX_BYTES / (1024 * 1024);
-
 // Mounted panels register here so an upload made from somewhere else (the
 // editor toolbar's insert-image popover, a pasted screenshot) shows up in
 // the panel without the user having to reload the tab.

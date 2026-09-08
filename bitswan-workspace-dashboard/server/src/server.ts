@@ -60,8 +60,10 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
 
   await app.register(fastifyWebsocket);
   // Multipart for the file-upload endpoint in routes/copy-files.ts.
-  // Limit per-file size to 5 MiB and total per-request to 16 files; users
-  // doing larger drops should be using the editor or shell anyway.
+  // The 5 MiB per-file default applies only to routes that don't override it;
+  // attachment uploads (routes/copy-files.ts) raise it per-request to 80% of
+  // the workspace's free disk space, and BP bundles (routes/business-processes.ts)
+  // to 100 MB. Total per-request stays at 16 files.
   await app.register(fastifyMultipart, {
     limits: {
       fileSize: 5 * 1024 * 1024,
@@ -76,7 +78,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerCopyRoutes(app, { gitops });
   registerCopyFilesRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerTemplateRoutes(app, { gitops });
-  registerAutomationRoutes(app, { gitops });
+  registerAutomationRoutes(app, { gitops, workspaceRoot: WORKSPACE_ROOT });
   registerSnapshotRoutes(app, { gitops });
   registerDataExplorerRoutes(app, { gitops });
   registerTaskRoutes(app, { gitops });

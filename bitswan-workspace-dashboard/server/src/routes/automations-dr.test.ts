@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import os from 'node:os';
 import { test } from 'node:test';
 import Fastify from 'fastify';
 import { registerAutomationRoutes } from './automations.js';
@@ -26,7 +27,7 @@ function buildApp(roles: Record<string, 'admin' | 'auditor' | 'member'>) {
     // eslint-disable-next-line no-restricted-syntax -- minimal test double for the wide GitopsClient class
   } as unknown as GitopsClient;
   const app = Fastify({ logger: false });
-  registerAutomationRoutes(app, { gitops });
+  registerAutomationRoutes(app, { gitops, workspaceRoot: os.tmpdir() });
   return { app, recorded };
 }
 
