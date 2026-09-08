@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/dockerdriver"
@@ -59,6 +60,23 @@ func runApply(cmd *cobra.Command, gitDir string) error {
 		stateDir = filepath.Join(gitopsDir, "bp", bp)
 	}
 
+	progress := func(step, message string) { fmt.Printf("[%s] %s\n", step, message) }
+
+	workspace := gitConfig(gitDir, "bitswan.workspace")
+	releaseApplyLock, err := infradriver.LockWorkspaceApply(
+		cmd.Context(),
+		infradriver.ApplyLockDirFor(gitDir),
+		workspace,
+		infradriver.ApplyLockTimeout(),
+		func(waited time.Duration) {
+			progress("apply_lock", fmt.Sprintf("Another apply is reconciling this workspace; waiting (%s)...", waited))
+		},
+	)
+	if err != nil {
+		return err
+	}
+	defer releaseApplyLock()
+
 	ref := pushedRef() // post-receive feeds "<old> <new> <ref>" on stdin
 	// Materialize the pushed tree into the state dir — the authoritative deployed
 	// tree (per-BP: just this BP's bitswan.yaml; the shared source root is NOT
@@ -73,7 +91,7 @@ func runApply(cmd *cobra.Command, gitDir string) error {
 		return fmt.Errorf("read bitswan.yaml from push: %w", err)
 	}
 	wctx := infradriver.WorkspaceContext{
-		WorkspaceName: gitConfig(gitDir, "bitswan.workspace"),
+		WorkspaceName: workspace,
 		Domain:        gitConfig(gitDir, "bitswan.domain"),
 		GitopsDir:     gitopsDir,
 		SecretsDir:    gitConfig(gitDir, "bitswan.secretsdir"),
@@ -85,7 +103,7 @@ func runApply(cmd *cobra.Command, gitDir string) error {
 	// one-line summary for the push output, not a contract.
 	routes, err := dockerdriver.New(wctx.WorkspaceName).Apply(cmd.Context(),
 		infradriver.ApplyRequest{Ctx: wctx, BitswanYAML: string(yamlBytes)},
-		func(p infradriver.Progress) { fmt.Printf("[%s] %s\n", p.Step, p.Message) })
+		func(p infradriver.Progress) { progress(p.Step, p.Message) })
 	if err != nil {
 		return err
 	}
