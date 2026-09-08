@@ -2601,16 +2601,16 @@ def audit_copy_name(sha: str, owner: str) -> str:
 
 def audit_report_path(bp: str) -> str:
     """Where the report lives: a file in the audited business process, so it is
-    written with the same editor and agent as anything else, versioned with the
-    copy, and carried along if the auditor deploys their changes."""
+    written with the same editor and agent as anything else. It is excluded
+    from the clone, so it is never part of what the auditor proposes."""
     return f"{bp}/AUDIT.md"
 
 
 def _seed_audit_report(copy_path: str, bp: str, sha: str, commit: str) -> None:
     """Leave the report there to be edited, rather than asking the auditor to
-    invent a file. It is an ordinary file in the business process: the agent
-    fills it in, the editor changes it, and it is versioned with the copy — so
-    if the auditor ends up proposing a fix, their reasoning travels with it."""
+    invent a file. It is an ordinary file in the business process directory —
+    the agent fills it in, the editor changes it — but not part of the version:
+    see `_keep_report_out_of_the_source`."""
     path = os.path.join(copy_path, audit_report_path(bp))
     if os.path.exists(path):
         return
@@ -2637,6 +2637,32 @@ what you found and propose it \u2014 which deploys a new version to
 Development, with an audit of its own.
 """
         )
+
+
+def _keep_report_out_of_the_source(copy_path: str, bp: str) -> None:
+    """The report is a file in the copy, but it is not part of the version.
+
+    An auditor who finds something and proposes a fix is proposing code — their
+    findings are recorded with the verdict, in the audit log, not filed into
+    the business process's source tree. So the report is excluded in the
+    clone's own .git/info/exclude: it stays where the editor and the agent can
+    work on it, it never appears as a change to commit, and there is no ignore
+    rule in the tree that would itself have to be proposed.
+    """
+    info = os.path.join(copy_path, bp, ".git", "info")
+    if not os.path.isdir(os.path.dirname(info)):
+        return
+    os.makedirs(info, exist_ok=True)
+    path = os.path.join(info, "exclude")
+    line = "/" + os.path.basename(audit_report_path(bp))
+    existing = ""
+    if os.path.exists(path):
+        with open(path) as fh:
+            existing = fh.read()
+    if line in existing.splitlines():
+        return
+    with open(path, "a") as fh:
+        fh.write(("" if existing.endswith("\n") or not existing else "\n") + line + "\n")
 
 
 @router.get("/audit", response_model=AuditStateResponse)
@@ -2784,6 +2810,7 @@ async def open_audit(body: OpenAuditRequest):
         # auditor's own fix deploys with no sync first.
         await adopt_version(name, AdoptRequest(bp=bp, source="commit", commit=commit))
         _seed_audit_report(copy_path, bp, sha, commit)
+    _keep_report_out_of_the_source(copy_path, bp)
 
     return OpenAuditResponse(
         name=name,
@@ -3762,6 +3789,10 @@ async def get_copy_status(name: str, bp: str | None = None):
         bps = [bp]
     else:
         bps = copy_scope_bps(copy_path)
+
+    if (read_copy_meta(copy_path) or {}).get("kind") == COPY_KIND_AUDIT:
+        for b in bps:
+            _keep_report_out_of_the_source(copy_path, b)
 
     per_bp = await _map_each_bp(
         bps, lambda b: _clone_status_of(os.path.join(copy_path, b), b)
