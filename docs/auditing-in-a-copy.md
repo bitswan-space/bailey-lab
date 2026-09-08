@@ -48,6 +48,15 @@ so one audit cannot bloat a file every workspace operation reads. There is no
 note box: what is stored is the argument, and it is still readable from the
 staging gate and from the production deploy record long after the copy is gone.
 
+## The report is not part of the version
+
+The report is a file in the business process directory of the audit copy, so
+the editor and the agent reach it like anything else — but it is excluded in
+the clone's own `.git/info/exclude`, so git never sees it. An auditor who
+proposes a fix proposes code; their findings are recorded with the verdict, in
+the audit log, rather than filed into the product's source. Audit copies opened
+before this are repaired the next time their change list is read.
+
 ## A released version's record is closed
 
 A sign-off is keyed by the image's content hash, so re-freezing staging on an

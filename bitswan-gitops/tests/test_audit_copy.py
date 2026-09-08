@@ -258,3 +258,103 @@ async def test_an_audit_copy_records_the_business_process_it_is_of(
     meta = json.loads((tmp_path / opened.name / copies.COPY_META_FILE).read_text())
     assert meta["audited_sha"] == "abc12345"
     assert meta["audited_commit"] == "9b72ebb3"
+
+
+def _git(*args, cwd):
+    import os
+    import subprocess
+
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_COMMITTER_NAME="t")
+    subprocess.run(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+
+def _clone_with_report(tmp_path):
+    clone = tmp_path / "audit-abc12345-ab12cd" / "invoices"
+    clone.mkdir(parents=True)
+    _git("init", "-q", cwd=str(clone))
+    _git("config", "user.email", "t@t", cwd=str(clone))
+    _git("config", "user.name", "t", cwd=str(clone))
+    (clone / "worker.py").write_text("print('v1')\n")
+    _git("add", "-A", cwd=str(clone))
+    _git("commit", "-qm", "v1", cwd=str(clone))
+    copies._seed_audit_report(
+        str(clone.parent), "invoices", "abc12345aa", "9b72ebb34032aa"
+    )
+    return clone
+
+
+def _status(clone):
+    import os
+    import subprocess
+
+    env = dict(os.environ)
+    return subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(clone),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+
+def test_the_report_is_never_a_change_to_commit(tmp_path):
+    """Proposing a fix from an audit copy proposes CODE. The report argues
+    about the frozen image and is stored with the verdict; filing it into the
+    business process's source would put an auditor's findings in the product."""
+    clone = _clone_with_report(tmp_path)
+    assert "AUDIT.md" in _status(clone), "untracked until it is excluded"
+
+    copies._keep_report_out_of_the_source(str(clone.parent), "invoices")
+
+    assert (clone / "AUDIT.md").exists(), "still there for the editor and the agent"
+    assert _status(clone) == "", "and invisible to git, so no proposal carries it"
+
+
+def test_excluding_the_report_twice_leaves_one_rule(tmp_path):
+    clone = _clone_with_report(tmp_path)
+    copies._keep_report_out_of_the_source(str(clone.parent), "invoices")
+    copies._keep_report_out_of_the_source(str(clone.parent), "invoices")
+
+    exclude = (clone / ".git" / "info" / "exclude").read_text()
+    assert exclude.splitlines().count("/AUDIT.md") == 1
+
+
+async def test_an_audit_copy_opened_before_this_is_repaired_when_read(
+    tmp_path, monkeypatch
+):
+    """The exclude is written when the audit opens, but audits opened before
+    that landed still have the report showing as a change to commit. Asking
+    what a copy has changed is where every such answer comes from, so it is
+    also where the rule is put right."""
+    clone = _clone_with_report(tmp_path)
+    copy_path = clone.parent
+    (copy_path / copies.COPY_META_FILE).write_text(
+        json.dumps({"kind": COPY_KIND_AUDIT, "bp": "invoices"})
+    )
+    monkeypatch.setattr(copies, "_copies_dir", lambda: str(tmp_path))
+
+    async def no_changes(clone_path, bp):
+        return {}
+
+    monkeypatch.setattr(copies, "_clone_status_of", no_changes)
+    await copies.get_copy_status(copy_path.name, bp="invoices")
+
+    assert _status(clone) == ""
+
+
+async def test_only_an_audit_copy_gets_the_rule(tmp_path, monkeypatch):
+    clone = _clone_with_report(tmp_path)
+    copy_path = clone.parent
+    (copy_path / copies.COPY_META_FILE).write_text(
+        json.dumps({"kind": COPY_KIND_USER})
+    )
+    monkeypatch.setattr(copies, "_copies_dir", lambda: str(tmp_path))
+
+    async def no_changes(clone_path, bp):
+        return {}
+
+    monkeypatch.setattr(copies, "_clone_status_of", no_changes)
+    await copies.get_copy_status(copy_path.name, bp="invoices")
+
+    assert "AUDIT.md" in _status(clone), "an ordinary copy's files are its own"
