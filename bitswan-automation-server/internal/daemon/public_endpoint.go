@@ -1,11 +1,13 @@
 package daemon
 
 import (
-	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -45,23 +47,6 @@ var (
 	publicHostMu    sync.RWMutex
 	publicHostCache map[string]string // public_host(lower) -> endpoint_host(lower)
 )
-
-// hasPublishedEndpoints reports whether this server publishes anything — one of
-// the two reasons it needs a relay tunnel (see startRelayTunnel). Reads the
-// same cache the gate consults per request, warming it on first use like
-// publicHostUnderlying does.
-func hasPublishedEndpoints() bool {
-	publicHostMu.RLock()
-	c := publicHostCache
-	publicHostMu.RUnlock()
-	if c == nil {
-		refreshPublicHostCache()
-		publicHostMu.RLock()
-		c = publicHostCache
-		publicHostMu.RUnlock()
-	}
-	return len(c) > 0
-}
 
 // refreshPublicHostCache reloads the published-host lookup from the DB. Called
 // at startup and after every create/revoke.
@@ -125,32 +110,57 @@ func (s *Server) handlePublicEndpointsList(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// isPublicNamespaceBase reports whether host is the base of the per-AOC public
-// namespace this server publishes under (i.e. some published host is
-// "<label>." + host, e.g. host == "public.<aoc-id>.bswn.io"). The ONE wildcard
-// cert for the namespace runs its DNS-01 challenge at this base
-// (_acme-challenge.public.<aoc-id>), so the ACME bridge must authorise it.
-func isPublicNamespaceBase(host string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
+// derivePublicHost is where a published endpoint lives: one label under this
+// server's own domain.
+//
+// It used to be a host in a namespace the AOC owned, reached through the AOC's
+// relay. That bought a shared zone to put a CDN in front of one day, and cost a
+// second DNS zone, a second wildcard certificate, an outbound tunnel and a
+// relay to run — none of which a server that is already publicly reachable
+// needs. Here the name resolves through the records this server already has,
+// and the wildcard certificate it already holds covers it.
+//
+// The label starts with "public" so a URL says what it is at a glance, then
+// names the endpoint and ends in a short digest of the whole host, so two
+// endpoints never collide and a given endpoint always publishes at the same
+// name. All of it in ONE label: a "public." level of its own would sit outside
+// the *.<domain> certificate this server already holds, which is the second
+// certificate this design exists to avoid.
+func derivePublicHost(endpointHost string) (string, error) {
+	domain := getWildcardCertDomain()
+	if domain == "" {
+		return "", fmt.Errorf("this server has no domain yet; register it with the AOC first")
+	}
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(endpointHost), "."))
 	if host == "" {
-		return false
+		return "", fmt.Errorf("endpoint host is required")
 	}
-	publicHostMu.RLock()
-	c := publicHostCache
-	publicHostMu.RUnlock()
-	if c == nil {
-		refreshPublicHostCache()
-		publicHostMu.RLock()
-		c = publicHostCache
-		publicHostMu.RUnlock()
+	first := publicLabelRe.ReplaceAllString(strings.SplitN(host, ".", 2)[0], "-")
+	first = strings.Trim(first, "-")
+	if first == "" {
+		first = "app"
 	}
-	for ph := range c {
-		if i := strings.IndexByte(ph, '.'); i >= 0 && ph[i+1:] == host {
-			return true
-		}
+	if len(first) > publicLabelNameMax {
+		first = strings.TrimRight(first[:publicLabelNameMax], "-")
 	}
-	return false
+	sum := sha256.Sum256([]byte(host))
+	public := fmt.Sprintf("public-%s-%s.%s", first, hex.EncodeToString(sum[:])[:6], domain)
+	// One label down is exactly what *.<domain> covers; anything deeper would
+	// need a certificate of its own, which is the trap the old namespace was.
+	if !traefikapi.HostCoveredByWildcard(public, domain) {
+		return "", fmt.Errorf("%s is not covered by this server's *.%s certificate", public, domain)
+	}
+	return public, nil
 }
+
+var publicLabelRe = regexp.MustCompile(`[^a-z0-9-]+`)
+
+// publicLabelNameMax bounds the endpoint-name part of the label. A DNS label is
+// 63 characters, and the label is "public-" + name + "-" + 6 hex of digest, so
+// 40 leaves it at 54 at worst. Truncation can land on a hyphen, which a label
+// may not end with — TrimRight above handles the case where the whole label
+// would otherwise be "public-…-" + digest with a doubled separator.
+const publicLabelNameMax = 40
 
 // publicHostForEndpoint is the reverse of publicHostUnderlying: given a
 // protected endpoint host, returns the public host it's published at (if any).
@@ -204,20 +214,6 @@ func canMakePublic(email string, groups []string, host string) (ok bool, reason 
 
 // --- AOC client (allocate/deallocate the public subdomain) ---
 
-func aocPublicSettings() (*config.AutomationOperationsCenterSettings, error) {
-	cfg := config.NewAutomationServerConfig()
-	s, err := cfg.GetAutomationOperationsCenterSettings()
-	if err != nil {
-		return nil, err
-	}
-	if s == nil || strings.TrimSpace(s.AOCUrl) == "" || strings.TrimSpace(s.AccessToken) == "" {
-		return nil, fmt.Errorf("this server is not registered with an AOC")
-	}
-	return s, nil
-}
-
-// aocAllocatePublicEndpoint asks the AOC to allocate a public subdomain for the
-// endpoint (ensuring the *.public.<aoc-id> wildcard) and returns the host+URL.
 // aocErrorMessage turns an AOC error response into a short, human-readable
 // sentence. It NEVER returns the raw body — that is often an HTML error page
 // (e.g. Django's 404) which must never surface in the UI.
@@ -234,112 +230,44 @@ func aocErrorMessage(status int, body []byte) string {
 			return m
 		}
 	}
-	if status == http.StatusNotFound {
-		return "this operations center doesn't support public endpoints yet"
-	}
 	return fmt.Sprintf("the operations center returned HTTP %d", status)
 }
 
-func aocAllocatePublicEndpoint(endpointHost, endpointName string) (publicHost, publicURL string, err error) {
-	s, err := aocPublicSettings()
+// aocPublicSettings returns this server's AOC registration, used by the
+// anon-token path below: a published page's app is handed a Keycloak token for
+// the anonymous identity, and Keycloak is the AOC's. Publishing itself involves
+// the AOC nowhere — the host, the route and the certificate are all this
+// server's own.
+func aocPublicSettings() (*config.AutomationOperationsCenterSettings, error) {
+	cfg := config.NewAutomationServerConfig()
+	settings, err := cfg.GetAutomationOperationsCenterSettings()
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
-	payload, _ := json.Marshal(map[string]string{
-		"endpoint_host": endpointHost,
-		"endpoint_name": endpointName,
-	})
-	base := strings.TrimRight(s.AOCUrl, "/")
-	req, err := http.NewRequest(http.MethodPost, base+"/api/automation_server/public-endpoint", bytes.NewReader(payload))
-	if err != nil {
-		return "", "", err
+	if settings == nil || strings.TrimSpace(settings.AOCUrl) == "" ||
+		strings.TrimSpace(settings.AccessToken) == "" {
+		return nil, fmt.Errorf("this server is not registered with an operations center")
 	}
-	req.Header.Set("Authorization", "Bearer "+s.AccessToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 25 * time.Second}).Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return "", "", fmt.Errorf("%s", aocErrorMessage(resp.StatusCode, b))
-	}
-	var out struct {
-		PublicHost string `json:"public_host"`
-		PublicURL  string `json:"public_url"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", "", fmt.Errorf("decode AOC allocate response: %w", err)
-	}
-	if out.PublicHost == "" {
-		return "", "", fmt.Errorf("AOC returned an empty public host")
-	}
-	if out.PublicURL == "" {
-		out.PublicURL = "https://" + out.PublicHost
-	}
-	return out.PublicHost, out.PublicURL, nil
+	return settings, nil
 }
-
-// aocDeallocatePublicEndpoint releases the public subdomain for the endpoint.
-func aocDeallocatePublicEndpoint(endpointHost string) error {
-	s, err := aocPublicSettings()
-	if err != nil {
-		return err
-	}
-	payload, _ := json.Marshal(map[string]string{"endpoint_host": endpointHost})
-	base := strings.TrimRight(s.AOCUrl, "/")
-	req, err := http.NewRequest(http.MethodDelete, base+"/api/automation_server/public-endpoint", bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+s.AccessToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 25 * time.Second}).Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return fmt.Errorf("%s", aocErrorMessage(resp.StatusCode, b))
-	}
-	return nil
-}
-
-// --- traefik route for the public host ---
 
 // registerPublicRoute adds a Bailey-traefik route for the public host straight
 // to the gate (:9080), DELIBERATELY bypassing the oauth2-proxy hop that fronts
 // protected hosts — public hosts must not trigger a Keycloak login.
 func registerPublicRoute(publicHost string) error {
 	upstream := daemonContainerName + gateListenAddr // e.g. bitswan-automation-server-daemon:9080
-	// Public hosts share the AOC's per-AOC *.public.<aoc-id> namespace, so we
-	// obtain ONE wildcard DNS-01 cert for that namespace — exactly like the
-	// per-server *.<domain> cert — rather than a per-host cert. The challenge
-	// then runs once for the whole namespace (_acme-challenge.public.<aoc-id>)
-	// instead of racing DNS propagation on every publish. HTTP-01 can't work
-	// (the host only resolves through the relay); the DNS-01 solver runs through
-	// the AOC ACME bridge, which authorises the challenge for the owning server.
-	parts := strings.SplitN(publicHost, ".", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("malformed public host %q", publicHost)
-	}
-	publicBase := parts[1] // public.<aoc-id>.bswn.io
-	// A published public host lives in the AOC's own namespace and can only ever
-	// be certified through the AOC's zone. A server whose TLS mode contacts no CA
-	// therefore cannot serve one, and silently registering the route would publish
-	// a URL that answers with an untrusted certificate. Refuse with the reason.
-	if !currentTLSMode().usesACME() {
-		return fmt.Errorf(
-			"cannot publish %s: this server's TLS mode is %s, and a public endpoint's certificate "+
-				"can only be issued through the AOC's zone (mode %s). Publishing is unavailable on "+
-				"this server",
-			publicHost, currentTLSMode(), TLSModeAOCDNS)
+	// A published host is one label under this server's own domain, so the
+	// wildcard certificate every other host here is served with covers it: same
+	// resolver, same TLS domains, no new challenge and no per-host cert. Which
+	// also means publishing works in whatever TLS mode this server already
+	// serves its own console in.
+	domain := getWildcardCertDomain()
+	if domain == "" {
+		return fmt.Errorf("this server has no domain yet; register it with the AOC first")
 	}
 	return traefikapi.AddRouteWithTLSDomains(
 		publicHost, upstream, "", dnsCertResolverName,
-		traefikapi.WildcardTLSDomains(publicBase))
+		traefikapi.WildcardTLSDomains(domain))
 }
 
 func deregisterPublicRoute(publicHost string) error {
@@ -360,19 +288,15 @@ func handlePublicCreate(w http.ResponseWriter, r *http.Request, email string, gr
 		writeJSONErrorStatus(w, reason, http.StatusForbidden)
 		return
 	}
-	name := host
-	if ep, _ := getEndpoint(host); ep != nil && strings.TrimSpace(ep.DisplayName) != "" {
-		name = ep.DisplayName
-	}
-	publicHost, publicURL, err := aocAllocatePublicEndpoint(host, name)
+	publicHost, err := derivePublicHost(host)
 	if err != nil {
-		writeJSONErrorStatus(w, "Couldn't publish: "+err.Error()+".", http.StatusBadGateway)
+		writeJSONErrorStatus(w, "Couldn't publish: "+err.Error()+".", http.StatusBadRequest)
 		return
 	}
+	publicURL := "https://" + publicHost
 	// Persist BEFORE registering the route so acmeChallengeFQDNAllowed (which
 	// consults the cache) authorises the cert challenge that route triggers.
 	if err := dbUpsertPublicEndpoint(host, publicHost, email); err != nil {
-		_ = aocDeallocatePublicEndpoint(host)
 		writeJSONErrorStatus(w, "record public endpoint: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -380,14 +304,10 @@ func handlePublicCreate(w http.ResponseWriter, r *http.Request, email string, gr
 	if err := registerPublicRoute(publicHost); err != nil {
 		_ = dbDeletePublicEndpoint(host)
 		refreshPublicHostCache()
-		_ = aocDeallocatePublicEndpoint(host)
 		writeJSONErrorStatus(w, "register public route: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	_ = recordEvent(email, auditPublicCreate, host)
-	// The first publish is also what makes this server need a tunnel, so it
-	// serves the new URL now rather than after the next daemon restart.
-	ensureRelayTunnel()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":          true,
@@ -423,11 +343,6 @@ func handlePublicRevoke(w http.ResponseWriter, r *http.Request, email string, gr
 		return
 	}
 	refreshPublicHostCache()
-	if err := aocDeallocatePublicEndpoint(host); err != nil {
-		// The local route + row are already gone (the endpoint is private on
-		// this server); surface the AOC cleanup failure but don't fail the call.
-		fmt.Printf("public: AOC deallocate for %q: %v\n", host, err)
-	}
 	_ = recordEvent(email, auditPublicRevoke, host)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
