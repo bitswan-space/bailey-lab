@@ -58,10 +58,16 @@ export function handleTerminalConnection(
   const closeForIdle = () => {
     timedOut = true;
     try {
+      // Say why, in the client's own terminal: the close that follows is
+      // this timeout doing its job, not a fault, and the dashboard renders
+      // this line so the user isn't left reading a bare "connection closed"
+      // (bailey-lab #437). No advice about what to do next — that belongs to
+      // whichever surface is attached, and the dashboard's Coding Agent tab
+      // starts the replacement session itself.
       socket.send(
         JSON.stringify({
           type: 'idle-timeout',
-          message: 'Closed due to inactivity. Pick the session and click Resume to continue.',
+          message: `Closed after ${Math.round(idleMs / 60_000)} min of inactivity`,
         }),
       );
     } catch {

@@ -1,0 +1,52 @@
+name: workspace-dashboard Lint & Test
+
+# The dashboard's unit tests (client/src/lib/*.test.ts,
+# server/src/**/*.test.ts) had no workflow running them — only the hour-long
+# bp-lifecycle e2e touches this component in CI, and it exercises the built
+# image, not these. So the tests were there and nothing checked them.
+
+on:
+  push:
+    paths:
+      - 'bitswan-workspace-dashboard/**'
+      - '.github/workflows/workspace-dashboard-lint.yml'
+  pull_request:
+    paths:
+      - 'bitswan-workspace-dashboard/**'
+      - '.github/workflows/workspace-dashboard-lint.yml'
+
+defaults:
+  run:
+    working-directory: bitswan-workspace-dashboard
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: 'npm'
+        cache-dependency-path: bitswan-workspace-dashboard/package-lock.json
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Run linter
+      run: npm run lint
+
+    # Type-checks with each workspace's own TypeScript, the way its build
+    # does. The server's tsconfig.test.json is the one that also covers its
+    # *.test.ts files.
+    - name: Typecheck
+      run: |
+        npm exec --workspace client -- tsc -b
+        npm run typecheck --workspace server
+
+    - name: Run tests
+      run: |
+        npm run test --workspace client
+        npm run test --workspace server
