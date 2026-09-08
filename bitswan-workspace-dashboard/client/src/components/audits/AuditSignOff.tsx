@@ -200,6 +200,9 @@ export function AuditSignOff({
               {gate.frozen_at ? ` · ${formatRelative(gate.frozen_at)}` : ''}. Audits below apply to the frozen
               image
               {gate.frozen_sha ? ` (${gate.frozen_sha.slice(0, 12)})` : ''}.
+              {gate.released
+                ? ' This image is already released to production, so its sign-offs are closed — they are what that release was approved on.'
+                : ''}
             </span>
           </>
         ) : (

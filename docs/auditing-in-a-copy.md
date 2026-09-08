@@ -48,6 +48,19 @@ so one audit cannot bloat a file every workspace operation reads. There is no
 note box: what is stored is the argument, and it is still readable from the
 staging gate and from the production deploy record long after the copy is gone.
 
+## A released version's record is closed
+
+A sign-off is keyed by the image's content hash, so re-freezing staging on an
+image that is already in production used to reopen it for auditing — and since
+the production history row recomputed its badge from the current store, a later
+verdict silently replaced the evidence a past release was displayed with.
+
+Promotion to production now writes the sign-offs it released on into the same
+commit that releases it (by id — the reports stay in the append-only store,
+where a record is never rewritten), marks the image released, and from then on
+`record_audit` refuses it and the audit door is closed. Reading the release
+again is still possible; rewriting what it was approved on is not.
+
 ## The two exits
 
 An audit ends in one of two places, and the banner says both:
