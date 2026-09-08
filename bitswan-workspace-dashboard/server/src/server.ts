@@ -6,6 +6,7 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import type { GitopsClient } from './services/gitops.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerAuditRoutes } from './routes/audits.js';
 import { registerAutomationRoutes } from './routes/automations.js';
 import { registerBusinessProcessRoutes } from './routes/business-processes.js';
 import { registerEventRoutes } from './routes/events.js';
@@ -80,6 +81,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerCopyFilesRoutes(app, { workspaceRoot: WORKSPACE_ROOT, gitops });
   registerTemplateRoutes(app, { gitops });
   registerAutomationRoutes(app, { gitops, workspaceRoot: WORKSPACE_ROOT });
+  registerAuditRoutes(app, { gitops });
   registerSnapshotRoutes(app, { gitops });
   registerDataExplorerRoutes(app, { gitops });
   registerTaskRoutes(app, { gitops });
