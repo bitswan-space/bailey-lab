@@ -180,12 +180,13 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   const onAcceptProposal = (r: Requirement) => setStatus(r, 'pending', 'accept the proposal');
   const onSendBack = async (r: Requirement) => {
     if (!(await setStatus(r, 'retest', 'send it back to be re-checked'))) return;
-    // Sending back is the one status change with no way back through the UI:
-    // `retest` offers nothing, and Run test — the only other route to `pass` —
-    // is disabled for a requirement that has no test yet. So the row keeps an
-    // Undo for as long as it is still `retest`, rather than a dialog guarding
-    // the way in: a confirm would tax every deliberate use to catch the rare
-    // misclick, and would not help the person who changes their mind after.
+    // Why remember it at all: without an Undo this would be a one-way door.
+    // `retest` has no action of its own, and Run test — the only other route
+    // back to `pass` — is disabled for a requirement that has no test yet. So
+    // the row carries an Undo for as long as it is still `retest`, rather than
+    // a dialog guarding the way in: a confirm would tax every deliberate use
+    // to catch a rare misclick, and would do nothing for the person who
+    // changes their mind a minute later.
     rememberSentBack(new Set(sentBack).add(r.id));
   };
 
