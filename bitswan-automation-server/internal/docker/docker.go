@@ -2,14 +2,13 @@ package docker
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
-
-	"github.com/bitswan-space/bitswan-workspaces/internal/util"
 )
 
 // IsDockerAvailable checks if docker command is available in PATH
@@ -98,22 +97,33 @@ func EnsureDockerNetwork(name string, verbose bool) (bool, error) {
 		}
 		return true, nil
 	}
-	createDockerNetworkCom := exec.Command("docker", "network", "create", name)
 	if verbose {
 		fmt.Printf("Creating Docker network '%s'...\n", name)
 	}
-	if err = util.RunCommandVerbose(createDockerNetworkCom, verbose); err != nil {
-		if err.Error() == "exit status 1" {
-			if verbose {
-				fmt.Printf("Docker network '%s' already exists!\n", name)
-			}
-		} else {
-			fmt.Printf("Failed to create Docker network '%s': %s\n", name, err.Error())
-		}
-	} else {
+	cmd := exec.Command("docker", "network", "create", name)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if verbose {
+		cmd.Stdout = os.Stdout
+	}
+	if err := cmd.Run(); err != nil {
+		out := stderr.String()
 		if verbose {
-			fmt.Printf("Docker network '%s' created!\n", name)
+			fmt.Fprint(os.Stderr, out)
 		}
+		if strings.Contains(strings.ToLower(out), "already exists") {
+			return true, nil
+		}
+		if AddressPoolsExhausted(out) {
+			return false, NewAddressPoolsExhaustedError(fmt.Sprintf("create Docker network %q", name), out, err)
+		}
+		if msg := strings.TrimSpace(out); msg != "" {
+			return false, fmt.Errorf("create Docker network %q: %s", name, msg)
+		}
+		return false, fmt.Errorf("create Docker network %q: %w", name, err)
+	}
+	if verbose {
+		fmt.Printf("Docker network '%s' created!\n", name)
 	}
 	return true, nil
 }
@@ -230,4 +240,3 @@ func InstallDocker() error {
 	fmt.Println("Docker Engine has been successfully installed!")
 	return nil
 }
-
