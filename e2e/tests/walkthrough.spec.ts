@@ -16,7 +16,7 @@
  *
  * Everything else about copies lives behind the far-right "Advanced" menu:
  * "See a colleague's version" (their copy — or, expanded, one of their
- * experiments — under an amber "You are viewing …" banner with one click back)
+ * experiments — under an amber "You are in …" banner with one click back)
  * and "Experiments on <business process>" — throwaway branches OFF YOUR OWN
  * copy. In your own experiment a green banner says so and carries FOUR ways
  * out: "Back to my copy" steps out and LEAVES IT RUNNING (it is waiting under
@@ -1778,7 +1778,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       'merging the experiment back never ended it (the green experiment banner stayed up)',
     ).toBeHidden({ timeout: 8 * 60_000 });
     await expect(
-      d.getByText(/You are viewing/i),
+      d.getByText(/You are in .*— your edits save to their/i),
       'the merge left us on somebody else’s copy instead of our own',
     ).toHaveCount(0);
     await expect(
