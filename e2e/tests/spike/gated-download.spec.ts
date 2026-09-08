@@ -21,10 +21,17 @@ test('a file too big to display can still be downloaded', async ({ page }) => {
   const got = await download;
   console.log('suggested filename:', got.suggestedFilename());
   const body = await got.createReadStream();
-  let bytes = 0;
-  for await (const chunk of body) bytes += (chunk as Buffer).length;
-  console.log('downloaded bytes  :', bytes);
+  const chunks: Buffer[] = [];
+  for await (const chunk of body) chunks.push(chunk as Buffer);
+  const file = Buffer.concat(chunks);
+  console.log('downloaded bytes  :', file.length);
 
   expect(got.suggestedFilename()).toBe('bailey-operators-handbook.pdf');
-  expect(bytes).toBe(7856387);
+  // What matters is that the whole file came down intact, not its exact size:
+  // this handbook is rebuilt by the e2e run, so pinning a byte count made the
+  // test fail the next time the manual changed. A PDF header, a PDF trailer and
+  // a size past the 1 MiB display threshold say the download is complete.
+  expect(file.subarray(0, 5).toString()).toBe('%PDF-');
+  expect(file.subarray(-1024).toString('latin1')).toMatch(/%%EOF/);
+  expect(file.length).toBeGreaterThan(1024 * 1024);
 });
