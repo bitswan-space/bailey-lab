@@ -256,6 +256,8 @@ class AuditSignoffRequest(BaseModel):
     verdict: str  # "approve" | "reject"
     note: str | None = None
     by: str | None = None
+    # The audit report as it stood when the verdict was given, stored with it.
+    report: str | None = None
 
 
 @router.get("/business-processes/{bp}/staging-gate")
@@ -308,7 +310,7 @@ async def post_bp_audit_route(
     bitswan.yaml)."""
     try:
         return await automation_service.record_audit(
-            bp, body.verdict, body.note, body.by
+            bp, body.verdict, body.note, body.by, body.report
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
