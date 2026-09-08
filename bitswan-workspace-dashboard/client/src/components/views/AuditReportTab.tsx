@@ -85,7 +85,8 @@ export function AuditReportTab({
   }, [load]);
 
   const reportPath = audit?.report_path ?? `${bp.name}/AUDIT.md`;
-  const canAudit = role === 'admin' || role === 'auditor';
+  const released = Boolean(audit?.released ?? gate?.released);
+  const canAudit = (role === 'admin' || role === 'auditor') && !released;
   const myVerdict = meEmail
     ? gate?.signoffs?.find((a) => a.who === meEmail)?.verdict
     : undefined;
@@ -150,6 +151,11 @@ export function AuditReportTab({
               <Rocket className="size-3.5" aria-hidden />
               {proposals} changed file{proposals === 1 ? '' : 's'} — deploying proposes a new
               version
+            </span>
+          )}
+          {pane === 'report' && released && (
+            <span className="inline-flex items-center gap-1 rounded bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+              Released to production — the sign-offs on this version are closed
             </span>
           )}
           {pane === 'report' && canAudit && (

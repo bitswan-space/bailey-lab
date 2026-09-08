@@ -686,6 +686,9 @@ export interface StagingGate {
   // eslint-disable-next-line no-restricted-syntax -- null when nothing on staging
   current_sha: string | null;
   stale: boolean;
+  /** The image under review has already been released to production, so its
+   *  sign-offs are closed — they are what that release was approved on. */
+  released?: boolean;
   required: number;
   /** Freeze/unfreeze/policy governance history (newest-first). */
   log: StagingLogEntry[];
@@ -1094,6 +1097,8 @@ export interface CreateAutomationResponse {
 /** `GET /api/audits/{bp}/copy` — this auditor's audit as it stands. */
 export interface AuditState {
   frozen: boolean;
+  /** The version under audit is already released: its audit record is closed. */
+  released?: boolean;
   bp: string;
   report_path: string;
   reason?: string;

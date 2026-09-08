@@ -57,6 +57,14 @@ export function AuditWorkspace({ bp, onEnterCopy }: AuditWorkspaceProps) {
   };
 
   const changed = state?.proposed_changes?.length ?? 0;
+  if (state?.released) {
+    return (
+      <p className="text-[12px] text-muted-foreground">
+        {state.reason ??
+          'This version is already released to production, so its audit is closed.'}
+      </p>
+    );
+  }
   return (
     <div className="flex flex-wrap items-center gap-2">
       <button

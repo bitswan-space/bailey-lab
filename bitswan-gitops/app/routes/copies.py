@@ -2562,6 +2562,9 @@ class AuditStateResponse(BaseModel):
     frozen: bool
     bp: str
     report_path: str
+    # The version under audit has already been released to production, so its
+    # sign-offs are closed: they are the evidence the release was approved on.
+    released: bool = False
     reason: str | None = None
     name: str | None = None
     exists: bool = False
@@ -2658,6 +2661,19 @@ async def audit_state(bp: str = Query(...)):
             report_path=audit_report_path(bp),
         )
     sha = gate.get("frozen_sha") or ""
+    if gate.get("released"):
+        return AuditStateResponse(
+            frozen=True,
+            released=True,
+            reason=(
+                "This version is already released to production. Its sign-offs "
+                "are what that release was approved on, so they stay as they "
+                "are — auditing a new version means deploying a change."
+            ),
+            bp=bp,
+            audited_sha=sha,
+            report_path=audit_report_path(bp),
+        )
     name = audit_copy_name(sha, owner)
     copy_path = os.path.join(_copies_dir(), name)
     exists = os.path.isdir(copy_path)
@@ -2720,6 +2736,14 @@ async def open_audit(body: OpenAuditRequest):
             detail=(
                 "Staging is not frozen for this business process, so there is "
                 "no version under audit. Freeze staging to open an audit."
+            ),
+        )
+    if gate.get("released"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This version is already released to production, so its audit "
+                "is closed. Deploy a change to audit a new version."
             ),
         )
     sha = gate.get("frozen_sha") or ""
