@@ -103,9 +103,9 @@ export function RequirementRow({
       <div className="flex w-[70px] shrink-0 items-center pt-0.5">
         <span className="font-mono text-[11px] font-semibold text-foreground">{req.id}</span>
       </div>
-      {/* Undo sits beside the badge, not in a toast: it belongs to the row whose
-          state it would change, and it disappears on its own the moment that
-          state moves on (a test ran, someone else touched it). */}
+      {/* Undo sits beside the badge because it belongs to the row whose state it
+          would change, and it disappears on its own the moment that state moves
+          on (a test ran, someone else touched it). */}
       <div className="flex w-24 shrink-0 items-center gap-1 pt-0.5">
         <StatusBadge status={req.status} />
         {canUndoSendBack && (
