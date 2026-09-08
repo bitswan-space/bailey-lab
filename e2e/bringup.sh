@@ -286,13 +286,61 @@ for i in $(seq 1 15); do if [ -n "$(docker ps -q -f name='^bitswan-protected-pro
 
 mark "[4/7] protected-proxy (oauth2-proxy)"
 echo "=== [5/7] Point Bailey at this domain + register the gate routes ==="
-# protected_domain drives ProtectedHostnameDomain(); on (re)start the daemon's
+# The domain drives ProtectedHostnameDomain(); on (re)start the daemon's
 # setupBaileyRoutes registers bailey. / bailey--inner. / bailey-onboard. →
 # bitswan-protected-proxy:80, but ONLY when the proxy is already running. So we
 # set the domain and restart the daemon now that the proxy is up.
-docker exec "$DAEMON_CTR" sh -c \
-  'CFG=/root/.config/bitswan/automation_server_config.toml; touch "$CFG"; \
-   grep -q "^protected_domain" "$CFG" || { printf "protected_domain = \"bs-e2e.localhost\"\n%s" "$(cat "$CFG")" > "$CFG.new" && mv "$CFG.new" "$CFG"; }'
+#
+# It goes under [aoc] as `domain`, which is where registering with an AOC puts
+# it — NOT in the top-level `protected_domain`, which is what this used to
+# write. ProtectedHostnameDomain() reads protected_domain FIRST and only falls
+# through to [aoc].domain, so the override meant every hostname in the suite
+# came out of the first branch and the branch real deployments take had never
+# been exercised by an e2e run at all.
+#
+# The domain and nothing else: a registered server also carries [aoc]
+# access_token / aoc_url / automation_server_id, and those are what switch on
+# the AOC-facing machinery — the DNS-01 wildcard certificate
+# (getWildcardCertDomain returns "" without a token), the relay tunnel and the
+# endpoint TLS self-check. There is no AOC here, so leaving them unset keeps all
+# of that off and the stack on its mkcert certificates, which is what we want:
+# the thing being moved onto the production branch is hostname resolution.
+#
+# Written in POSIX sh (the daemon image has no python, and busybox and GNU sed
+# disagree about \n in a replacement). It rewrites rather than appends, so it is
+# re-runnable: any stale top-level protected_domain from the older script is
+# dropped on the way through (left in place it would win the resolution order
+# again and silently restore the old branch), and an [aoc] domain already
+# written by an earlier run is replaced rather than duplicated (two `domain`
+# keys in one table is a TOML error).
+docker exec "$DAEMON_CTR" sh -c '
+  CFG=/root/.config/bitswan/automation_server_config.toml
+  touch "$CFG"
+  {
+    inserted=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        protected_domain*|domain=*|"domain "*) continue ;;
+      esac
+      printf "%s\n" "$line"
+      if [ "$inserted" = 0 ] && [ "$line" = "[aoc]" ]; then
+        printf "domain = \"%s\"\n" "$1"
+        inserted=1
+      fi
+    done < "$CFG"
+    if [ "$inserted" = 0 ]; then printf "[aoc]\ndomain = \"%s\"\n" "$1"; fi
+  } > "$CFG.new"
+  mv "$CFG.new" "$CFG"
+' sh "$DOMAIN"
+# A second [aoc] header would be a duplicate-table TOML error, and the daemon
+# would then come back up with NO domain at all — which shows up much later as
+# an unreachable onboarding host. Catch it here, where the cause is still named.
+aoc_tables="$(docker exec "$DAEMON_CTR" grep -c '^\[aoc\]' /root/.config/bitswan/automation_server_config.toml || true)"
+[ "$aoc_tables" = "1" ] || {
+  echo "ERROR: automation_server_config.toml has $aoc_tables [aoc] tables, want exactly 1"
+  docker exec "$DAEMON_CTR" cat /root/.config/bitswan/automation_server_config.toml
+  exit 1
+}
 docker restart "$DAEMON_CTR" >/dev/null
 sleep 8
 

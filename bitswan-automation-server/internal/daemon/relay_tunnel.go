@@ -276,10 +276,34 @@ func (s *Server) handleRelayStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) startEndpointTLSSelfCheck() {
 	cfg := config.NewAutomationServerConfig()
 	settings, err := cfg.GetAutomationOperationsCenterSettings()
-	if err != nil || settings == nil || settings.Domain == "" {
+	if err != nil {
 		return
 	}
-	go s.runEndpointTLSSelfCheck(settings.Domain, settings.Proxied)
+	domain := endpointTLSSelfCheckDomain(settings)
+	if domain == "" {
+		return
+	}
+	go s.runEndpointTLSSelfCheck(domain, settings.Proxied)
+}
+
+// endpointTLSSelfCheckDomain returns the domain whose public endpoint is worth
+// checking for interception, or "" when there is nothing to check.
+//
+// BOTH halves of the registration matter, which is what the check's own "no-op
+// when the server isn't registered" promise means. The domain is the one the
+// AOC assigned and publishes; the access token is what says this server is
+// still the one it publishes it to. A config carrying a domain and no
+// credentials is not a published server — nothing guarantees that hostname
+// resolves here at all — so failing to fetch our own certificate from it says
+// nothing about interception, and reporting tls_selfcheck_failed there is a
+// false alarm in the audit log and in whatever SIEM it is forwarded to.
+//
+// Same gate getWildcardCertDomain uses (acme_dns.go), for the same reason.
+func endpointTLSSelfCheckDomain(settings *config.AutomationOperationsCenterSettings) string {
+	if settings == nil || settings.AccessToken == "" {
+		return ""
+	}
+	return settings.Domain
 }
 
 // runEndpointTLSSelfCheck verifies the public endpoint at startup (retrying
