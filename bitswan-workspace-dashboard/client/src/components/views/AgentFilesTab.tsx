@@ -5,6 +5,7 @@ import {
   Folder,
   GitPullRequest,
   Loader2,
+  LogIn,
   MessageSquare,
   RotateCcw,
 } from 'lucide-react';
@@ -18,6 +19,7 @@ import {
   RELAUNCH_BACKOFF_MS,
   type AgentLaunchFailure,
 } from '@/lib/agentSessionExit';
+import { gateSessionState } from '@/lib/auth-token';
 import { useLatestAgentSession } from '@/hooks/useLatestAgentSession';
 import { cn } from '@/lib/utils';
 import { useUrlEnum, useUrlFlag } from '@/lib/urlState';
@@ -38,24 +40,40 @@ const SUBS: Sub[] = ['chat', 'files', 'containers'];
 /**
  * Where autostart stands for the viewed BP. `launching` covers both "a
  * session is up" and "we're about to (re)try one"; the rest are the give-up
- * states the pane renders an error for. Which one we land in — and whether we
- * retry at all — is decided by `decideAfterAgentExit`.
+ * states the pane renders an error for. `decideAfterAgentExit` produces all of
+ * them except `signed-out`, which no close code can tell you — that one comes
+ * from asking the gate (see the exit handler below).
  */
-type LaunchState = 'launching' | AgentLaunchFailure;
+type LaunchState = 'launching' | AgentLaunchFailure | 'signed-out';
+type Failure = Exclude<LaunchState, 'launching'>;
 
 /**
- * The message each give-up state puts on screen. They have to be told apart:
- * "refused" is an answer from the server, "cannot-connect" means nothing
- * answered at all — and for that one a reload is a real remedy, because it
- * re-runs the whole sign-in handshake the socket depends on.
+ * The message each give-up state puts on screen, and what the button under it
+ * should do. They have to be told apart, because the action that helps is
+ * different for each: "refused" is an answer from the server, "cannot-connect"
+ * means nothing answered and trying again may well work, and "signed-out"
+ * means retrying CANNOT work — the socket has no session to present, and only
+ * a top-level navigation can get one back.
  */
-const FAILURE_MESSAGE: Record<AgentLaunchFailure, string> = {
-  refused: 'The coding agent for this business process could not be reached.',
-  'cannot-connect':
-    'The connection to the coding agent could not be opened. Retry, or reload the page if that keeps failing.',
-  'exits-immediately': `The coding agent for this business process exited immediately on ${
-    RELAUNCH_BACKOFF_MS.length + 1
-  } attempts.`,
+const FAILURE: Record<Failure, { message: string; action: 'retry' | 'sign-in' }> = {
+  refused: {
+    message: 'The coding agent for this business process could not be reached.',
+    action: 'retry',
+  },
+  'cannot-connect': {
+    message: 'The connection to the coding agent could not be opened.',
+    action: 'retry',
+  },
+  'exits-immediately': {
+    message: `The coding agent for this business process exited immediately on ${
+      RELAUNCH_BACKOFF_MS.length + 1
+    } attempts.`,
+    action: 'retry',
+  },
+  'signed-out': {
+    message: 'Your sign-in session has expired, so the agent could not reconnect.',
+    action: 'sign-in',
+  },
 };
 
 /**
@@ -114,6 +132,10 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   // The BP's live agent — one session per (user, copy, BP), tracked by the
   // provider.
   const agent = sessionFor({ copy, bp });
+  // Read by the async gate probe below, which resolves after the exit that
+  // started it — by which time a retry may already have succeeded.
+  const agentRef = useRef(agent);
+  agentRef.current = agent;
 
   // ---------------------------------------------------------------------
   // Autostart. There is no manual "Start agent" step (bailey-lab #246): an
@@ -198,36 +220,58 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   // including a socket that never opened, which used to go unreported and
   // left the tab holding a dead terminal with no way back (bailey-lab #437).
   // `decideAfterAgentExit` owns the routing (and its tests pin it); this
-  // effect just carries the decision out.
-  useEffect(
-    () =>
-      onExit((s) => {
-        if (s.copy !== copy || s.bp !== bp) return;
-        const decision = decideAfterAgentExit({
-          opened: s.opened,
-          closeCode: s.exitCode,
-          ageMs: Date.now() - s.startedAt,
-          failedAttempts: failedAttempts.current,
-        });
-        if (decision.relaunch === 'no') {
+  // effect carries the decision out, and asks one question the close itself
+  // cannot answer.
+  //
+  // That question is for the socket that never opened. It has two very
+  // different causes wearing the same 1006: something momentary (the agent
+  // container restarting, the proxy blipping), which retrying fixes, or the
+  // gate's session having lapsed, which retrying CANNOT fix — measured, on a
+  // lapsed session every attempt in the budget was declined and only a reload
+  // brought the agent back. `/oauth2/auth` answers it same-origin, so we ask
+  // instead of spending 30 seconds of backoff on a dead end and then offering
+  // a Retry that can't work either.
+  useEffect(() => {
+    let cancelled = false;
+    const off = onExit((s) => {
+      if (s.copy !== copy || s.bp !== bp) return;
+      if (!s.opened) {
+        void gateSessionState().then((state) => {
+          // Only act on a definite "signed out", and only while this scope
+          // still has nothing running — a retry may have won the race.
+          if (cancelled || state !== 'signed-out' || agentRef.current) return;
           cancelRelaunch();
-          setLaunchState(decision.failure);
-          return;
-        }
-        if (decision.relaunch === 'immediately') {
-          failedAttempts.current = 0;
-          setLaunchGen((g) => g + 1);
-          return;
-        }
-        failedAttempts.current += 1;
+          setLaunchState('signed-out');
+        });
+      }
+      const decision = decideAfterAgentExit({
+        opened: s.opened,
+        closeCode: s.exitCode,
+        ageMs: Date.now() - s.startedAt,
+        failedAttempts: failedAttempts.current,
+      });
+      if (decision.relaunch === 'no') {
         cancelRelaunch();
-        relaunchTimer.current = setTimeout(() => {
-          relaunchTimer.current = null;
-          setLaunchGen((g) => g + 1);
-        }, decision.delayMs);
-      }),
-    [onExit, copy, bp, cancelRelaunch],
-  );
+        setLaunchState(decision.failure);
+        return;
+      }
+      if (decision.relaunch === 'immediately') {
+        failedAttempts.current = 0;
+        setLaunchGen((g) => g + 1);
+        return;
+      }
+      failedAttempts.current += 1;
+      cancelRelaunch();
+      relaunchTimer.current = setTimeout(() => {
+        relaunchTimer.current = null;
+        setLaunchGen((g) => g + 1);
+      }, decision.delayMs);
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [onExit, copy, bp, cancelRelaunch]);
 
   // Manual escape hatch for the exhausted-attempts state: hand the attempt
   // budget back to the autostart effect.
@@ -307,11 +351,23 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
               <>
                 <AlertTriangle className="size-5 text-amber-600" aria-hidden />
                 <span className="max-w-md text-center text-destructive">
-                  {FAILURE_MESSAGE[failure]}
+                  {FAILURE[failure].message}
                 </span>
-                <Button onClick={retry} size="sm" variant="outline">
-                  <RotateCcw className="size-3.5" aria-hidden /> Retry
-                </Button>
+                {FAILURE[failure].action === 'sign-in' ? (
+                  // A reload, not a retry: it is a top-level navigation, so it
+                  // can complete the sign-in redirect chain that a WebSocket
+                  // upgrade and a same-origin fetch both cannot. Left to the
+                  // user rather than done automatically — reloading under
+                  // someone would throw away an unsaved edit elsewhere in the
+                  // dashboard.
+                  <Button onClick={() => window.location.reload()} size="sm" variant="outline">
+                    <LogIn className="size-3.5" aria-hidden /> Sign in again
+                  </Button>
+                ) : (
+                  <Button onClick={retry} size="sm" variant="outline">
+                    <RotateCcw className="size-3.5" aria-hidden /> Retry
+                  </Button>
+                )}
               </>
             ) : (
               <span className="flex items-center gap-2">

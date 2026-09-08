@@ -23,6 +23,20 @@ export interface TerminalConnectionOptions {
 }
 
 /**
+ * How the idle close describes itself to the client. Exact in both the shape
+ * that matters — the 30-minute default reads "30 min" — and the odd ones a
+ * `CODING_AGENT_IDLE_TIMEOUT_MS` override produces, where rounding to the
+ * nearest minute would have the server state a duration it did not use.
+ */
+export function idleNoticeMessage(idleMs: number): string {
+  const minutes = idleMs / 60_000;
+  const howLong = Number.isInteger(minutes)
+    ? `${minutes} min`
+    : `${Math.round(idleMs / 1000)} s`;
+  return `Closed after ${howLong} of inactivity`;
+}
+
+/**
  * Bridge a WebSocket to a freshly spawned pty for the lifetime of the
  * connection. Binary frames flow as raw bytes in both directions; text
  * frames carry JSON control messages (`resize`, `ping`). The bridge
@@ -67,7 +81,7 @@ export function handleTerminalConnection(
       socket.send(
         JSON.stringify({
           type: 'idle-timeout',
-          message: `Closed after ${Math.round(idleMs / 60_000)} min of inactivity`,
+          message: idleNoticeMessage(idleMs),
         }),
       );
     } catch {
