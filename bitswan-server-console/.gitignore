@@ -17,3 +17,5 @@ tests/screenshots/
 # build) — never commit these; see automation-server-release.yml.
 public/handbook/handbook.html
 public/handbook/handbook.pdf
+public/handbook/paged.polyfill.js
+public/handbook/handbook-navsync.js

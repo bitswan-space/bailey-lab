@@ -14,7 +14,10 @@
  */
 
 export const MANUAL = {
-  title: "Bitswan Bailey — The Operator's Handbook",
+  // The browser-tab title, and nothing else — the cover has its own heading.
+  // Matches the Server Console's "Bailey — Server Console" so the two pages
+  // read as one product in a row of tabs.
+  title: 'Bailey — Handbook',
   subtitle: "The Operator's Handbook",
   edition: '2026 Edition',
   headline: 'Run it like it matters.',
