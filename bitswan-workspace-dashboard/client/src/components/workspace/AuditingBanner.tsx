@@ -11,9 +11,7 @@ export interface AuditingBannerProps {
   proposedChanges: number;
   /** Back to the auditor's own copy. */
   onLeave: () => void;
-  /** To the Audits section, where the sign-off lives. */
-  onGoToAudits: () => void;
-  /** To the Deploy screen, which is how a proposal becomes a new version. */
+  /** To Propose a new version, which is how a proposal becomes one. */
   onGoToDeploy: () => void;
 }
 
@@ -35,7 +33,6 @@ export function AuditingBanner({
   bpLabel,
   proposedChanges,
   onLeave,
-  onGoToAudits,
   onGoToDeploy,
 }: AuditingBannerProps) {
   const sha = (copy.audited?.sha ?? '').slice(0, 8);
@@ -64,14 +61,6 @@ export function AuditingBanner({
           <Rocket className="mr-1 size-3.5" aria-hidden /> Propose as a new version
         </Button>
       )}
-      <Button
-        size="sm"
-        variant="outline"
-        className="shrink-0 border-violet-400 bg-white text-violet-900 hover:bg-violet-100"
-        onClick={onGoToAudits}
-      >
-        Open the audit report
-      </Button>
       <Button
         size="sm"
         variant="outline"

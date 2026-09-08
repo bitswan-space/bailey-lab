@@ -125,12 +125,21 @@ const DEPLOY_STEP: FlowStep = {
 };
 
 // In an AUDIT copy the last step is not publishing the copy — it is the audit
-// itself: the report, and the sign-off it argues for. Proposing a fix is still
-// a deploy, offered from inside that tab and named for what it means.
+// itself: the report, and the sign-off it argues for.
 const AUDIT_REPORT_STEP: FlowStep = {
   id: 'audit',
   label: 'Audit report',
   Icon: Gavel,
+  needsCopy: true,
+};
+
+// The other way out of an audit. It is the same deploy every copy has, named
+// for what it means here, and it sits beside the report rather than after it:
+// an auditor does one or the other, not one and then the other.
+const PROPOSE_STEP: FlowStep = {
+  id: 'deploy',
+  label: 'Propose a new version',
+  Icon: Rocket,
   needsCopy: true,
 };
 
@@ -221,7 +230,7 @@ export function TopNav({
     const steps: FlowStep[] = [];
     if (syncVisible) steps.push(SYNC_STEP);
     steps.push(...IN_COPY_STEPS);
-    if (isMyAudit) steps.push(AUDIT_REPORT_STEP);
+    if (isMyAudit) steps.push(AUDIT_REPORT_STEP, PROPOSE_STEP);
     else if (!isMyExperiment) steps.push(DEPLOY_STEP);
     return steps;
   }, [syncVisible, isMyExperiment, isMyAudit]);
@@ -356,9 +365,13 @@ export function TopNav({
           <div key={step.id} className="flex shrink-0 items-center gap-1">
             {i > 0 &&
               // The design marks the Agent ↔ Requirements pair with a cycle
-              // icon (iterate between them); plain chevrons elsewhere.
+              // icon (iterate between them). The two exits from an audit are
+              // alternatives, not a sequence, so they are joined by "or".
+              // Plain chevrons elsewhere.
               (step.id === 'requirements' ? (
                 <RefreshCw className="size-3 text-muted-foreground" aria-hidden />
+              ) : step.id === 'deploy' && isMyAudit ? (
+                <span className="px-0.5 text-[11px] text-muted-foreground">or</span>
               ) : (
                 <ChevronRight className="size-3.5 text-muted-foreground" aria-hidden />
               ))}

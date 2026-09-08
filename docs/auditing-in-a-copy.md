@@ -33,6 +33,13 @@ From there nothing is special:
 One audit copy per (image, auditor): two auditors reviewing the same image work
 in their own copies, and re-opening returns to the one already there.
 
+## The two exits are two steps, side by side
+
+The top bar of an audit copy ends in **Audit report or Propose a new version**
+— joined by "or", because they are alternatives rather than a sequence. The
+report tab is the report, with the verdict at its foot; proposing is the same
+deploy every copy has, named for what it means here.
+
 ## The report is what gets signed
 
 Where a copy offers **Deploy**, an audit copy offers **Audit report**. The
@@ -41,7 +48,8 @@ description uses, so the coding agent in the copy reads and writes it too. It
 is seeded when the audit opens, under the four headings that are the method:
 what this version changes, risk, verified, not verified.
 
-**Approve** and **Request changes** sit on that tab, on the report itself.
+**Approve** and **Request changes** sit at the foot of that tab, under the
+report itself — where someone who has just read to the end is looking.
 Pressing one saves the document, reads it back, and records it *with* the
 verdict — in `bitswan.yaml`, keyed by the image's content hash, capped at 64 KiB
 so one audit cannot bloat a file every workspace operation reads. There is no
