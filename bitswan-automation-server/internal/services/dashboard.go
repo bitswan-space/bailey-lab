@@ -118,6 +118,23 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), caEnvVars...)
 	}
 
+	sidebarEnabled := false
+	enableAgentSidebar := func(extensionPathInContainer string) {
+		sidebarEnabled = true
+		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
+			"CLAUDE_EXTENSION_PATH="+extensionPathInContainer,
+			"SIDEBAR_CONFIG_ROOT=/claude-config",
+		)
+		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
+			wsVolume("claude-configs", "/claude-config", false))
+		for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+			if v := os.Getenv(key); v != "" {
+				bitswanDashboard["environment"] = append(
+					bitswanDashboard["environment"].([]string), key+"="+v)
+			}
+		}
+	}
+
 	// Hot-reload dev mode: mount the source directory and let the container's
 	// entrypoint run `npm install` + `npm run dev` instead of the pre-built bundle.
 	if devConfig != nil && devConfig.SourceDir != "" {
@@ -128,6 +145,17 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			"BITSWAN_DEV_MODE=true",
 			"BITSWAN_DASHBOARD_DEV_DIR="+dashboardDevContainerPath,
 		)
+		if _, err := os.Stat(filepath.Join(devConfig.SourceDir, ".claude-extension")); err == nil {
+			enableAgentSidebar(dashboardDevContainerPath + "/.claude-extension")
+		}
+	}
+
+	if hostExtension := os.Getenv("BITSWAN_CLAUDE_EXTENSION_DIR"); hostExtension != "" && !sidebarEnabled {
+		if ExtensionDirVisible(hostExtension) {
+			bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
+				hostExtension+":/claude-extension:ro")
+			enableAgentSidebar("/claude-extension")
+		}
 	}
 
 	dockerCompose := map[string]interface{}{
@@ -355,4 +383,18 @@ func (d *DashboardService) runCommand(cmd *exec.Cmd) error {
 		return fmt.Errorf("command failed: %w\nOutput: %s", err, string(output))
 	}
 	return nil
+}
+
+func ExtensionDirVisible(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(dir); err == nil {
+		return true
+	}
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	_, err := os.Stat(filepath.Join("/host", dir))
+	return err == nil
 }

@@ -4,3 +4,5 @@ package-lock.json
 playwright-report/
 test-results/
 manual/build/
+*.png
+!fixtures/*.png

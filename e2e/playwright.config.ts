@@ -18,6 +18,9 @@ const BAILEY_URL =
 
 export default defineConfig({
   testDir: './tests',
+  // The walkthrough IS this suite (it writes the manual). Spike specs under
+  // tests/spike/ need their own host and are run with their own config.
+  testIgnore: ['spike/**'],
   // The lifecycle is one ordered story (create → … → rollback); run serially.
   fullyParallel: false,
   workers: 1,

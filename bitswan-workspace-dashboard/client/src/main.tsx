@@ -11,7 +11,6 @@ import '@fontsource/roboto/500.css';
 import '@fontsource/roboto/700.css';
 import '@fontsource/roboto-mono/400.css';
 import '@fontsource/roboto-mono/500.css';
-import '@xterm/xterm/css/xterm.css';
 import './styles.css';
 
 const root = document.getElementById('root');
