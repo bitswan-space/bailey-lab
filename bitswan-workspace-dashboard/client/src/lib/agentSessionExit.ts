@@ -61,8 +61,13 @@ export interface AgentExitFacts {
    * the handshake never completed, so no session existed behind it.
    */
   opened: boolean;
-  /** WebSocket close code, when the browser reported one. */
-  closeCode?: number;
+  /**
+   * WebSocket close code. Always present: the browser supplies one on every
+   * close (1005 when the far end sent no frame), and `ExitedSession` carries
+   * it through as a required number — so this does not model an absence that
+   * cannot happen.
+   */
+  closeCode: number;
   /** How long the session had been up when it closed, in ms. */
   ageMs: number;
   /** Launch failures already counted against the budget for this scope. */

@@ -110,15 +110,3 @@ test('a refusal on a long-lived session is still a refusal', () => {
   const d = decideAfterAgentExit(ended({ closeCode: 1008, ageMs: 60 * 60_000 }));
   assert.deepEqual(d, { relaunch: 'no', failure: 'refused' });
 });
-
-test('a close with no code at all is still routed', () => {
-  // The browser always gives us one, but the type allows its absence and the
-  // one thing we must never do is drop an exit on the floor — that is how
-  // #437 left a dead terminal on screen.
-  const d = decideAfterAgentExit({
-    opened: true,
-    ageMs: HEALTHY_SESSION_MS + 1,
-    failedAttempts: 0,
-  });
-  assert.deepEqual(d, { relaunch: 'immediately' });
-});
