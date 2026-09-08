@@ -12,6 +12,8 @@ import {
 import { WorkspaceView } from '@/components/views/WorkspaceView';
 import { DeleteCopyDialog } from '@/components/workspace/DeleteCopyDialog';
 import { BusyOverlay } from '@/components/workspace/BusyOverlay';
+import { useCopyStatus } from '@/hooks/useCopyStatus';
+import { AuditingBanner } from '@/components/workspace/AuditingBanner';
 import { ExperimentBanner } from '@/components/workspace/ExperimentBanner';
 import { TaskQueuePanel } from '@/components/workspace/TaskQueuePanel';
 import { ViewingBanner } from '@/components/workspace/ViewingBanner';
@@ -19,6 +21,7 @@ import {
   TakeVersionDialog,
   type TakeVersionSource,
 } from '@/components/workspace/TakeVersionDialog';
+import { handOffToAgent } from '@/lib/agent-handoff';
 import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { watchDeployTask } from '@/lib/deployBp';
@@ -26,7 +29,7 @@ import { SessionExpiredError } from '@/lib/session';
 import { useBpDivergence } from '@/hooks/useBpDivergence';
 import { useBpLabel } from '@/hooks/useBpLabel';
 import { getUrlParam, setUrlParams } from '@/lib/urlState';
-import type { BusinessProcess, Copy, FlowTab } from '@/types';
+import type { BusinessProcess, Copy, EnterCopy, FlowTab } from '@/types';
 
 export function App() {
   return (
@@ -54,6 +57,7 @@ const FLOW_TABS: FlowTab[] = [
   'agent',
   'requirements',
   'deploy',
+  'audit',
   'deployments',
 ];
 
@@ -345,10 +349,14 @@ function Shell() {
 
   // Switching tabs drops the previous page's scoped params so the URL stays
   // a clean, faithful description of what's on screen.
-  const handleTab = useCallback((next: FlowTab) => {
+  const handleTab = useCallback((next: FlowTab, page?: Record<string, string>) => {
     setTab(next);
-    setUrlParams(Object.fromEntries(PAGE_SCOPED_PARAMS.map((k) => [k, null])));
+    setUrlParams({
+      ...Object.fromEntries(PAGE_SCOPED_PARAMS.map((k) => [k, null])),
+      ...(page ?? {}),
+    });
   }, []);
+
 
   // A just-created BP: its name is selected optimistically the instant the
   // create call returns, but it isn't in the `processes` SSE snapshot yet. The
@@ -492,16 +500,15 @@ function Shell() {
         if (res.status === 'needs_rebase') {
           toast.error(`${bpLabelForCopy}: ${res.message}`, { id, duration: 10000 });
           // Hand off to the Coding Agent on this copy to resolve the conflict.
-          // HANDING OFF MEANS GIVING IT THE TASK. Opening the tab was all this
-          // did, so the user arrived at an agent that had been told nothing,
-          // sitting at an empty prompt, with no way to know that finishing a
-          // rebase was now their job to describe. Both hand-offs sent a prompt
-          // until the terminal session layer was removed.
-          // REGRESSION, KNOWINGLY TAKEN: the prompt hand-off went with the
-          // terminal session layer. This opens the tab and tells the agent
-          // nothing, which is the state the paragraph above was written about.
-          // Restoring it needs a way to seed the hosted sidebar's composer.
+          // HANDING OFF MEANS GIVING IT THE TASK: the agent is opened with the
+          // rebase already described in its composer, so the user is not left
+          // in front of an agent that was told nothing.
           setCopy(copyName);
+          void handOffToAgent(
+            copyName,
+            bpDir,
+            `Pulling main into ${bpDir} stopped on a rebase conflict: ${res.message} Finish the rebase in this copy — resolve the conflicted files, keeping both sides' intent, and tell me what you decided.`,
+          ).catch(() => undefined);
           handleTab('agent');
           return;
         }
@@ -615,6 +622,13 @@ function Shell() {
   // anything else is somebody else's (or a legacy copy reached by URL) and
   // gets the "you are viewing" banner.
   const isMyCopy = copy !== null && copy === myCopy;
+  // An audit copy is a copy of the version under audit, opened from the Audits
+  // section. It gets its own banner rather than "you are viewing someone's
+  // copy": what matters there is that the frozen image is untouched by
+  // anything done here, and that changing it is a proposal, not a sign-off.
+  const isMyAudit =
+    wt?.kind === 'audit' &&
+    (!wt.owner || !myEmail || wt.owner.toLowerCase() === myEmail.toLowerCase());
   const isMyExperiment =
     wt?.kind === 'experiment' &&
     !!myCopy &&
@@ -622,7 +636,15 @@ function Shell() {
     // gitops also records the owner; when it's there it must agree. An
     // unresolved identity never hides your own experiment from you.
     (!wt.owner || !myEmail || wt.owner.toLowerCase() === myEmail.toLowerCase());
-  const isColleagueView = copy !== null && !isMyCopy && !isMyExperiment;
+  const isColleagueView =
+    copy !== null && !isMyCopy && !isMyExperiment && !isMyAudit;
+  const auditStatus = useCopyStatus(isMyAudit && copy ? copy : '', copyEditNonce);
+  // Writing the report is not proposing a change to the version: the report is
+  // a file in the copy, but what it argues about is the frozen image, and it is
+  // stored with the verdict rather than deployed. Only the rest is a proposal.
+  const auditProposedChanges = isMyAudit
+    ? auditStatus.changed.filter((c) => !c.path.endsWith('/AUDIT.md')).length
+    : 0;
 
   // ── the ONE divergence reading ────────────────────────────────────────────
   // How the business process ON SCREEN stands against its OWN main. Read once,
@@ -713,7 +735,12 @@ function Shell() {
   }, [tab, behindResolved, syncVisible, handleTab]);
   useEffect(() => {
     if (tab === 'deploy' && isMyExperiment) handleTab('description');
-  }, [tab, isMyExperiment, handleTab]);
+    // Deploy is not a step in an audit copy — the Audit report took its place.
+    if (tab === 'deploy' && isMyAudit) handleTab('audit');
+    if (tab === 'audit' && !isMyAudit) handleTab('description');
+    // isMyAudit belongs in the deps: entering an audit copy changes it without
+    // changing the tab, and without it the redirect off Deploy never ran.
+  }, [tab, isMyExperiment, isMyAudit, handleTab]);
 
   // Merge an experiment back into the copy it branched off. A clean merge
   // fast-forwards the parent branch and redeploys the parent's live-dev; a
@@ -784,9 +811,13 @@ function Shell() {
         toast.error(`“${label}”: ${res.message}`, { id, duration: 10000 });
         if (bpId) {
           // The agent works inside the experiment, rebasing it onto the
-          // parent branch; the merge fast-forwards once it's done. The prompt
-          // that used to describe that task went with the terminal session
-          // layer, so the user has to ask for it themselves for now.
+          // parent branch; the merge fast-forwards once it's done. It is
+          // opened with that task already in its composer.
+          void handOffToAgent(
+            name,
+            bpId,
+            `Merging “${label}” back stopped on a rebase conflict: ${res.message} Rebase this experiment onto its parent branch here — resolve the conflicts, keep both sides' intent, and tell me what you decided. The merge fast-forwards once that is done.`,
+          ).catch(() => undefined);
         }
         handleTab('agent');
         return;
@@ -986,8 +1017,13 @@ function Shell() {
   // Move to another copy — a colleague's, one of your experiments, or back to
   // your own. The destination already exists, so the only thing the lock waits
   // for is any business process being materialized into it on the way.
-  const handleEnterCopy = useCallback(
-    (name: string, label: string, after?: () => Promise<void>) => {
+  const handleEnterCopy = useCallback<EnterCopy>(
+    (name, label, opts) => {
+      // Where the caller wants to arrive, before anything can bail out: a
+      // door that opens the code has to open it even when the copy behind it
+      // is the one already in view.
+      if (opts?.landOn) handleTab(opts.landOn, opts.landOnView ? { sub: opts.landOnView } : undefined);
+      const after = opts?.after;
       if (name === copy && !after) return;
       uiLock.lock(label, BUSY_TIMEOUT_SWITCH_MS, name);
       setCopy(name);
@@ -1000,7 +1036,7 @@ function Shell() {
       // only cares that it is over.
       void after().finally(() => uiLock.settling());
     },
-    [copy, uiLock],
+    [copy, uiLock, handleTab],
   );
 
   const isLoading = processes === null;
@@ -1027,6 +1063,7 @@ function Shell() {
         myCopy={myCopy}
         syncVisible={syncVisible}
         isMyExperiment={isMyExperiment}
+        isMyAudit={isMyAudit}
         tab={tab}
         onTab={handleTab}
         role={role}
@@ -1045,6 +1082,20 @@ function Shell() {
                   handleEnterCopy(myCopy, 'Switching back to your copy…'),
               }
             : {})}
+        />
+      )}
+      {wt && isMyAudit && (
+        <AuditingBanner
+          copy={wt}
+          bpLabel={wt.bp ? bpLabel(wt.bp) : ''}
+          proposedChanges={auditProposedChanges}
+          onLeave={() =>
+            myCopy
+              ? handleEnterCopy(myCopy, 'Leaving the audit…')
+              : undefined
+          }
+          onGoToAudits={() => handleTab('audit')}
+          onGoToDeploy={() => handleTab('audit')}
         />
       )}
       {wt && isMyExperiment && (
@@ -1088,6 +1139,9 @@ function Shell() {
         <WorkspaceView
           bp={bp}
           wt={wt}
+          meEmail={myEmail}
+          role={role}
+          onEnterCopy={handleEnterCopy}
           copyCreating={copyCreating}
           addingBp={addingBp}
           tab={tab}
