@@ -82,3 +82,20 @@ export async function openSidebarFrame(page: Page) {
   expect(frame, 'the sidebar frame is present').toBeTruthy();
   return frame!;
 }
+
+/**
+ * Whether the playground's staging stage is frozen right now.
+ *
+ * Every audit spec needs a frozen image to audit, and the playground loses one
+ * the moment the audited image reaches production — staging unfreezes itself on
+ * release. Without this the specs waited two minutes for a button that is
+ * correctly absent and then blamed the UI.
+ */
+export async function stagingIsFrozen(page: Page): Promise<boolean> {
+  const d = page.frameLocator('iframe').first();
+  return d
+    .getByRole('button', { name: /^Unfreeze$/ })
+    .first()
+    .isVisible({ timeout: 60_000 })
+    .catch(() => false);
+}
