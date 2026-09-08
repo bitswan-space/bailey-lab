@@ -303,6 +303,21 @@ still the one registered at startup.) The server now uses the wildcard route
 when it is serving a mounted source tree, so a dev rebuild is served without a
 restart; a baked image keeps the enumerated routes.
 
+## Handing the agent a task, not just a tab
+
+Several places in the app open the agent *because* something needs doing — a
+rebase conflict, "Build automation", "Write it with the agent". With the
+terminal gone there was no obvious way to say what, and the buttons became
+plain navigation: the user arrived at an empty composer with no way to know
+what they had been handed.
+
+The hand-off is `POST /api/coding-agent/sidebar/prompt`. It names the job
+(`kind`, whose wording lives on the server) or carries the ask itself (`text`,
+bounded), and `sendPrompt` types it into the composer of the person's host
+for that copy and business process — delivered straight away when the panel is
+listening, parked for its next load when it is not. The prompt is *typed*,
+never sent — the person reads it and presses send.
+
 ## What is not done
 
 - **Rendering isolation is an open question.** VS Code runs webview HTML in a

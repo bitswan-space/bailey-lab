@@ -1585,6 +1585,12 @@ export const api = {
         kind,
         ...(parent ? { parent } : {}),
       }),
+    /**
+     * Hand the Coding Agent an ask written by the caller — an audit report to
+     * write, say — through the same composer hand-off as the canned tasks.
+     */
+    handOffPrompt: (copy: string, bp: string, text: string) =>
+      postJson<{ delivered: boolean }>('/api/coding-agent/sidebar/prompt', { copy, bp, text }),
   },
 
   copyFiles: {

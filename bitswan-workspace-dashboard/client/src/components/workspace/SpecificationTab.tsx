@@ -8,6 +8,7 @@ import {
 } from 'react';
 import { Bot, Save } from 'lucide-react';
 import { toast } from '@/lib/notify';
+import { handOffToAgent } from '@/lib/agent-handoff';
 import {
   ProseMirror,
   ProseMirrorDoc,
@@ -73,8 +74,27 @@ import type { BusinessProcess } from '@/types';
 
 interface SpecificationTabProps {
   bp: BusinessProcess;
-  /** Copy whose copy of the README is edited. */
+  /** Copy whose copy of the file is edited. */
   copy: string;
+  /**
+   * The markdown file being edited, copy-relative. Defaults to the business
+   * process's specification. An audit report is the same kind of document —
+   * prose, headings, diagrams, attachments — so it is edited with the same
+   * editor rather than a second, worse one.
+   */
+  path?: string;
+  /**
+   * What the agent button offers. A specification is handed to the agent to
+   * BUILD; an audit report is handed to it to WRITE. Same button, and the
+   * label has to say which, or it reads as "build this report".
+   */
+  agentCta?: { label: string; title: string; prompt: string };
+  /**
+   * Hands the parent a way to flush the buffer to disk and wait for it. An
+   * audit sign-off records the report, so the report has to be written before
+   * the verdict is — autosave's two seconds are not a promise.
+   */
+  registerSave?: (save: () => Promise<void>) => void;
   /** Flips the workspace to the Coding Agent tab (Build automation). */
   onShowAgents: () => void;
   /** Fired after a save lands on disk — lets the shell refresh anything
@@ -270,7 +290,15 @@ function serializeDoc(state: EditorState): string {
  * and embedded mermaid flowcharts live in the same copy files, so
  * the coding agent sees everything the user authored.
  */
-export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: SpecificationTabProps) {
+export function SpecificationTab({
+  bp,
+  copy,
+  path,
+  agentCta,
+  registerSave,
+  onShowAgents,
+  onSaved,
+}: SpecificationTabProps) {
   const [editorState, setEditorState] = useState<EditorState>();
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' });
   const [save, setSave] = useState<SaveState>({ kind: 'clean' });
@@ -285,7 +313,7 @@ export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: Specificat
   const [mermaidEditing, setMermaidEditing] = useState<{ pos?: number; source: string }>();
   const [mermaidDeletePos, setMermaidDeletePos] = useState<number>();
 
-  const readmePath = `${bp.id}/README.md`;
+  const readmePath = path ?? `${bp.id}/README.md`;
 
   const stateRef = useRef(editorState);
   stateRef.current = editorState;
@@ -426,6 +454,12 @@ export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: Specificat
     [copy, readmePath, bp.id],
   );
   forceSaveRef.current = () => void doSave(true);
+
+  useEffect(() => {
+    registerSave?.(async () => {
+      await doSave(true);
+    });
+  }, [registerSave, doSave]);
 
   // Autosave: idle-debounce while dirty. `editorState` in the deps resets
   // the timer on every transaction, so the save fires AUTOSAVE_DELAY_MS
@@ -589,18 +623,23 @@ export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: Specificat
   }, [mermaidDeletePos, dispatchTransaction]);
 
   // "Build automation" sends the description to the coding agent: flush any
-  // unsaved edits first (the agent reads README.md from disk), then hand over
-  // the automation prompt — it arrives in the panel's composer for the user to
-  // send — and flip to the Coding Agent tab.
+  // unsaved edits first (the agent reads the document from disk), then hand
+  // over the prompt — it arrives in the panel's composer for the user to
+  // send — and flip to the Coding Agent tab. A caller editing another kind of
+  // document (an audit report) supplies its own ask through `agentCta`.
   //
-  // The save is awaited: the prompt tells the agent to read README.md as the
+  // The save is awaited: the prompt tells the agent to read the file as the
   // specification, so handing it over before the edit lands on disk would
   // point it at the previous version.
   const onBuildAutomation = () => {
     void (async () => {
       await doSave(false);
       try {
-        await api.codingAgent.handOffTask(copy, bp.id, 'automation');
+        if (agentCta) {
+          await handOffToAgent(copy, bp.id, agentCta.prompt);
+        } else {
+          await api.codingAgent.handOffTask(copy, bp.id, 'automation');
+        }
       } catch (err) {
         toast.error(`Could not hand the task to the agent: ${String(err)}`);
       }
@@ -637,10 +676,13 @@ export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: Specificat
       <Button
         size="sm"
         onClick={() => void onBuildAutomation()}
-        title="Send this description to the coding agent and open the Coding Agent tab"
+        title={
+          agentCta?.title ??
+          'Send this description to the coding agent and open the Coding Agent tab'
+        }
       >
         <Bot className="size-3.5" aria-hidden />
-        Build automation
+        {agentCta?.label ?? 'Build automation'}
       </Button>
     </>
   );
