@@ -90,8 +90,12 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
    float only affects content that follows it. That has a consequence in print:
    Paged.js fills sheets in DOM order, so a box too tall to share a sheet with
    the prose would claim the sheet alone. Those chapters are measured at build
-   time and get .full-howto, which unfloats them — see the print rules and
-   collectFullWidthChapters in generate.mjs. */
+   time and get .full-howto, which unfloats them for print — see the print rules
+   and collectFullWidthChapters in generate.mjs.
+
+   TWO EXCEPTIONS, so don't read the float as universal: .full-howto above
+   (print only, measured) and .wide-howto below (BOTH media, for chapters that
+   interleave shots into their prose). Everything else floats in both. */
 .two{ display:block; margin-top:8px }
 .two::after{ content:''; display:table; clear:both }
 .two > .howto{ float:right; width:42%; margin:4px 0 22px 32px;
