@@ -15,6 +15,13 @@ import {
 
 const pendingOpens = new Map<string, SidebarOpen>();
 
+/**
+ * Prompts handed to the agent from elsewhere in the app ("Write it with the
+ * agent"), keyed by user and copy. Consumed by the next view render, once: a
+ * prompt is an invitation to this person, now, not a setting.
+ */
+const seededPrompts = new Map<string, string>();
+
 const PREFIX = '/api/coding-agent/sidebar';
 
 const MIME: Record<string, string> = {
@@ -55,6 +62,22 @@ export function registerVscodeSidebarRoutes(
     return { available: sidebarEnabled() };
   });
 
+  app.post<{ Body: { copy?: string; bp?: string; prompt?: string } }>(
+    `${PREFIX}/prompt`,
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!sidebarEnabled()) return reply.code(503).send({ error: 'sidebar not available' });
+      const s = scope(req.body ?? {});
+      if (!s) return reply.code(400).send({ error: 'copy and bp are required' });
+      const prompt = (req.body?.prompt ?? '').trim();
+      if (!prompt) return reply.code(400).send({ error: 'prompt is required' });
+      const email = await emailFromRequest(req, app.log);
+      if (!email) return reply.code(403).send({ error: 'no verified identity' });
+      seededPrompts.set(`${email} ${s.copy} ${s.bp}`, prompt);
+      return { ok: true };
+    },
+  );
+
   app.get<{ Querystring: { copy?: string; bp?: string } }>(
     `${PREFIX}/view`,
     async (req, reply) => {
@@ -66,12 +89,19 @@ export function registerVscodeSidebarRoutes(
       if (!email) return reply.code(403).send({ error: 'no verified identity' });
 
       try {
-        const opened = await openSidebar({ email, ...s, workspaceRoot });
-        pendingOpens.set(`${email} ${s.copy} ${s.bp}`, opened);
+        const opened = await openSidebar({
+          email,
+          workspaceFolder: path.join(workspaceRoot, 'copies', s.copy, s.bp),
+        });
+        const key = `${email} ${s.copy} ${s.bp}`;
+        pendingOpens.set(key, opened);
+        const seeded = seededPrompts.get(key);
+        seededPrompts.delete(key);
         const html = pageFor(opened.html, {
           assetBase: `${PREFIX}/asset`,
           extensionDir: extensionPath()!,
           assetUris: opened.assetUris,
+          ...(seeded ? { initialPrompt: seeded } : {}),
         });
         reply.header('Content-Type', 'text/html; charset=utf-8');
         return reply.send(html);
@@ -122,7 +152,10 @@ export function registerVscodeSidebarRoutes(
       let opened = pendingOpens.get(key);
       if (!opened) {
         try {
-          opened = await openSidebar({ email, ...s, workspaceRoot });
+          opened = await openSidebar({
+            email,
+            workspaceFolder: path.join(workspaceRoot, 'copies', s.copy, s.bp),
+          });
           pendingOpens.set(key, opened);
         } catch (err) {
           app.log.warn({ err, ...s }, 'sidebar bridge open failed');

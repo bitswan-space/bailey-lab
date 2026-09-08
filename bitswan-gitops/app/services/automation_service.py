@@ -13,7 +13,7 @@ import time
 import toml
 import uuid
 import yaml
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any, Callable
 from app.models import DeployedAutomation
@@ -48,6 +48,11 @@ from app.task_queue import current_requester
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+# An audit report is prose, and it is versioned in bitswan.yaml with the verdict
+# it justifies. Long enough for a real review, bounded so one audit cannot
+# bloat the state every workspace operation reads.
+MAX_AUDIT_REPORT_CHARS = 64 * 1024
 
 # Placeholder returned instead of a secret env value the caller may not see
 # (Inspect → env view). Masking happens HERE, server-side — the real value
@@ -1846,14 +1851,19 @@ class AutomationService:
         — that git commit IS the deployment-history record (see `bp_history`).
         No history list is kept in bitswan.yaml; git is the source of truth. The
         commit subject (`<source> <bp> → <stage>`) lets history infer the kind
-        (deploy / promote / rollback). Audit sign-offs are NOT stamped here — the
-        history badge reads them from the stage-independent `audits` store by the
-        deployment's image content hash."""
+        (deploy / promote / rollback).
+
+        A production deployment additionally records WHICH sign-offs it was
+        released on, by id, and marks the image released. A release's evidence
+        then lives in the commit that released it, rather than being re-derived
+        later from whatever the audit store says now."""
         stage_key = "production" if stage in ("", "production") else stage
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         tree = bs.setdefault("business_processes", {})
         node = tree.setdefault(bp, {}).setdefault(stage_key, {})
         node["git_commit"] = git_commit
+        if stage_key == "production":
+            self._stamp_release_audits(bs, bp, node)
         await self._persist_bp_state(
             bs,
             {bp},
@@ -1862,6 +1872,42 @@ class AutomationService:
             deployed_by=deployed_by,
             message=f"{source} {bp} → {stage_key} @ {(git_commit or '')[:8]}",
         )
+
+    RELEASED_SHAS_KEPT = 200
+
+    def _stamp_release_audits(self, bs: dict, bp: str, node: dict) -> None:
+        """Record, on the production deployment itself, the sign-offs it is
+        released on — and that this image is now released.
+
+        Two things the deployment record could not say before. Which sign-offs
+        approved it: without them the history badge had to recompute the answer
+        from the current store, so a later verdict on the same image silently
+        rewrote what a past release displayed. And that the image is released,
+        which is what closes it to further sign-offs (`audit_closed`).
+
+        Only ids are stamped; the reports stay in the append-only audits store
+        where a record is never rewritten, so an id is a stable reference to one
+        verdict and its report rather than a second copy of it.
+        """
+        csha = self.deployed_content_sha(bp, "production", bs)
+        if not csha:
+            return
+        approvals, _ = self.audit_verdicts(self.image_audits(bs, bp, csha))
+        node["audit"] = [
+            {
+                "id": e.get("id"),
+                "who": e.get("who"),
+                "role": e.get("role"),
+                "verdict": e.get("verdict"),
+                "at": e.get("at"),
+            }
+            for e in approvals
+        ]
+        rec = bs.setdefault("staging_gate", {}).setdefault(bp, {})
+        released = [s for s in (rec.get("released_shas") or []) if s]
+        if csha not in released:
+            released.insert(0, csha)
+        rec["released_shas"] = released[: self.RELEASED_SHAS_KEPT]
 
     async def bp_history(self, bp: str, stage: str, limit: int = 200) -> dict:
         """Deployment + firewall history for one BP stage, derived from the GIT
@@ -1903,6 +1949,12 @@ class AutomationService:
         # they signed.
         bs_now = read_bitswan_yaml(self.gitops_dir) or {}
         audits_store = (bs_now.get("audits") or {}).get(bp) or {}
+        audits_by_id = {
+            r.get("id"): r
+            for records in audits_store.values()
+            for r in (records or [])
+            if r.get("id")
+        }
         for line in (out or "").splitlines():
             parts = line.split("\x1f")
             if len(parts) != 4:
@@ -1935,13 +1987,27 @@ class AutomationService:
                     source = "staging" if stage_key == "production" else "dev"
                 else:
                     status, source = "deployed", "deploy"
-                # This deploy's image content hash → its auditors (current
-                # verdict = approve) from the single audits store. Stage-agnostic.
+                # Who audited this deploy's image. A production deployment
+                # names the sign-offs it was released on (stamped in the commit
+                # that released it), and those ids are read back from the
+                # append-only store — so the release record cannot change
+                # afterwards. Anything else, and anything released before
+                # promotions stamped this, falls back to each auditor's current
+                # verdict on that image.
                 csha = self.content_sha(
                     (v or {}).get("checksum") or (v or {}).get("image")
                     for v in (node.get("deployments") or {}).values()
                 )
-                approvals, _ = self.audit_verdicts(audits_store.get(csha) or [])
+                stamped = node.get("audit")
+                if isinstance(stamped, list):
+                    # By id, across every image's records — a sign-off id is
+                    # unique, and resolving it must not depend on agreeing about
+                    # which content hash the deployment had.
+                    approvals = [
+                        {**(audits_by_id.get(e.get("id")) or {}), **e} for e in stamped
+                    ]
+                else:
+                    approvals, _ = self.audit_verdicts(audits_store.get(csha) or [])
                 entries.append(
                     {
                         "commit": sha,  # the deploy-event id (rollback key)
@@ -1951,13 +2017,17 @@ class AutomationService:
                         "status": status,
                         "source": source,
                         "members": members,
-                        # Auditors who approved this exact image — [{who,at,note}].
-                        # Empty when the image was never audited.
+                        # Auditors who approved this exact image —
+                        # [{who,at,note,report}]. The report travels with the
+                        # deploy record so the reasoning is still readable long
+                        # after the audit copy is gone. Empty when the image was
+                        # never audited.
                         "audit": [
                             {
                                 "who": e.get("who"),
                                 "at": e.get("at"),
                                 "note": e.get("note"),
+                                "report": e.get("report"),
                             }
                             for e in approvals
                         ],
@@ -2305,6 +2375,17 @@ class AutomationService:
             cwd=clone,
         )
         return {"diff": out if rc == 0 else "", "from": from_sha, "to": to_sha}
+
+    def stage_source_commit(self, bp: str, stage: str) -> str | None:
+        """The source commit a stage is running. Members of one deployment share
+        it; when they disagree (a half-finished promotion) there is no single
+        version to audit, so say None rather than pick one."""
+        commits = {
+            (m or {}).get("source_commit")
+            for m in self._bp_stage_members(bp, stage).values()
+        }
+        commits.discard(None)
+        return commits.pop() if len(commits) == 1 else None
 
     def _bp_stage_members(self, bp: str, stage: str) -> dict:
         """The {deployment_id: {image, image_id}} map for a BP at a stage."""
@@ -2712,6 +2793,43 @@ class AutomationService:
             return None
         return self.content_sha(m.get("checksum") or m.get("image") for m in members)
 
+    def deployed_content_sha(
+        self, bp: str, stage: str, bs: dict | None = None
+    ) -> str | None:
+        """The content identity of what is deployed AT `stage` right now, read
+        from the tree. `staging_content_sha` derives staging's from the members a
+        promotion would carry; this reads a stage's own recorded images, which is
+        the only way to ask what production is actually running."""
+        bs = bs if bs is not None else (read_bitswan_yaml(self.gitops_dir) or {})
+        node = ((bs.get("business_processes") or {}).get(bp) or {}).get(stage) or {}
+        return self.content_sha(
+            (v or {}).get("checksum") or (v or {}).get("image")
+            for v in (node.get("deployments") or {}).values()
+        )
+
+    def released_content_shas(self, bp: str, bs: dict | None = None) -> set[str]:
+        """Image content hashes this BP has released to production: every one a
+        promotion recorded, plus whatever production is running now — so images
+        released before promotions started recording them still count."""
+        bs = bs if bs is not None else (read_bitswan_yaml(self.gitops_dir) or {})
+        rec = (bs.get("staging_gate") or {}).get(bp) or {}
+        shas = {s for s in (rec.get("released_shas") or []) if s}
+        live = self.deployed_content_sha(bp, "production", bs)
+        if live:
+            shas.add(live)
+        return shas
+
+    def audit_closed(self, bp: str, sha: str | None, bs: dict | None = None) -> bool:
+        """Whether this image's audit record is closed to new sign-offs.
+
+        A released image's sign-offs are the evidence for a release that already
+        happened, and evidence is not rewritten afterwards. Re-freezing staging
+        on the same image lets an auditor look again — it must not let them
+        replace what the production record says was approved. Auditing the next
+        version means deploying a change: a different image, its own audit.
+        """
+        return bool(sha) and sha in self.released_content_shas(bp, bs)
+
     @staticmethod
     def image_audits(bs: dict, bp: str, sha: str | None) -> list[dict]:
         """The sign-off records for one image (content hash), newest-first, from
@@ -2771,9 +2889,14 @@ class AutomationService:
             frozen and frozen_sha and current_sha and frozen_sha != current_sha
         )
         promotable = frozen and not stale and audits_met and not rejections
+        # The image under review is one this BP has already released. Its
+        # sign-offs are the production record's evidence, so they are closed to
+        # new verdicts — see `audit_closed`.
+        released = self.audit_closed(bp, key, bs)
         return {
             "bp": bp,
             "frozen": frozen,
+            "released": released,
             "frozen_by": rec.get("frozen_by"),
             "frozen_at": rec.get("frozen_at"),
             "frozen_sha": frozen_sha,
@@ -2792,7 +2915,12 @@ class AutomationService:
             "approvals": len(approvals),
             "rejections": len(rejections),
             "approved_by": [
-                {"who": e.get("who"), "at": e.get("at"), "note": e.get("note")}
+                {
+                    "who": e.get("who"),
+                    "at": e.get("at"),
+                    "note": e.get("note"),
+                    "report": e.get("report"),
+                }
                 for e in approvals
             ],
             "audits_met": audits_met,
@@ -2855,6 +2983,10 @@ class AutomationService:
             rec["frozen_by"] = by or "unknown"
             rec["frozen_at"] = self._now_str()
             rec["frozen_sha"] = sha
+            rec["frozen_commit"] = self.stage_source_commit(bp, "staging")
+            rec["production_commit_at_freeze"] = self.stage_source_commit(
+                bp, "production"
+            )
             message = f"freeze staging {bp} @ {sha[:8]}"
             self._append_gate_log(
                 rec, "freeze", by, role, "Froze staging for audit", sha=sha
@@ -2880,6 +3012,8 @@ class AutomationService:
         rec["frozen_by"] = None
         rec["frozen_at"] = None
         rec["frozen_sha"] = None
+        rec["frozen_commit"] = None
+        rec["production_commit_at_freeze"] = None
         self._append_gate_log(rec, "unfreeze", by, self._role_of(by), reason)
         await self._persist_bp_state(
             bs, {bp}, bp, "audit", deployed_by=by, message=f"unfreeze staging {bp}"
@@ -2928,6 +3062,7 @@ class AutomationService:
         verdict: str,
         note: str | None = None,
         by: str | None = None,
+        report: str | None = None,
     ) -> dict:
         """Record one audit sign-off on the frozen staging IMAGE (admin/auditor
         only). `verdict` is 'approve' or 'reject' ("request changes"). Stored in
@@ -2950,6 +3085,16 @@ class AutomationService:
             )
         sha = gate["frozen_sha"]
         bs = read_bitswan_yaml(self.gitops_dir) or {}
+        if self.audit_closed(bp, sha, bs):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This version is already released to production, so its "
+                    "audit record is closed — the sign-offs on it are what that "
+                    "release was approved on. Deploy a change to audit a new "
+                    "version."
+                ),
+            )
         records = bs.setdefault("audits", {}).setdefault(bp, {}).setdefault(sha, [])
         records.insert(
             0,
@@ -2961,6 +3106,11 @@ class AutomationService:
                 "verdict": verdict,
                 "at": self._now_str(),
                 "note": (note or "").strip() or None,
+                # The report the auditor wrote, stored WITH the verdict. A
+                # verdict on its own is a checkbox; what makes it evidence is
+                # the reasoning, and that has to still be there when the copy
+                # it was written in is long gone.
+                "report": (report or "").strip()[:MAX_AUDIT_REPORT_CHARS] or None,
             },
         )
         low = "approved" if verdict == "approve" else "requested changes on"
@@ -2976,8 +3126,12 @@ class AutomationService:
 
     @staticmethod
     def _now_str() -> str:
-        """Human timestamp for freeze/audit records, e.g. 'May 06, 2026 · 14:02'."""
-        return datetime.now().strftime("%b %d, %Y · %H:%M")
+        """When a freeze / policy change / sign-off happened, as an instant the
+        UI can actually render: ISO-8601 UTC, like every other timestamp on the
+        wire. It used to be a pre-formatted 'May 06, 2026 · 14:02', which no
+        date parser accepts — so every audit and freeze in the dashboard read
+        '—' instead of a time."""
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     def _assert_promotable(self, bp: str, target_stage: str, by: str | None) -> None:
         """Enforce the freeze + audit gate for a promotion. Raises 403/409 with a

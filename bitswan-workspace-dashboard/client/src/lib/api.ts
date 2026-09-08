@@ -602,9 +602,9 @@ export interface BpHistoryEntry {
   source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup" | "secret"
   members: Record<string, BpHistoryMember>;
   /** Auditors who signed off the image this deploy promoted (production promotes
-   *  only) — {who, at, note}. Empty for unaudited deploys. Drives the "audited
+   *  only) — {who, at, note, report}. Empty for unaudited deploys. Drives the "audited
    *  by" badge on the history row. */
-  audit?: { who: string; at: string; note?: string | null }[];
+  audit?: { who: string; at: string; note?: string | null; report?: string | null }[];
   /** Present on secret-change events: the realm + a one-line summary. The value
    *  itself is never sent — only that it changed (this is a rollback point). */
   secret?: {
@@ -657,6 +657,8 @@ export interface StagingLogEntry {
  *  (keyed by image content hash). Append-only; only each auditor's latest
  *  verdict counts. */
 export interface StagingSignoff {
+  /** The audit report as it stood when this verdict was given. */
+  report?: string;
   id: string;
   who: string;
   // eslint-disable-next-line no-restricted-syntax -- null = role unknown
@@ -684,6 +686,9 @@ export interface StagingGate {
   // eslint-disable-next-line no-restricted-syntax -- null when nothing on staging
   current_sha: string | null;
   stale: boolean;
+  /** The image under review has already been released to production, so its
+   *  sign-offs are closed — they are what that release was approved on. */
+  released?: boolean;
   required: number;
   /** Freeze/unfreeze/policy governance history (newest-first). */
   log: StagingLogEntry[];
@@ -1089,6 +1094,33 @@ export interface CreateAutomationResponse {
   created: { name: string; relativePath: string }[];
 }
 
+/** `GET /api/audits/{bp}/copy` — this auditor's audit as it stands. */
+export interface AuditState {
+  frozen: boolean;
+  /** The version under audit is already released: its audit record is closed. */
+  released?: boolean;
+  bp: string;
+  report_path: string;
+  reason?: string;
+  name?: string;
+  exists?: boolean;
+  audited_sha?: string;
+  audited_commit?: string;
+  report_exists?: boolean;
+  /** Files the auditor has changed in their copy: a proposal, not a sign-off. */
+  proposed_changes?: string[];
+}
+
+/** `POST /api/audits/{bp}/copy` — the copy the auditor works in. */
+export interface OpenedAudit {
+  name: string;
+  created: boolean;
+  bp: string;
+  audited_sha: string;
+  audited_commit: string;
+  report_path: string;
+}
+
 export const api = {
   /**
    * Identify the logged-in user and ensure their personal copy exists
@@ -1215,11 +1247,20 @@ export const api = {
     ),
   /** Record one audit sign-off (approve / request changes) on the frozen staging
    *  image (admin/auditor only; appended to the audit log in bitswan.yaml). */
-  recordAudit: (bp: string, verdict: 'approve' | 'reject', note?: string) =>
+  recordAudit: (
+    bp: string,
+    verdict: 'approve' | 'reject',
+    note?: string,
+    report?: string,
+  ) =>
     postJson<StagingGate>(
       `/api/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/audits`,
-      { verdict, ...(note ? { note } : {}) },
+      { verdict, ...(note ? { note } : {}), ...(report ? { report } : {}) },
     ),
+  /** Type a prompt into the agent's composer the next time its panel loads.
+   *  Consumed once, by that load — the person still presses send. */
+  seedAgentPrompt: (copy: string, bp: string, prompt: string) =>
+    postJson<{ ok: boolean }>('/api/coding-agent/sidebar/prompt', { copy, bp, prompt }),
   /** Per-stage deployment history for a business process (newest-first). */
   bpHistory: (bp: string, stage: string) =>
     getJson<BpHistory>(
@@ -1456,6 +1497,17 @@ export const api = {
     return content;
   },
 
+  /**
+   * An audit happens in a copy of the version under audit. `state` reads where
+   * this auditor's audit stands (creating nothing); `open` gives them the copy,
+   * or returns the one they already have. gitops decides who may audit and
+   * which version is under audit.
+   */
+  audits: {
+    state: (bp: string) => getJson<AuditState>(`/api/audits/${encodeURIComponent(bp)}/copy`),
+    open: (bp: string) =>
+      postJson<OpenedAudit>(`/api/audits/${encodeURIComponent(bp)}/copy`, {}),
+  },
   copyFiles: {
     tree: (name: string) =>
       getJson<FileTreeNode[]>(`/api/copies/${encodeURIComponent(name)}/files`),

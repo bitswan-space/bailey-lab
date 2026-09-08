@@ -233,16 +233,11 @@ interface Host {
 
 const hosts = new Map<string, Host>();
 
-function hostKey(opts: { email: string; copy: string; bp: string }): string {
-  return `${opts.email} ${opts.copy} ${opts.bp}`;
+function hostKey(opts: { email: string; workspaceFolder: string }): string {
+  return `${opts.email} ${opts.workspaceFolder}`;
 }
 
-function spawnHost(opts: {
-  email: string;
-  copy: string;
-  bp: string;
-  workspaceRoot: string;
-}): Host {
+function spawnHost(opts: { email: string; workspaceFolder: string }): Host {
   const ext = extensionPath();
   if (!ext) throw new Error('CLAUDE_EXTENSION_PATH is not set');
 
@@ -256,7 +251,7 @@ function spawnHost(opts: {
       ...process.env,
       CLAUDE_EXTENSION_PATH: ext,
       CLAUDE_CONFIG_DIR: configDir,
-      SIDEBAR_WORKSPACE_FOLDER: path.join(opts.workspaceRoot, 'copies', opts.copy, opts.bp),
+      SIDEBAR_WORKSPACE_FOLDER: opts.workspaceFolder,
     },
   });
 
@@ -307,12 +302,7 @@ function spawnHost(opts: {
   return host;
 }
 
-function hostFor(opts: {
-  email: string;
-  copy: string;
-  bp: string;
-  workspaceRoot: string;
-}): Host {
+function hostFor(opts: { email: string; workspaceFolder: string }): Host {
   const key = hostKey(opts);
   const existing = hosts.get(key);
   if (existing && existing.child.exitCode === null && !existing.child.killed) {
@@ -326,9 +316,7 @@ function hostFor(opts: {
 
 export async function openSidebar(opts: {
   email: string;
-  copy: string;
-  bp: string;
-  workspaceRoot: string;
+  workspaceFolder: string;
 }): Promise<SidebarOpen> {
   const host = hostFor(opts);
   await host.ready;
@@ -427,11 +415,31 @@ function markThemeKind(html: string): string {
   });
 }
 
+const MAX_SEEDED_PROMPT_CHARS = 8 * 1024;
+
+/**
+ * The webview reads `#root`'s `data-initial-prompt` when it boots and types it
+ * into the composer (it does not send it — the person still decides). That
+ * attribute is the extension's own hand-off for "open Claude on this", and it
+ * is the only one: there is no command for typing into a session that is
+ * already running.
+ */
+export function seedInitialPrompt(html: string, prompt: string | undefined): string {
+  const text = (prompt ?? '').trim().slice(0, MAX_SEEDED_PROMPT_CHARS);
+  if (!text) return html;
+  const attr = text
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return html.replace(/<div id="root"/i, `<div id="root" data-initial-prompt="${attr}"`);
+}
+
 export function pageFor(
   html: string,
-  opts: { assetBase: string; extensionDir: string; assetUris?: unknown },
+  opts: { assetBase: string; extensionDir: string; assetUris?: unknown; initialPrompt?: string },
 ): string {
-  const withBridge = injectBridge(markThemeKind(html), opts.assetUris);
+  const withBridge = injectBridge(markThemeKind(seedInitialPrompt(html, opts.initialPrompt)), opts.assetUris);
   const themed = withBridge.includes('</head>')
     ? withBridge.replace('</head>', `${themeBlock(opts.extensionDir)}\n</head>`)
     : themeBlock(opts.extensionDir) + withBridge;

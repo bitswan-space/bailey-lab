@@ -1435,6 +1435,45 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  /** `GET /copies/audit?bp=` — this auditor's audit of a business process as
+   *  it stands, creating nothing: whether staging is frozen, which version is
+   *  under audit, whether they already have a copy of it, and what they have
+   *  changed in it. */
+  async auditState(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.copiesAudit('GET', bp);
+  }
+
+  /** `POST /copies/audit` — give this auditor a copy of the version under
+   *  audit, or return the one they already have. */
+  async openAudit(bp: string): Promise<{ ok: boolean; status: number; body: unknown }> {
+    return this.copiesAudit('POST', bp);
+  }
+
+  private async copiesAudit(
+    method: 'GET' | 'POST',
+    bp: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const url =
+      method === 'GET'
+        ? `${this.baseUrl}/copies/audit?bp=${encodeURIComponent(bp)}`
+        : `${this.baseUrl}/copies/audit`;
+    const r = await fetch(url, {
+      method,
+      headers: {
+        ...this.authHeaders(),
+        ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(method === 'POST' ? { body: JSON.stringify({ bp }) } : {}),
+    });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
   /** `PUT .../staging-gate/policy` — set required auditor sign-offs (0 = off). */
   async setAuditPolicy(
     bp: string,
@@ -1462,7 +1501,7 @@ export class GitopsClient {
    *  the frozen staging image; appended to the audit log in bitswan.yaml. */
   async recordAudit(
     bp: string,
-    payload: { verdict: string; note?: string; by?: string },
+    payload: { verdict: string; note?: string; by?: string; report?: string },
   ): Promise<{ ok: boolean; status: number; body: unknown }> {
     const r = await fetch(
       `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/audits`,
