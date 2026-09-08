@@ -13,7 +13,7 @@ const App = SC_APP;
 
 function setLocation({ search = '', pathname = '/' } = {}) {
   Object.defineProperty(window, 'location', {
-    value: { search, pathname, protocol: 'https:', hostname: 'bailey.example.test', assign: vi.fn(), reload: vi.fn() },
+    value: { search, pathname, protocol: 'https:', hostname: 'bailey.example.test', assign: vi.fn(), replace: vi.fn(), reload: vi.fn() },
     configurable: true, writable: true,
   });
 }
@@ -21,7 +21,7 @@ function setLocation({ search = '', pathname = '/' } = {}) {
 // A full router covering every list endpoint App loads once the gate clears.
 function fullRoutes(extra = {}) {
   return {
-    '/bailey/api/gate-state': { json: { trusted: true, claimed: true, totp_enrolled: true } },
+    '/bailey/api/gate-state': { json: { trusted: true, claimed: true, totp_enrolled: true, leave_to: 'https://bailey.example.test/' } },
     '/bailey/api/whoami': { json: { is_admin: true, headers: { 'X-Forwarded-Email': 'tomas@h' } } },
     '/bailey/api/devices': { json: { devices: [{ id: 'd1', name: 'Mac', is_current: true, last_seen: '2026-01-01T00:00:00Z', paired_at: '2026-01-01T00:00:00Z' }] } },
     '/bailey/api/approvals': { json: { pending: [{ email: 'a@h', age_seconds: 120 }] } },
@@ -433,22 +433,40 @@ describe('#403 onboarding host never renders the console', () => {
     expect(screen.queryByText('Server overview')).toBeNull();
     expect(screen.queryByText('Workspaces')).toBeNull();
     expect(screen.queryByText('People & roles')).toBeNull();
-    // It hands off by re-requesting the document; the daemon owns the target.
-    expect(window.location.reload).toHaveBeenCalled();
+    // It hands off to the target the server chose, never to a reload of the
+    // page it is already on (#425).
+    await waitFor(() =>
+      expect(window.location.replace).toHaveBeenCalledWith('https://bailey.example.test/'),
+    );
+    expect(window.location.reload).not.toHaveBeenCalled();
   });
 
-  it('the hand-off reloads only once, so a disagreeing daemon cannot loop', async () => {
+  it('a trusted device is sent to the origin it was bounced from, not just the console', async () => {
     setConsoleMode('onboarding');
     setLocation({ pathname: '/' });
-    installFetch(fullRoutes());
-    const { unmount } = render(<App />);
-    await waitFor(() => expect(window.location.reload).toHaveBeenCalledTimes(1));
-    unmount();
-    // Second pass = what the browser shows after that reload, if the daemon
-    // served the onboarding shell again instead of bouncing.
+    installFetch(fullRoutes({
+      '/bailey/api/gate-state': { json: {
+        trusted: true, claimed: true, totp_enrolled: true,
+        leave_to: 'https://app.example.test/secret',
+      } },
+    }));
     render(<App />);
-    await waitFor(() => expect(screen.getByText('This device is already set up')).toBeTruthy());
-    expect(window.location.reload).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(window.location.replace).toHaveBeenCalledWith('https://app.example.test/secret'),
+    );
+  });
+
+  it('never dead-ends on the onboarding host when the server names no target', async () => {
+    setConsoleMode('onboarding');
+    setLocation({ pathname: '/' });
+    installFetch(fullRoutes({
+      '/bailey/api/gate-state': { json: { trusted: true, claimed: true, totp_enrolled: true } },
+    }));
+    render(<App />);
+    await waitFor(() => expect(screen.getByText('This device is trusted')).toBeTruthy());
+    // No console surface leaks, and the operator is never told to give up and
+    // find the console themselves — the old failure this issue is about.
+    expect(screen.queryByText('This device is already set up')).toBeNull();
     expect(screen.queryByText('Workspaces')).toBeNull();
   });
 

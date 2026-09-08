@@ -344,6 +344,12 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     await expect(c.getByRole('heading', { name: /Workspaces/i })).toBeVisible({ timeout: SLA });
   });
 
+  await test.step('the claim handed off to the console, not the onboarding host (#425)', async () => {
+    expect(new URL(page.url()).hostname, 'resting host after claim').toBe(
+      new URL(ENV.baileyUrl).hostname,
+    );
+  });
+
   // ---- Create the workspace via the console (idempotent) ----
   await test.step('create the Finance workspace', async () => {
     // An existing workspace card carries an "Open" button; a brand-new account
