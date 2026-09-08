@@ -1220,6 +1220,10 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/staging-gate/audits`,
       { verdict, ...(note ? { note } : {}) },
     ),
+  /** Type a prompt into the agent's composer the next time its panel loads.
+   *  Consumed once, by that load — the person still presses send. */
+  seedAgentPrompt: (copy: string, bp: string, prompt: string) =>
+    postJson<{ ok: boolean }>('/api/coding-agent/sidebar/prompt', { copy, bp, prompt }),
   /** Per-stage deployment history for a business process (newest-first). */
   bpHistory: (bp: string, stage: string) =>
     getJson<BpHistory>(

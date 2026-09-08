@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { getAccessToken } from '@/lib/auth-token';
+import { onAgentHandoff } from '@/lib/agent-handoff';
 
 interface AgentSidebarProps {
   copy: string;
@@ -11,6 +12,15 @@ const FRAME_KEY = '__bitswanSidebar';
 const HOST_KEY = '__bitswanHost';
 
 export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
+  // A prompt handed to this copy's agent is seeded for the panel's next load,
+  // so the panel has to load again for the person to see it.
+  const [reloadNonce, setReloadNonce] = useState(0);
+  useEffect(
+    () => onAgentHandoff((h) => {
+      if (h.copy === copy && h.bp === bp) setReloadNonce((n) => n + 1);
+    }),
+    [copy, bp],
+  );
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -63,7 +73,7 @@ export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
     };
   }, [copy, bp]);
 
-  const src = `/api/coding-agent/sidebar/view?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}`;
+  const src = `/api/coding-agent/sidebar/view?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}${reloadNonce ? `&n=${reloadNonce}` : ''}`;
   return (
     <div className="relative h-full w-full">
       <iframe

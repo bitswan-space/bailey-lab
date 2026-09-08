@@ -303,6 +303,26 @@ still the one registered at startup.) The server now uses the wildcard route
 when it is serving a mounted source tree, so a dev rebuild is served without a
 restart; a baked image keeps the enumerated routes.
 
+## Handing the agent a task, not just a tab
+
+Several places in the app open the agent *because* something needs doing — a
+rebase conflict, "Build automation", "Write it with the agent". With the
+terminal gone there was no obvious way to say what, and the buttons became
+plain navigation: the user arrived at an empty composer with no way to know
+what they had been handed.
+
+The extension does have a seam for it, and it is not a message or a command —
+it is markup. `getHtmlForWebview` writes `data-initial-prompt` onto `#root`,
+and the bundle reads that at boot and calls `setInputText` with it. So the
+hand-off is: seed the prompt server-side against (user, copy, business
+process), consume it on the next `/view` render, and reload the panel. The
+prompt is *typed*, never sent — the person reads it and presses send.
+
+Two properties fall out of that shape and are worth keeping: the seed is
+consumed once (a prompt is an invitation to this person, now, not a setting),
+and it is HTML-escaped and bounded, because it goes into an attribute in a page
+the extension composes.
+
 ## What is not done
 
 - **Rendering isolation is an open question.** VS Code runs webview HTML in a
