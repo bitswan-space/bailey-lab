@@ -5,8 +5,8 @@ export VITE_BITSWAN_WORKSPACE_NAME="${BITSWAN_WORKSPACE_NAME}"
 export VITE_BITSWAN_DEPLOYMENT_ID="${BITSWAN_DEPLOYMENT_ID}"
 export VITE_BITSWAN_AUTOMATION_STAGE="${BITSWAN_AUTOMATION_STAGE}"
 export VITE_BITSWAN_GITOPS_DOMAIN="${BITSWAN_GITOPS_DOMAIN}"
-export VITE_PORT=5173
-export PORT=8080
+export VITE_PORT="${BITSWAN_UI_PORT:-5173}"
+export PORT="${PORT:-8080}"
 
 cp /app/vite.config.mjs /deps/vite.config.mjs
 cd /app
@@ -19,7 +19,7 @@ cd /app
 VITE=/deps/node_modules/.bin/vite
 
 if [ "$BITSWAN_AUTOMATION_STAGE" = "live-dev" ]; then
-  echo "Frontend: vite (hot reload) on :5173 + shim on :8080"
+  echo "Frontend: vite (hot reload) on :$VITE_PORT + shim on :$PORT"
   # The deployed /app is read-only and the committed `node_modules -> /deps`
   # symlink isn't reliably materialized into the copy, so vite (root=/app) can't
   # find node_modules and fails to resolve bare imports (react/jsx-dev-runtime).
@@ -27,20 +27,22 @@ if [ "$BITSWAN_AUTOMATION_STAGE" = "live-dev" ]; then
   # /app and resolves via /node_modules -> /deps/node_modules. (The build branch
   # below does the equivalent under a writable /tmp copy.)
   ln -sfn /deps/node_modules /node_modules
-  "$VITE" --config /deps/vite.config.mjs --host 127.0.0.1 --port 5173 &
+  "$VITE" --config /deps/vite.config.mjs --host 127.0.0.1 --port "$VITE_PORT" &
 else
   # The production bundle is built ONCE at image-build time by build.sh (the
   # driver runs it as a final RUN layer during the deploy image bake), so startup
   # just serves it — no per-startup vite build. If /app/dist is missing the image
   # was built without build.sh; fail loudly rather than silently rebuilding.
-  echo "Frontend: serving pre-built bundle on :5173 + shim on :8080"
+  echo "Frontend: serving pre-built bundle on :$VITE_PORT + shim on :$PORT"
   if [ ! -d /app/dist ]; then
     echo "ERROR: /app/dist not found — build.sh must run at image-build time" >&2
     exit 1
   fi
-  serve -s /app/dist -l 5173 &
+  serve -s /app/dist -l "$VITE_PORT" &
 fi
 
-# The shim is the container's entrypoint process (PID-ish): it owns :8080,
-# proxies / → vite/serve on :5173 and /api → the backend worker.
+# The shim is the container's entrypoint process (PID-ish): it owns $PORT,
+# proxies / → vite/serve on $VITE_PORT and /api → the backend worker. Both ports
+# are injected by the compiler, which keeps them free of the peers that share
+# one egress-gateway network namespace.
 exec shim

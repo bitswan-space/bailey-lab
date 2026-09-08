@@ -136,6 +136,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-staging
             BITSWAN_DEPLOYMENT_ID: frontend-acme-staging
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_UI_PORT: "5173"
             BITSWAN_URL_PREFIX: https://ws3-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws3-{name}-822b-staging.example.com
@@ -145,6 +146,7 @@ services:
             KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
             KEYCLOAK_REALM: testrealm
             KEYCLOAK_URL: https://keycloak.example.com
+            PORT: "8080"
         image: internal/ws3-acme-frontend:shafr
         labels:
             gitops.automation_name: frontend
