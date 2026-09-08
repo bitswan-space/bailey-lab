@@ -32,6 +32,9 @@ func relayLocalTarget() string {
 // on the relay path (force-proxy config OR the AOC reports it proxied). It is a
 // no-op otherwise, and idempotent — safe to call both at daemon startup and
 // again from register once the AOC has provisioned the proxy path.
+//
+// A published public endpoint does not come through here any more: it is served
+// under this server's own domain, by this server.
 func (s *Server) startRelayTunnel() {
 	s.relayMu.Lock()
 	if s.relayStarted {
@@ -99,8 +102,7 @@ func (s *Server) startRelayTunnel() {
 	s.relayStarted = true
 	s.relayMu.Unlock()
 
-	fmt.Printf("relay: server is on the reverse-proxy path; dialing relay %s for %s\n",
-		relayAddr, settings.Domain)
+	fmt.Printf("relay: dialing relay %s for %s\n", relayAddr, settings.Domain)
 
 	ctx := context.Background()
 	go func() {

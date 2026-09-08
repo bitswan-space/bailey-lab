@@ -55,7 +55,7 @@ jobs:
           echo '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]}' | sudo tee /etc/docker/daemon.json
           sudo service docker start || true
 
-      - name: Install and configure dnsmasq for .localhost resolution
+      - name: Install and configure dnsmasq for .localhost and .test resolution
         run: |
           sudo apt-get update
           sudo apt-get install -y dnsmasq
@@ -63,6 +63,7 @@ jobs:
           sudo systemctl disable systemd-resolved || true
           sudo mkdir -p /etc/dnsmasq.d
           echo "address=/.localhost/127.0.0.1" | sudo tee /etc/dnsmasq.d/localhost.conf
+          echo "address=/.test/127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "listen-address=127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "port=53" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "no-resolv" | sudo tee -a /etc/dnsmasq.d/localhost.conf
@@ -201,3 +202,94 @@ jobs:
               | tail -120 || true
             echo "::endgroup::"
           done
+
+  device-trust-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      docker:
+        image: docker:dind
+        options: --privileged
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Docker Compose
+        run: |
+          sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+
+      - name: Configure Docker
+        run: |
+          sudo mkdir -p /etc/docker
+          echo '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]}' | sudo tee /etc/docker/daemon.json
+          sudo service docker start || true
+
+      - name: Install and configure dnsmasq for .localhost and .test resolution
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dnsmasq
+          sudo systemctl stop systemd-resolved || true
+          sudo systemctl disable systemd-resolved || true
+          sudo mkdir -p /etc/dnsmasq.d
+          echo "address=/.localhost/127.0.0.1" | sudo tee /etc/dnsmasq.d/localhost.conf
+          echo "address=/.test/127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "listen-address=127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "port=53" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "no-resolv" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "server=8.8.8.8" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          echo "server=8.8.4.4" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          sudo systemctl start dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
+          sudo chattr +i /etc/resolv.conf || true
+          sleep 3
+          dig @127.0.0.1 test.bs-e2e.localhost +short || echo "DNS resolution check skipped"
+
+      - name: Install and configure mkcert for TLS certificates
+        run: |
+          sudo apt-get install -y libnss3-tools sqlite3
+          curl -JLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+          chmod +x mkcert-v*-linux-amd64
+          sudo mv mkcert-v*-linux-amd64 /usr/local/bin/mkcert
+          mkcert -install
+          mkcert -CAROOT
+
+      - name: Bring up the gate with the IdP on its own site
+        timeout-minutes: 25
+        env:
+          E2E_SKIP_WORKSPACE_IMAGES: '1'
+          E2E_KC_DOMAIN: bs-idp.test
+        run: bash e2e/bringup.sh
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: |
+          npm ci || npm install
+          npx playwright install --with-deps chromium
+
+      - name: Device trust survives sign-out and sign-in
+        working-directory: e2e
+        run: |
+          export NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"
+          npm run test:device-trust
+
+      - name: Upload the device-trust report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-trust-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 30
+          if-no-files-found: warn

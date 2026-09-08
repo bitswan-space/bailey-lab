@@ -154,13 +154,12 @@ func acmeChallengeFQDNAllowed(fqdn, domain string) bool {
 	if rest == domain || strings.HasSuffix(rest, "."+domain) {
 		return true
 	}
-	// Published public endpoints (issue #220) live under the AOC's
-	// *.public.<aoc-id> namespace, not this server's own domain, but the gate
-	// still terminates their TLS — so authorise DNS-01 challenges for hosts
-	// THIS server has actually published, plus the namespace base itself (the
-	// ONE wildcard cert for *.public.<aoc-id> challenges at the base). Nothing
-	// else under that namespace is authorised.
-	return isPublicEndpointHost(rest) || isPublicNamespaceBase(rest)
+	// A published public endpoint (issue #220) is one label under this server's
+	// own domain now, so the wildcard challenge above already covers it and
+	// nothing else needs authorising. Published hosts stay listed here for the
+	// deployments whose certificates predate that — their published names are
+	// still in the AOC's old namespace, and a renewal must not start failing.
+	return isPublicEndpointHost(rest)
 }
 
 // acmeDNSChallengeRequest matches the body lego's httpreq provider sends.

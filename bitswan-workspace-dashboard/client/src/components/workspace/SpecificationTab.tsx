@@ -40,8 +40,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { FlowchartEditorModal } from '@/components/workspace/FlowchartEditorModal';
 import {
-  ATTACHMENT_MAX_BYTES,
-  ATTACHMENT_MAX_MB,
   SpecAttachments,
   notifySpecAttachmentsChanged,
   uploadSpecAttachments,
@@ -489,13 +487,6 @@ export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: Specificat
   const attachAndInsertImages = useCallback(
     async (files: File[], at?: number) => {
       if (files.length === 0) return;
-      const oversized = files.find((f) => f.size > ATTACHMENT_MAX_BYTES);
-      if (oversized) {
-        toast.error("Couldn't attach the image", {
-          description: `${oversized.name} is larger than the ${ATTACHMENT_MAX_MB} MB upload limit.`,
-        });
-        return;
-      }
       const id = `spec-image-attach-${Date.now()}`;
       toast.loading(
         files.length === 1 ? 'Attaching image…' : `Attaching ${files.length} images…`,

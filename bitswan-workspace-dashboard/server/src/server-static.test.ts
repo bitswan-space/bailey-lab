@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
@@ -14,7 +14,21 @@ const distAssets = path.resolve(
 );
 const added: string[] = [];
 
+// The SPA fallback answers with the bundle's index.html, so these tests need
+// one to exist. A checkout that has not run `npm run build` has no dist at all,
+// and the fallback would then 404 instead of serving html — a failure about the
+// checkout rather than about routing. Put a placeholder there and take it away
+// again, touching a real build's index.html never.
+function ensureIndexHtml(): void {
+  const index = path.join(distAssets, '..', 'index.html');
+  if (existsSync(index)) return;
+  mkdirSync(path.dirname(index), { recursive: true });
+  writeFileSync(index, '<!doctype html><title>placeholder</title>\n');
+  added.push(index);
+}
+
 function addAssetAfterStart(name: string): string {
+  ensureIndexHtml();
   mkdirSync(distAssets, { recursive: true });
   const file = path.join(distAssets, name);
   writeFileSync(file, 'export const rebuilt = true;\n');

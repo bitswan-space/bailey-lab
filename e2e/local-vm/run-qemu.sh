@@ -315,7 +315,7 @@ if [ -f "$WORK/base-images.tar" ]; then
   mark "guest: seed base images"
 fi
 
-$SSH "$VM" "env $PROXY_ENV bash /repo/e2e/local-vm/run-e2e.sh" || RC=$? || true
+$SSH "$VM" "env $PROXY_ENV bash ${E2E_GUEST_RUN:-/repo/e2e/local-vm/run-e2e.sh}" || RC=$? || true
 # NB: no aggregate mark here — run-e2e's time is captured in full, step by step,
 # in the guest timeline (bringup builds + npm ci + playwright + walkthrough +
 # manual). Marking it again would double-count it in the merged total below.
