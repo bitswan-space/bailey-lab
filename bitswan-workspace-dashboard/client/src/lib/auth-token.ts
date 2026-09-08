@@ -56,3 +56,37 @@ export async function authHeader(): Promise<Record<string, string>> {
   const t = await getAccessToken();
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
+
+/**
+ * Whether the Bailey gate still has a session for this browser.
+ *
+ * `/oauth2/auth` is the gate's own auth-check endpoint: same-origin, and it
+ * ANSWERS rather than redirects — 401 when there is no session. That matters,
+ * because it is the only way the page can find this out. An `/api/*` call
+ * gets a 302 to Keycloak, which is cross-origin, so `fetch` cannot follow it
+ * to a readable answer; and a WebSocket upgrade just fails. Measured against
+ * a lapsed session (bailey-lab #437): `/oauth2/auth` → 401, `/api/…` → 302 to
+ * the Keycloak authorize endpoint.
+ *
+ * Only a literal 401 is read as signed out. A network error, a 5xx, a
+ * captive-portal HTML page — none of those are evidence that the user's
+ * session is gone, and telling someone to sign in again when the real fault
+ * was a dropped packet sends them the wrong way. Those are `unknown`, and
+ * callers keep doing whatever they would have done without asking.
+ */
+export async function gateSessionState(
+  fetchImpl: typeof fetch = fetch,
+): Promise<'alive' | 'signed-out' | 'unknown'> {
+  let r: Response;
+  try {
+    r = await fetchImpl('/oauth2/auth', { credentials: 'include', cache: 'no-store' });
+  } catch {
+    return 'unknown';
+  }
+  if (r.status === 401) {
+    // The cached token belongs to the session that just ended.
+    clearAccessToken();
+    return 'signed-out';
+  }
+  return r.ok ? 'alive' : 'unknown';
+}

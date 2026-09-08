@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import { authHeader } from '@/lib/auth-token';
+import type { TerminalExitInfo } from '@/components/terminal/Terminal';
 import { SessionTerminal } from './SessionTerminal';
 
 /**
@@ -69,7 +70,14 @@ export interface ExitedSession extends ActiveSession {
    * unreachable) — those aren't fixed by trying again. A normal 1000/1005
    * means the remote process ended.
    */
-  exitCode?: number;
+  exitCode: number;
+  /**
+   * True when the socket reached OPEN, i.e. a session really did run behind
+   * it. False means the handshake failed, which the close code alone cannot
+   * tell you (see TerminalExitInfo) — listeners must not read such a close as
+   * a session that started and died.
+   */
+  opened: boolean;
 }
 
 interface SessionsContextValue {
@@ -109,7 +117,7 @@ interface SessionsContextValue {
   startMergeBackSession(copy: string, bp: string, parent: string): Promise<void>;
 
   /** Called by SessionTerminal when its WS closes. */
-  markExited(id: string, exitCode?: number): void;
+  markExited(id: string, exit: TerminalExitInfo): void;
   /** Subscribed-to by hooks that want to invalidate caches when a session ends. */
   onExit(handler: (session: ExitedSession) => void): () => void;
 
@@ -325,7 +333,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const markExited = useCallback((id: string, exitCode?: number) => {
+  const markExited = useCallback((id: string, exit: TerminalExitInfo) => {
     writersRef.current.delete(id);
     // Drop any prompt queued for the dying session — its replacement starts
     // from the user's explicit action, not a stale injection.
@@ -339,7 +347,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const exited: ExitedSession = {
         ...session,
         exited: true,
-        ...(exitCode === undefined ? {} : { exitCode }),
+        exitCode: exit.code,
+        opened: exit.opened,
       };
       for (const fn of exitListeners.current) {
         try {
@@ -447,7 +456,7 @@ function SessionsLayer({
   sessions: Record<string, ActiveSession>;
   // eslint-disable-next-line no-restricted-syntax -- discriminated scope state
   currentScope: Scope | null;
-  markExited: (id: string, exitCode?: number) => void;
+  markExited: (id: string, exit: TerminalExitInfo) => void;
   registerWriter: (id: string, write: ((data: string) => void) | null) => void;
   // eslint-disable-next-line no-restricted-syntax -- null = nowhere to overlay
   rect: PaneRect | null;
@@ -489,7 +498,7 @@ function SessionsLayer({
               {...(s.parent ? { parent: s.parent } : {})}
               resume={s.resume}
               hidden={!visible}
-              onExit={(info) => markExited(s.id, info.code)}
+              onExit={(info) => markExited(s.id, info)}
               onInputWriter={(write) => registerWriter(s.id, write)}
             />
           </div>

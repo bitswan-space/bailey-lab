@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -b && vite build",
-    "test": "node --import tsx --test src/lib/*.test.ts",
+    "test": "files=$(find src -name '*.test.ts' | sort); test -n \"$files\" || { echo 'no test files found under src/' >&2; exit 1; }; node --import tsx --test $files",
     "dev": "vite",
     "preview": "vite preview"
   },

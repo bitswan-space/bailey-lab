@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Boxes,
   Folder,
   GitPullRequest,
   Loader2,
+  LogIn,
   MessageSquare,
   RotateCcw,
 } from 'lucide-react';
@@ -13,6 +14,12 @@ import { DiffTab } from '@/components/diff/DiffTab';
 import { ContainersPane } from '@/components/agents/ContainersPane';
 import { Button } from '@/components/ui/button';
 import { useSessions } from '@/components/agents/SessionProvider';
+import {
+  decideAfterAgentExit,
+  RELAUNCH_BACKOFF_MS,
+  type AgentLaunchFailure,
+} from '@/lib/agentSessionExit';
+import { gateSessionState } from '@/lib/auth-token';
 import { useLatestAgentSession } from '@/hooks/useLatestAgentSession';
 import { cn } from '@/lib/utils';
 import { useUrlEnum, useUrlFlag } from '@/lib/urlState';
@@ -31,32 +38,43 @@ type Sub = 'chat' | 'files' | 'containers';
 const SUBS: Sub[] = ['chat', 'files', 'containers'];
 
 /**
- * A session that dies sooner than this never really got going — the agent
- * failed to launch (bad resume, container wedged, claude not authenticated).
- * One that outlives it was a working agent that ended for its own reasons
- * (the user quit it, the server's idle timeout fired, the ws dropped), and is
- * restarted immediately with a clean slate of attempts.
+ * Where autostart stands for the viewed BP. `launching` covers both "a
+ * session is up" and "we're about to (re)try one"; the rest are the give-up
+ * states the pane renders an error for. `decideAfterAgentExit` produces all of
+ * them except `signed-out`, which no close code can tell you — that one comes
+ * from asking the gate (see the exit handler below).
  */
-const HEALTHY_SESSION_MS = 20_000;
-/**
- * Backoff before each *re*-launch after a failed one. Its length is also the
- * attempt budget: once it's exhausted we stop and show the error rather than
- * hammering the coding-agent container.
- */
-const RELAUNCH_BACKOFF_MS = [2_000, 8_000, 20_000];
+type LaunchState = 'launching' | AgentLaunchFailure | 'signed-out';
+type Failure = Exclude<LaunchState, 'launching'>;
 
 /**
- * Where autostart stands for the viewed BP. `launching` covers both "a
- * session is up" and "we're about to (re)try one" — the other two are the
- * give-up states the pane renders an error for.
+ * The message each give-up state puts on screen, and what the button under it
+ * should do. They have to be told apart, because the action that helps is
+ * different for each: "refused" is an answer from the server, "cannot-connect"
+ * means nothing answered and trying again may well work, and "signed-out"
+ * means retrying CANNOT work — the socket has no session to present, and only
+ * a top-level navigation can get one back.
  */
-type LaunchState =
-  /** Running, starting, or waiting out a backoff before the next attempt. */
-  | 'launching'
-  /** The agent started and died on launch, every attempt we had. */
-  | 'exits-immediately'
-  /** The server refused to spawn it — retrying the same request won't help. */
-  | 'refused';
+const FAILURE: Record<Failure, { message: string; action: 'retry' | 'sign-in' }> = {
+  refused: {
+    message: 'The coding agent for this business process could not be reached.',
+    action: 'retry',
+  },
+  'cannot-connect': {
+    message: 'The connection to the coding agent could not be opened.',
+    action: 'retry',
+  },
+  'exits-immediately': {
+    message: `The coding agent for this business process exited immediately on ${
+      RELAUNCH_BACKOFF_MS.length + 1
+    } attempts.`,
+    action: 'retry',
+  },
+  'signed-out': {
+    message: 'Your sign-in session has expired, so the agent could not reconnect.',
+    action: 'sign-in',
+  },
+};
 
 /**
  * The Agents screen, per the wireframe (Workspace Dashboard → Agents): one
@@ -114,6 +132,10 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   // The BP's live agent — one session per (user, copy, BP), tracked by the
   // provider.
   const agent = sessionFor({ copy, bp });
+  // Read by the async gate probe below, which resolves after the exit that
+  // started it — by which time a retry may already have succeeded.
+  const agentRef = useRef(agent);
+  agentRef.current = agent;
 
   // ---------------------------------------------------------------------
   // Autostart. There is no manual "Start agent" step (bailey-lab #246): an
@@ -128,7 +150,8 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
   // ---------------------------------------------------------------------
   const [launchGen, setLaunchGen] = useState(0);
   const [launchState, setLaunchState] = useState<LaunchState>('launching');
-  const launchFailed = launchState !== 'launching';
+  const failure = launchState === 'launching' ? undefined : launchState;
+  const launchFailed = failure !== undefined;
   const failedAttempts = useRef(0);
   // eslint-disable-next-line no-restricted-syntax -- null = no relaunch pending
   const relaunchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -193,46 +216,62 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     startSession,
   ]);
 
-  // Restart loop guard. Every session end in this scope lands here; how it's
-  // handled depends on why it ended.
+  // Restart loop guard. EVERY session end in this scope lands here —
+  // including a socket that never opened, which used to go unreported and
+  // left the tab holding a dead terminal with no way back (bailey-lab #437).
+  // `decideAfterAgentExit` owns the routing (and its tests pin it); this
+  // effect carries the decision out, and asks one question the close itself
+  // cannot answer.
   //
-  //   - The server refused to spawn anything (1008 bad request / forbidden
-  //     resume / not authenticated, 1011 coding-agent host unreachable):
-  //     retrying can't fix that, so surface it straight away.
-  //   - The session had been up and running: restart it — the agent is meant
-  //     to be running the whole time this tab is open.
-  //   - It died on launch: count it against the attempt budget and try again
-  //     after a growing backoff; when the budget runs out, stop and show the
-  //     error instead of hammering the container.
-  useEffect(
-    () =>
-      onExit((s) => {
-        if (s.copy !== copy || s.bp !== bp) return;
-        if (s.exitCode === 1008 || s.exitCode === 1011) {
+  // That question is for the socket that never opened. It has two very
+  // different causes wearing the same 1006: something momentary (the agent
+  // container restarting, the proxy blipping), which retrying fixes, or the
+  // gate's session having lapsed, which retrying CANNOT fix — measured, on a
+  // lapsed session every attempt in the budget was declined and only a reload
+  // brought the agent back. `/oauth2/auth` answers it same-origin, so we ask
+  // instead of spending 30 seconds of backoff on a dead end and then offering
+  // a Retry that can't work either.
+  useEffect(() => {
+    let cancelled = false;
+    const off = onExit((s) => {
+      if (s.copy !== copy || s.bp !== bp) return;
+      if (!s.opened) {
+        void gateSessionState().then((state) => {
+          // Only act on a definite "signed out", and only while this scope
+          // still has nothing running — a retry may have won the race.
+          if (cancelled || state !== 'signed-out' || agentRef.current) return;
           cancelRelaunch();
-          setLaunchState('refused');
-          return;
-        }
-        if (Date.now() - s.startedAt >= HEALTHY_SESSION_MS) {
-          failedAttempts.current = 0;
-          setLaunchGen((g) => g + 1);
-          return;
-        }
-        const attempt = failedAttempts.current;
-        failedAttempts.current = attempt + 1;
-        const backoff = RELAUNCH_BACKOFF_MS[attempt];
-        if (backoff === undefined) {
-          setLaunchState('exits-immediately');
-          return;
-        }
+          setLaunchState('signed-out');
+        });
+      }
+      const decision = decideAfterAgentExit({
+        opened: s.opened,
+        closeCode: s.exitCode,
+        ageMs: Date.now() - s.startedAt,
+        failedAttempts: failedAttempts.current,
+      });
+      if (decision.relaunch === 'no') {
         cancelRelaunch();
-        relaunchTimer.current = setTimeout(() => {
-          relaunchTimer.current = null;
-          setLaunchGen((g) => g + 1);
-        }, backoff);
-      }),
-    [onExit, copy, bp, cancelRelaunch],
-  );
+        setLaunchState(decision.failure);
+        return;
+      }
+      if (decision.relaunch === 'immediately') {
+        failedAttempts.current = 0;
+        setLaunchGen((g) => g + 1);
+        return;
+      }
+      failedAttempts.current += 1;
+      cancelRelaunch();
+      relaunchTimer.current = setTimeout(() => {
+        relaunchTimer.current = null;
+        setLaunchGen((g) => g + 1);
+      }, decision.delayMs);
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [onExit, copy, bp, cancelRelaunch]);
 
   // Manual escape hatch for the exhausted-attempts state: hand the attempt
   // budget back to the autostart effect.
@@ -308,19 +347,27 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
             rather than an empty pane. */}
         {!agent && (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-            {launchFailed ? (
+            {failure ? (
               <>
                 <AlertTriangle className="size-5 text-amber-600" aria-hidden />
                 <span className="max-w-md text-center text-destructive">
-                  {launchState === 'refused'
-                    ? 'The coding agent for this business process could not be reached.'
-                    : `The coding agent for this business process exited immediately on ${
-                        RELAUNCH_BACKOFF_MS.length + 1
-                      } attempts.`}
+                  {FAILURE[failure].message}
                 </span>
-                <Button onClick={retry} size="sm" variant="outline">
-                  <RotateCcw className="size-3.5" aria-hidden /> Retry
-                </Button>
+                {FAILURE[failure].action === 'sign-in' ? (
+                  // A reload, not a retry: it is a top-level navigation, so it
+                  // can complete the sign-in redirect chain that a WebSocket
+                  // upgrade and a same-origin fetch both cannot. Left to the
+                  // user rather than done automatically — reloading under
+                  // someone would throw away an unsaved edit elsewhere in the
+                  // dashboard.
+                  <Button onClick={() => window.location.reload()} size="sm" variant="outline">
+                    <LogIn className="size-3.5" aria-hidden /> Sign in again
+                  </Button>
+                ) : (
+                  <Button onClick={retry} size="sm" variant="outline">
+                    <RotateCcw className="size-3.5" aria-hidden /> Retry
+                  </Button>
+                )}
               </>
             ) : (
               <span className="flex items-center gap-2">

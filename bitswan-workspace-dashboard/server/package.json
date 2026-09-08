@@ -9,7 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.test.json",
-    "test": "node --import tsx --test \"src/**/*.test.ts\""
+    "test": "files=$(find src -name '*.test.ts' | sort); test -n \"$files\" || { echo 'no test files found under src/' >&2; exit 1; }; node --import tsx --test $files"
   },
   "dependencies": {
     "@fastify/multipart": "^8.3.0",

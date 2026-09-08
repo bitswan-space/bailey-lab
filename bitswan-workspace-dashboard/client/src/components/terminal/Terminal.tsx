@@ -11,11 +11,19 @@ type UploadStatus = 'uploading' | 'done' | 'failed';
  * anything at all (bad request, not authenticated, coding-agent host
  * unreachable), and with a normal 1000/1005 when the remote process simply
  * ended. Callers use that to tell "retrying might help" from "it won't".
+ *
+ * `opened` carries the other half of the story, which a close code cannot:
+ * whether there was ever a session behind this socket at all. A handshake the
+ * gate declines (lapsed oauth2-proxy session) never reaches OPEN and arrives
+ * as a bare 1006 with no server close frame — indistinguishable, by code
+ * alone, from a live session whose network dropped.
  */
 export interface TerminalExitInfo {
   /** WebSocket close code (1000/1005 = normal, 1008 = rejected, 1011 = server error). */
   code: number;
   reason: string;
+  /** True when the socket reached OPEN before closing. */
+  opened: boolean;
 }
 
 export interface TerminalProps {
@@ -26,7 +34,13 @@ export interface TerminalProps {
    * agent terminals without a config switch in here.
    */
   wsUrl: string;
-  /** Fires once when the underlying WebSocket reports close. */
+  /**
+   * Fires once when the underlying WebSocket reports close — including a
+   * socket that never opened, so a failed handshake reaches the caller
+   * instead of leaving a dead terminal on screen (bailey-lab #437). The one
+   * close it stays silent about is the one this component causes itself, on
+   * unmount.
+   */
   onExit?: (info: TerminalExitInfo) => void;
   /**
    * Uploads pasted/dropped files somewhere the process on the far end of the
@@ -197,12 +211,17 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${window.location.host}${wsUrl}`);
     ws.binaryType = 'arraybuffer';
-    // Track whether the connection actually reached OPEN. React 18 strict mode
-    // intentionally double-invokes effects in dev (mount → cleanup → mount), so
-    // the first WS is `.close()`d while still in CONNECTING. Without this flag
-    // the cleanup would fire `onExit` on a session that never actually started,
-    // and the parent would mark it ended before the re-mounted WS has a chance.
+    // Track whether the connection actually reached OPEN — reported to the
+    // caller, which needs it to tell a failed handshake from a live session
+    // that dropped (see TerminalExitInfo).
     let wasOpened = false;
+    // Set by our own teardown, immediately before we close the socket. The
+    // close that follows is ours, not the far end's, so it is NOT reported:
+    // the parent unmounts this terminal only for a session it has already
+    // finished with, and reporting an exit for it would mark the wrong thing
+    // dead. Every other close — including one on a socket still in
+    // CONNECTING — is news the parent has to act on.
+    let disposing = false;
     // eslint-disable-next-line no-restricted-syntax -- null = no nudge scheduled
     let redrawNudge: ReturnType<typeof setTimeout> | null = null;
 
@@ -256,6 +275,11 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
             }]\x1b[0m\r\n`);
           } else if (msg.type === 'error') {
             term.write(`\r\n\x1b[31m[error: ${msg.message}]\x1b[0m\r\n`);
+          } else if (msg.type === 'idle-timeout') {
+            // The server's reason for the close that is about to follow. Say
+            // it out loud: a bare "[connection closed]" reads as a fault, and
+            // this one is the idle timeout doing its job.
+            term.write(`\r\n\x1b[33m[${msg.message}]\x1b[0m\r\n`);
           }
         } catch {
           // ignore non-JSON text frames
@@ -264,9 +288,15 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
     });
 
     ws.addEventListener('close', (ev) => {
-      term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
+      term.write(
+        wasOpened
+          ? '\r\n\x1b[90m[connection closed]\x1b[0m\r\n'
+          : '\r\n\x1b[90m[could not connect]\x1b[0m\r\n',
+      );
       if (wasOpened) onInputWriterRef.current?.(null);
-      if (wasOpened) onExitRef.current?.({ code: ev.code, reason: ev.reason });
+      if (!disposing) {
+        onExitRef.current?.({ code: ev.code, reason: ev.reason, opened: wasOpened });
+      }
     });
 
     const encoder = new TextEncoder();
@@ -354,6 +384,7 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
     observer.observe(host);
 
       return () => {
+        disposing = true;
         if (redrawNudge) clearTimeout(redrawNudge);
         host.removeEventListener('paste', onPaste, true);
         host.removeEventListener('dragover', onDragOver);
