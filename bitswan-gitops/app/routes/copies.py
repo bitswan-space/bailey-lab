@@ -1199,6 +1199,7 @@ async def _spawn_dev_deploy(bp: str, deployer: str | None) -> str | None:
             return None
         res = await spawn_set_deploy(
             label=f"sync-deploy:{bp}",
+            bp=bp,
             members=members,
             stage="dev",
             commit_subject=(f"{deployer} synced {bp}" if deployer else None),
@@ -1436,6 +1437,7 @@ async def _spawn_live_dev_deploy(
         service = get_automation_service()
         res = await spawn_set_deploy(
             label=f"pull-redeploy:{copy}:{bp}",
+            bp=bp,
             members=members,
             stage="live-dev",
             commit_subject=(

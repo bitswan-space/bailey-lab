@@ -68,6 +68,7 @@ import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import type { ServiceType, StagingGate, StagingLogEntry, StagingSignoff } from '@/lib/api';
 import { promoteBpWithToast, watchDeployTask } from '@/lib/deployBp';
+import { useLastDeploy } from '@/hooks/useLastDeploy';
 import { STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
 import {
   api,
@@ -2398,6 +2399,16 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // silently falling back to "Not deployed yet" (which forces you to go dig in
   // container logs). Cleared when the stage view changes or a new attempt starts.
   const [deployError, setDeployError] = useState<{ stage: string; msg: string } | null>(null);
+  const { lastDeploy } = useLastDeploy(bp.name, stageDataId(activeStage), undefined, reloadKey);
+  const inSessionFailure =
+    deployError && deployError.stage === activeStage ? deployError.msg : '';
+  const persistedFailure =
+    lastDeploy?.status === 'failed'
+      ? lastDeploy.error || 'the deploy did not finish'
+      : '';
+  const stageFailure = inSessionFailure || persistedFailure;
+  const showDiskFullHint =
+    !inSessionFailure && !!persistedFailure && lastDeploy?.cause === 'disk_full';
   // Live deploy/promote progress shown ON the stage card (not only in the
   // transient toast). A promote runs tens of seconds — image promote, ingress
   // reconcile, blue-green slots — during which the stage card would otherwise
@@ -3013,9 +3024,15 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                     </span>
                   </div>
                 )}
-                {deployError && deployError.stage === activeStage && (
+                {stageFailure && (
                   <div className="mt-1.5 rounded-md bg-red-50 px-2.5 py-1.5 text-[12px] font-medium text-red-700 ring-1 ring-red-200">
-                    Last deploy to {STAGE_LABEL[activeStage]} failed: {deployError.msg}
+                    Last deploy to {STAGE_LABEL[activeStage]} failed: {stageFailure}
+                    {showDiskFullHint && (
+                      <span className="mt-1 block font-normal">
+                        The server is out of disk space. Free some space, then retry the
+                        deploy from the Deploy tab.
+                      </span>
+                    )}
                   </div>
                 )}
               </div>

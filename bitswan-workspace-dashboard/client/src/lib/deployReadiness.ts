@@ -31,6 +31,16 @@ export interface DivergenceCounts {
   behind_bp: number;
 }
 
+export interface LastDeployReading {
+  // eslint-disable-next-line no-restricted-syntax
+  status: 'completed' | 'failed' | null;
+  // eslint-disable-next-line no-restricted-syntax
+  cause?: string | null;
+  // eslint-disable-next-line no-restricted-syntax
+  error?: string | null;
+  at?: string;
+}
+
 export interface DeployReadinessInput {
   /** The divergence reading, or null when it has not arrived / failed. */
   // eslint-disable-next-line no-restricted-syntax -- null = not known
@@ -41,6 +51,8 @@ export interface DeployReadinessInput {
   changedUnknown: boolean;
   /** The business process's directory slug. */
   bpDir: string;
+  // eslint-disable-next-line no-restricted-syntax
+  lastDeploy?: LastDeployReading | null;
 }
 
 export interface DeployReadiness {
@@ -57,6 +69,8 @@ export interface DeployReadiness {
   actionable: boolean;
   /** Publishing is not a fast-forward: main moved. Sync (or overwrite) first. */
   blockedByBehind: boolean;
+  lastDeployFailed: boolean;
+  retryOnly: boolean;
 }
 
 /**
@@ -75,6 +89,7 @@ export function deployReadiness({
   changed,
   changedUnknown,
   bpDir,
+  lastDeploy,
 }: DeployReadinessInput): DeployReadiness {
   const bpChanged = changedForBp(changed, bpDir);
   const dirty = bpChanged.length > 0;
@@ -82,11 +97,13 @@ export function deployReadiness({
   const known = divergenceKnown && !changedUnknown;
   const aheadBp = divergence?.ahead_bp ?? 0;
   const behindBp = divergence?.behind_bp ?? 0;
+  const lastDeployFailed = lastDeploy?.status === 'failed';
   // Up to date requires BOTH readings. Everything else is actionable, which is
   // the safe direction to be wrong in: offering a button that turns out to be
   // a no-op costs a click, whereas hiding one costs the user their work's
   // existence.
-  const upToDate = known && aheadBp === 0 && behindBp === 0 && !dirty;
+  const nothingToPublish = known && aheadBp === 0 && behindBp === 0 && !dirty;
+  const upToDate = nothingToPublish && !lastDeployFailed;
   return {
     bpChanged,
     dirty,
@@ -94,5 +111,7 @@ export function deployReadiness({
     upToDate,
     actionable: !upToDate,
     blockedByBehind: behindBp > 0,
+    lastDeployFailed,
+    retryOnly: lastDeployFailed && nothingToPublish,
   };
 }

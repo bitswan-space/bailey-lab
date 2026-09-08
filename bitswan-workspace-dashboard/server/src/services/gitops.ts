@@ -1003,6 +1003,21 @@ export class GitopsClient {
     return { ok: r.ok, status: r.status, body };
   }
 
+  async bpLastDeploy(
+    bp: string,
+    stage: string,
+    copy?: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const q = new URLSearchParams({ stage });
+    if (copy) q.set('copy', copy);
+    const r = await fetch(
+      `${this.baseUrl}/automations/business-processes/${encodeURIComponent(bp)}/last-deploy?${q}`,
+      { headers: { ...this.authHeaders() } },
+    );
+    const body: unknown = await r.json().catch(() => null);
+    return { ok: r.ok, status: r.status, body };
+  }
+
   async bpDiff(
     bp: string,
     from: string,

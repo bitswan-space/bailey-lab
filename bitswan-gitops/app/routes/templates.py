@@ -184,6 +184,7 @@ async def _scaffold_from_template(
     if members:
         deploy = await spawn_set_deploy(
             label=bp,
+            bp=bp,
             members=members,
             stage=stage,
             copy=copy,
