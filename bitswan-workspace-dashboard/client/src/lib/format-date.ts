@@ -75,6 +75,28 @@ const CALENDAR_YEAR_FMT = new Intl.DateTimeFormat('en-US', {
 });
 
 /**
+ * Timestamps that gitops wrote into bitswan.yaml before it emitted ISO —
+ * "May 06, 2026 · 14:02", a display string no date parser accepts. Every audit
+ * sign-off and freeze recorded then would otherwise read "—" forever, so the
+ * records already in git are still understood here. Nothing writes this shape
+ * any more.
+ */
+const LEGACY_DISPLAY = /^([A-Z][a-z]{2}) (\d{1,2}), (\d{4}) · (\d{2}):(\d{2})$/;
+const MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+// eslint-disable-next-line no-restricted-syntax -- undefined = not that shape
+function parseLegacyDisplay(value: string): number | undefined {
+  const m = LEGACY_DISPLAY.exec(value.trim());
+  if (!m) return undefined;
+  const month = MONTHS.indexOf(m[1]!);
+  if (month < 0) return undefined;
+  return Date.UTC(Number(m[3]), month, Number(m[2]), Number(m[4]), Number(m[5]));
+}
+
+/**
  * Epoch milliseconds for a wire value, or `undefined` when there is no real
  * date to show. Every other function here funnels through this, so a bad value
  * can never reach `Intl` and surface as "Invalid Date".
@@ -87,7 +109,7 @@ export function parseWhen(value: WhenInput): number | undefined {
       ? value.getTime()
       : typeof value === 'number'
         ? value
-        : Date.parse(value);
+        : (parseLegacyDisplay(value) ?? Date.parse(value));
   if (!Number.isFinite(ms)) return undefined;
   if (ms < MIN_REAL_MS) return undefined;
   return ms;
