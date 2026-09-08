@@ -2,8 +2,18 @@ import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Base64, ClipboardAddon, type IClipboardProvider } from '@xterm/addon-clipboard';
+import { screenHasContent } from '@/lib/terminalScreen';
 
 type UploadStatus = 'uploading' | 'done' | 'failed';
+
+/** First blank-screen check, measured from the socket opening. */
+const NUDGE_FIRST_MS = 600;
+/** How long the one-row shrink is held before the size is put back. */
+const NUDGE_RESTORE_MS = 150;
+/** Gap between checks. */
+const NUDGE_INTERVAL_MS = 900;
+/** How many checks to make before leaving the screen alone. */
+const NUDGE_ROUNDS = 10;
 
 /**
  * Why the socket went away. The WebSocket close code is the only structured
@@ -222,8 +232,18 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
     // dead. Every other close — including one on a socket still in
     // CONNECTING — is news the parent has to act on.
     let disposing = false;
-    // eslint-disable-next-line no-restricted-syntax -- null = no nudge scheduled
-    let redrawNudge: ReturnType<typeof setTimeout> | null = null;
+    // Every pending redraw-nudge timer, so teardown can drop them all.
+    const nudgeTimers = new Set<ReturnType<typeof setTimeout>>();
+    const laterNudge = (ms: number, fn: () => void) => {
+      const t = setTimeout(() => {
+        nudgeTimers.delete(t);
+        fn();
+      }, ms);
+      nudgeTimers.add(t);
+    };
+    // Is anything actually drawn on the visible screen? See terminalScreen.ts
+    // for why it has to be this and not "did any bytes arrive".
+    const painted = () => screenHasContent(term.buffer.active, term.rows);
 
     const sendResize = () => {
       if (ws.readyState !== WebSocket.OPEN) return;
@@ -238,27 +258,51 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
       onInputWriterRef.current?.((data) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data));
       });
-      // Redraw nudge: when reconnecting to a still-running session (the agent
-      // persists server-side in dtach across browser close / refresh), the
-      // remote full-screen TUI — Claude is an Ink/React app — only repaints on
-      // an actual dimension *change*; a plain reattach at the same size (even
-      // with a same-size SIGWINCH) leaves the screen blank until the user
-      // manually resizes. Once the attach has settled, briefly shrink the
-      // terminal by one row then restore it — a genuine resize delta that
-      // forces the remote to repaint. Harmless for fresh sessions.
-      const nudge = setTimeout(() => {
-        if (ws.readyState !== WebSocket.OPEN || term.rows < 2) return;
+      // Redraw watcher: reattaching to a still-running session (the agent
+      // persists server-side in dtach across browser close / refresh) leaves
+      // the screen blank. The remote full-screen TUI — Claude is an Ink/React
+      // app — only repaints on an actual dimension *change*, and a plain
+      // reattach at the same size is not one (not even with a same-size
+      // SIGWINCH). So make one: shrink the terminal by a row and put it back.
+      //
+      // Doing that ONCE, 600 ms after `open`, did not work (bailey-lab #456):
+      // five reattaches in a row stayed blank for the full 45 s they were
+      // watched. Reading the socket showed why, and it is not that 600 ms is
+      // too short a wait for the far end — it is that the far end is not
+      // FINISHED. What arrives on a blank reattach is ~325 bytes of plumbing:
+      //
+      //   +1080ms  "Warning: Permanently added '[…]:2222' … known hosts."
+      //   +1613ms  "asciinema: recording asciicast to /var/log/…"
+      //   +1649ms  "\x1b[H\x1b[J"        <- cursor home, erase display
+      //
+      // The nudge lands in the middle of that, and the clear at the end wipes
+      // whatever it produced. Any single delay is a guess about when the
+      // clear happens, and that depends on the state of the container.
+      //
+      // So watch instead of guessing: for the first few seconds, on every
+      // check where the screen is BLANK, nudge. A blank screen is the symptom
+      // itself, so nothing has to be inferred; a fresh session has painted by
+      // the first check and is never nudged at all; and a nudge whose repaint
+      // the clear happens to swallow is simply reissued on the next round.
+      const nudge = () => {
         const rows = term.rows;
         const cols = term.cols;
         term.resize(cols, rows - 1);
         sendResize();
-        redrawNudge = setTimeout(() => {
+        laterNudge(NUDGE_RESTORE_MS, () => {
           if (ws.readyState !== WebSocket.OPEN) return;
           term.resize(cols, rows);
           sendResize();
-        }, 150);
-      }, 600);
-      redrawNudge = nudge;
+        });
+      };
+      let round = 0;
+      const watch = () => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        if (term.rows >= 2 && !painted()) nudge();
+        round += 1;
+        if (round < NUDGE_ROUNDS) laterNudge(NUDGE_INTERVAL_MS, watch);
+      };
+      laterNudge(NUDGE_FIRST_MS, watch);
     });
 
     ws.addEventListener('message', (ev) => {
@@ -385,7 +429,8 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
 
       return () => {
         disposing = true;
-        if (redrawNudge) clearTimeout(redrawNudge);
+        for (const t of nudgeTimers) clearTimeout(t);
+        nudgeTimers.clear();
         host.removeEventListener('paste', onPaste, true);
         host.removeEventListener('dragover', onDragOver);
         host.removeEventListener('drop', onDrop);
