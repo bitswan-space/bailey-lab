@@ -3,6 +3,8 @@ package k8sdriver
 import (
 	"os"
 
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
+
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
@@ -15,10 +17,7 @@ import (
 // is always <name>-0 — which is what makes an exec-based backup or a psql
 // provisioning step able to find it without a lookup.
 func (c *compileState) infraService(service, realm string) k8srender.ObjectSet {
-	name := c.workspace + "__" + service
-	if realm != "production" {
-		name += "-" + realm
-	}
+	name := c.workspace + "__" + service + core.ServiceSuffix(realm)
 	switch service {
 	case "postgres":
 		return c.postgres(name, realm)
@@ -33,18 +32,23 @@ func (c *compileState) postgres(container, realm string) k8srender.ObjectSet {
 	svcName := k8srender.Name(container, k8srender.ServiceNameMax)
 	labels := c.infraLabels(svcName, container, realm)
 
-	// The superuser password is generated here rather than read from the
-	// secrets volume: what needs it is this database and the provisioning step
-	// that creates each business process its own role, and neither is a place a
-	// file has to exist for.
-	secretName := objName + "-superuser"
-	objs := k8srender.ObjectSet{
-		k8srender.Secret(secretName, map[string]string{
-			"POSTGRES_USER":     "postgres",
-			"POSTGRES_PASSWORD": stableSecret("postgres", container),
-			"POSTGRES_DB":       "postgres",
-		}),
+	// The superuser comes from the service secrets gitops writes, because the
+	// coordinates a business process is handed come from that same file: a
+	// password generated here instead would mean the database and the things
+	// told how to reach it disagree. A workspace that has no such file yet gets
+	// a stable generated one, so a first apply still stands the database up.
+	creds := map[string]string{
+		"POSTGRES_USER":     "postgres",
+		"POSTGRES_PASSWORD": stableSecret("postgres", container),
+		"POSTGRES_DB":       "postgres",
 	}
+	for k, v := range core.ServiceSecrets(c.ctx.SecretsDir, "postgres", realm) {
+		if k == "POSTGRES_USER" || k == "POSTGRES_PASSWORD" {
+			creds[k] = v
+		}
+	}
+	secretName := objName + "-superuser"
+	objs := k8srender.ObjectSet{k8srender.Secret(secretName, creds)}
 	objs = append(objs, statefulSet(statefulSetSpec{
 		Name:      objName,
 		Service:   svcName,
@@ -84,6 +88,21 @@ func (c *compileState) garage(container, realm string) k8srender.ObjectSet {
 		MountPath: "/data",
 		SubPath:   "data",
 		Storage:   storageSizeOr("BITSWAN_K8S_GARAGE_STORAGE", "8Gi"),
+		// The object store is ready when it answers, not when its process
+		// starts: the provisioner mints keys and creates buckets against it, and
+		// against a node that is still coming up those calls fail in ways that
+		// read as permission problems.
+		Readiness: &k8srender.Probe{TCPPort: 3900, PeriodSeconds: 3, Failures: 60},
+		// Garage reads its RPC secret, admin token and ports from a file gitops
+		// writes beside the other secrets. Without it the process exits on its
+		// first line — it has no defaults to fall back on — so this mount is
+		// what makes the object store start at all.
+		Files: []k8srender.Mount{{
+			Path:     "/etc/garage.toml",
+			SubPath:  c.volumeSubPath("secrets/garage" + core.ServiceSuffix(realm) + ".toml"),
+			ReadOnly: true,
+		}},
+		VolumeClaim: c.volumeClaim(),
 	})
 }
 
@@ -98,18 +117,20 @@ func (c *compileState) infraLabels(svcName, container, realm string) map[string]
 }
 
 type statefulSetSpec struct {
-	Name      string
-	Service   string
-	Labels    map[string]interface{}
-	Image     string
-	Command   []string
-	Port      int
-	PortName  string
-	EnvFrom   []string
-	MountPath string
-	SubPath   string
-	Storage   string
-	Readiness *k8srender.Probe
+	Name        string
+	Service     string
+	Labels      map[string]interface{}
+	Image       string
+	Command     []string
+	Port        int
+	PortName    string
+	EnvFrom     []string
+	MountPath   string
+	SubPath     string
+	Storage     string
+	Readiness   *k8srender.Probe
+	Files       []k8srender.Mount
+	VolumeClaim string
 }
 
 func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
@@ -121,10 +142,7 @@ func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
 		"ports": []interface{}{
 			map[string]interface{}{"name": s.PortName, "containerPort": s.Port},
 		},
-		"volumeMounts": []interface{}{
-			map[string]interface{}{"name": "data", "mountPath": s.MountPath, "subPath": s.SubPath},
-			map[string]interface{}{"name": "tools", "mountPath": toolsDir},
-		},
+		"volumeMounts": containerMounts(s),
 	}
 	if len(s.Command) > 0 {
 		container["command"] = s.Command
@@ -251,4 +269,37 @@ func stableSecret(purpose, scope string) string {
 
 func hashHex(s string) string {
 	return k8srender.HashHex(s)
+}
+
+// containerMounts is the data volume, the staged tools, and any single files
+// this service reads out of the workspace volume.
+func containerMounts(s statefulSetSpec) []interface{} {
+	out := []interface{}{
+		map[string]interface{}{"name": "data", "mountPath": s.MountPath, "subPath": s.SubPath},
+		map[string]interface{}{"name": "tools", "mountPath": toolsDir},
+	}
+	for _, f := range s.Files {
+		m := map[string]interface{}{"name": "workspace", "mountPath": f.Path}
+		if f.SubPath != "" {
+			m["subPath"] = f.SubPath
+		}
+		if f.ReadOnly {
+			m["readOnly"] = true
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func podVolumes(s statefulSetSpec) []interface{} {
+	out := []interface{}{
+		map[string]interface{}{"name": "tools", "emptyDir": map[string]interface{}{}},
+	}
+	if len(s.Files) > 0 && s.VolumeClaim != "" {
+		out = append(out, map[string]interface{}{
+			"name":                  "workspace",
+			"persistentVolumeClaim": map[string]interface{}{"claimName": s.VolumeClaim},
+		})
+	}
+	return out
 }

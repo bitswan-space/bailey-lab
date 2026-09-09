@@ -241,9 +241,11 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	// author's working tree, a built deployment runs an image with the source
 	// baked in, and anything else runs a base image over the checksum tree.
 	//
-	// Only the baked one is a registry reference: a build here is a push, so the
-	// tag bitswan.yaml records is a name in the namespace's registry, while the
-	// base images are published ones the kubelet already knows how to find.
+	// Whichever of the three it is, an image this driver built has to be named
+	// by its place in the registry rather than by its bare tag — see
+	// resolveImage. A live-dev automation that ships its own Dockerfile gets a
+	// built image too, which is why that is decided after the switch and not
+	// inside one arm of it.
 	image := cfg.Image
 	var mounts []k8srender.Mount
 	switch {
@@ -254,7 +256,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 			ReadOnly: true,
 		})
 	case conf.Image != "":
-		image = registryRef(conf.Image)
+		image = conf.Image
 	default:
 		mounts = append(mounts, k8srender.Mount{
 			Path:     cfg.MountPath,
@@ -262,6 +264,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 			ReadOnly: true,
 		})
 	}
+	image = resolveImage(image)
 	if image == "" {
 		return k8srender.Workload{}, nil, nil, false, fmt.Errorf("deployment %s has no image to run", depID)
 	}
@@ -616,3 +619,24 @@ func waitForRouted(ctx context.Context, objs k8srender.ObjectSet, routes []infra
 // cold node is minutes, and reporting a deploy failed because an image was
 // still downloading would be a lie.
 const routeReadyTimeout = 10 * time.Minute
+
+// resolveImage names an image the way the kubelet can find it.
+//
+// A build here is a push: the tag bitswan.yaml records lives in the namespace's
+// registry and nowhere else, so the kubelet asked for the bare tag would go
+// looking on Docker Hub and get a 404 it reports as ImagePullBackOff. Published
+// base images are left exactly as written, because they are already resolvable
+// and rewriting them would break the one case that works everywhere.
+//
+// The distinction is the repository prefix the driver builds into, which is the
+// same prefix that scopes image listing and removal.
+func resolveImage(image string) string {
+	if strings.HasPrefix(image, builtImagePrefix) {
+		return registryRef(image)
+	}
+	return image
+}
+
+// builtImagePrefix is the repository namespace every image this driver builds
+// is tagged under.
+const builtImagePrefix = "internal/"
