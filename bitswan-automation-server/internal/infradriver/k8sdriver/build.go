@@ -87,6 +87,25 @@ func registryRef(tag string) string {
 	return registry + "/" + strings.TrimPrefix(tag, "/")
 }
 
+// splitRef takes a reference apart the way a registry client does: the tag is
+// after the LAST colon, not the first, because the host carries a port. Cutting
+// at the first colon turns bitswan-registry:5000/x:sha into host
+// "bitswan-registry" and tag "5000/x:sha", which no registry has ever heard of.
+func splitRef(ref string) (host, repo, tag string, ok bool) {
+	name := ref
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		name, tag = ref[:i], ref[i+1:]
+	}
+	if tag == "" {
+		return "", "", "", false
+	}
+	host, repo, ok = strings.Cut(name, "/")
+	if !ok {
+		return "", "", "", false
+	}
+	return host, repo, tag, true
+}
+
 func cacheRef() string {
 	registry := envOr("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000")
 	return registry + "/internal/buildcache"
@@ -100,18 +119,10 @@ func buildkitAddr() string {
 // "" when it is not there. That is the cache check: the tag is a content
 // address, so its presence means the work is done.
 func (d *K8sDriver) manifestDigest(ctx context.Context, ref string) string {
-	out, err := exec.CommandContext(ctx, "buildctl", "--addr", buildkitAddr(), "--version").Output()
-	_ = out
-	if err != nil {
-		return ""
-	}
 	// The registry is asked directly rather than through buildkit, which has no
-	// command for "does this tag exist".
-	name, tag, ok := strings.Cut(ref, ":")
-	if !ok {
-		return ""
-	}
-	host, repo, ok := strings.Cut(name, "/")
+	// command for "does this tag exist" — and an image already pushed is a hit
+	// whether or not the builder happens to be up.
+	host, repo, tag, ok := splitRef(ref)
 	if !ok {
 		return ""
 	}

@@ -177,9 +177,9 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 		// the kubelet asked for the bare tag would go looking on Docker Hub.
 		Image:      registryRef(image),
 		PullPolicy: builtImagePullPolicy(),
-		Replicas:      conf.ReplicasOrOne(),
-		Env:           env,
-		Ports:         []k8srender.Port{{Name: "app", Port: port}},
+		Replicas:   conf.ReplicasOrOne(),
+		Env:        env,
+		Ports:      []k8srender.Port{{Name: "app", Port: port}},
 		Labels: map[string]string{
 			"gitops.automation_name": automation,
 			"gitops.context":         conf.Context,
