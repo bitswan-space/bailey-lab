@@ -171,7 +171,8 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			"BITSWAN_WORKSPACE_NAME":     ws,
 			// There is no socket to reach the daemon by from another pod, so the
 			// driver converges ingress over the daemon's workspace listener.
-			"BITSWAN_INGRESS_URL": cfg.IngressURL,
+			"BITSWAN_INGRESS_URL":   cfg.IngressURL,
+			"BITSWAN_INGRESS_TOKEN": os.Getenv(workspaceAPITokenEnv),
 		},
 		Mounts: []k8srender.Mount{
 			{Path: "/git/deploy-repos", SubPath: sub("deploy-repos")},

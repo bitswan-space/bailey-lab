@@ -212,6 +212,20 @@ stringData:
   OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: "true"
 ---
 apiVersion: v1
+kind: Secret
+metadata:
+  name: bailey-workspace-api
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+type: Opaque
+stringData:
+  # What a workspace's own services authenticate to the daemon with. A
+  # server-level credential, because the listener exists before any workspace
+  # does — a per-workspace one, checked against the workspaces that exist, is
+  # the better shape and a change on its own.
+  token: ${WORKSPACE_API_TOKEN}
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: bailey
@@ -348,6 +362,11 @@ spec:
               value: ${CODING_AGENT_IMAGE}
             - name: BITSWAN_INFRA_DRIVER_IMAGE
               value: ${INFRA_DRIVER_IMAGE}
+            - name: BITSWAN_WORKSPACE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: bailey-workspace-api
+                  key: token
           ports:
             - name: docs
               containerPort: 8080

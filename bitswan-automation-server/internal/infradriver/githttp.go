@@ -70,6 +70,7 @@ func gitCGIHandler(projectRoot string) http.Handler {
 			"KUBERNETES_SERVICE_PORT",
 			"BITSWAN_INFRA_DRIVER_KIND",
 			"BITSWAN_K8S_NAMESPACE",
+			"BITSWAN_INGRESS_TOKEN",
 		},
 	}
 }

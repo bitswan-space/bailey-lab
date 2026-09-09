@@ -13,6 +13,9 @@ import (
 // daemon routes they legitimately call.
 const workspaceAPIPort = 9079
 
+// workspaceAPITokenEnv names the credential this listener accepts.
+const workspaceAPITokenEnv = "BITSWAN_WORKSPACE_API_TOKEN"
+
 // startWorkspaceAPI serves the workspace-callable routes over TCP, for the
 // services that cannot reach the UNIX socket.
 //
@@ -31,9 +34,12 @@ const workspaceAPIPort = 9079
 // That makes the classification enforced rather than documented, which is the
 // half of it that was missing.
 func (s *Server) startWorkspaceAPI() error {
-	token := strings.TrimSpace(os.Getenv("BITSWAN_INFRA_DRIVER_TOKEN"))
+	// A server-level token, not a workspace's: this listener exists before any
+	// workspace does, and a workspace's own driver token is generated when the
+	// workspace is created. The seed supplies it.
+	token := strings.TrimSpace(os.Getenv(workspaceAPITokenEnv))
 	if token == "" {
-		return fmt.Errorf("refusing to serve the workspace API without a token to guard it")
+		return fmt.Errorf("no %s is set", workspaceAPITokenEnv)
 	}
 
 	mux := http.NewServeMux()

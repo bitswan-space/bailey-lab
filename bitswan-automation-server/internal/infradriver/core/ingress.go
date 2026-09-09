@@ -45,7 +45,7 @@ func ReconcileIngress(ctx context.Context, workspaceName, bp string, routes []in
 	// was the credential. Over the network it cannot, so the workspace's own
 	// token goes with the request — the same token gitops authenticates to this
 	// driver with, and the only thing the daemon's workspace listener accepts.
-	if token := os.Getenv("BITSWAN_INFRA_DRIVER_TOKEN"); token != "" {
+	if token := os.Getenv("BITSWAN_INGRESS_TOKEN"); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := client.Do(req)
