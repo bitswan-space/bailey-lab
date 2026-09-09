@@ -17,7 +17,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-
 // ctxFlags holds the WorkspaceContext supplied to serve and recorded in the
 // bare repo's git config so the post-receive `apply` can read it back.
 type ctxFlags struct {
