@@ -15,6 +15,11 @@ make console >/dev/null
 go build -o bitswan .
 sudo docker build -q -f Dockerfile.k8s -t bitswan/automation-server:dev . >/dev/null
 sudo docker build -q -f Dockerfile.infra-driver.k8s -t bitswan/infra-driver-k8s:dev . >/dev/null
+# The egress gateway is built here too: its entrypoint is what installs a pod's
+# rules, and a stale one holds the network namespace open forever, which on
+# Kubernetes is an init container that never exits and a workload that never
+# starts.
+sudo docker build -q -f cmd/egress-gateway/Dockerfile -t bitswan/egress-gateway-dev:latest . >/dev/null
 cd ..
 
 echo "=== verify the images carry what this checkout added ==="
@@ -26,6 +31,8 @@ sudo docker run --rm --entrypoint sh bitswan/infra-driver-k8s:dev \
   -c 'command -v buildctl >/dev/null && command -v kubectl >/dev/null'
 sudo docker run --rm --entrypoint sh bitswan/automation-server:dev \
   -c 'command -v kubectl >/dev/null'
+sudo docker run --rm --entrypoint sh bitswan/egress-gateway-dev:latest \
+  -c 'grep -q BITSWAN_FW_HOLD /entrypoint.sh'
 echo IMAGES_VERIFIED
 
 echo "=== hand them to containerd ==="
