@@ -3,7 +3,6 @@ package k8sdriver
 import (
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
@@ -157,10 +156,5 @@ func credentialSecret(workload string, content map[string]string) (string, k8sre
 		return "", nil
 	}
 	name := k8srender.Name(workload+"-env", k8srender.ServiceNameMax)
-	keys := make([]string, 0, len(content))
-	for k := range content {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
 	return name, k8srender.ObjectSet{k8srender.Secret(name, content)}
 }
