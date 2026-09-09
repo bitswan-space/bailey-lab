@@ -14,6 +14,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -36,9 +37,9 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	// steps to the step that just finished, and write a summary line at the end
 	// (perf-reconcile.log). Zero per-phase edits — every report() below is a
 	// phase boundary.
-	pt := newPhaseTimer(report)
-	report = pt.report
-	defer pt.finish(wctx.GitopsDir, wctx.BP)
+	pt := core.NewPhaseTimer(report)
+	report = pt.Report
+	defer pt.Finish(wctx.GitopsDir, wctx.BP)
 
 	// 1. Ensure the per-(workspace, stage) networks the compose references as
 	//    external exist (automation_service._ensure_stage_networks).

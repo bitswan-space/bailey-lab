@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"fmt"
@@ -8,16 +8,16 @@ import (
 
 // Bitswan is the parsed bitswan.yaml a workspace ships. It mirrors the subset of
 // the schema the compiler consumes. The file on disk may be in either the flat
-// `deployments` form or the tree `business_processes` form; parseBitswanYAML
+// `deployments` form or the tree `business_processes` form; ParseBitswanYAML
 // hydrates the flat view from the tree exactly like gitops's read_bitswan_yaml
 // (utils._tree_to_flat), so the compiler always operates on Deployments.
 type Bitswan struct {
 	// Deployments is the flat {deployment_id: conf} map. When the file uses the
-	// tree form it is hydrated from BusinessProcesses (see hydrate).
+	// tree form it is hydrated from BusinessProcesses (see Hydrate).
 	Deployments map[string]*Deployment `yaml:"deployments"`
 
 	// BusinessProcesses is the on-disk tree form: bp -> stage -> node.
-	BusinessProcesses map[string]map[string]*bpNode `yaml:"business_processes"`
+	BusinessProcesses map[string]map[string]*BPNode `yaml:"business_processes"`
 
 	// Backups carries blue-green slot/db wiring per BP slug.
 	Backups map[string]*BackupRec `yaml:"backups"`
@@ -32,8 +32,8 @@ type Bitswan struct {
 	DefaultNetworks []string `yaml:"default-networks"`
 }
 
-// bpNode is one stage node in the business_processes tree.
-type bpNode struct {
+// BPNode is one stage node in the business_processes tree.
+type BPNode struct {
 	Deployments map[string]*Deployment `yaml:"deployments"`
 }
 
@@ -136,23 +136,23 @@ func (d *Deployment) AutomationNameOr(depID string) string {
 	return d.AutomationName
 }
 
-// parseBitswanYAML parses bitswan.yaml bytes into a Bitswan, hydrating the flat
+// ParseBitswanYAML parses bitswan.yaml bytes into a Bitswan, hydrating the flat
 // deployments view from the business_processes tree when present (mirrors
 // gitops utils.read_bitswan_yaml + _tree_to_flat). Deterministic: the flat view
 // is what generate_docker_compose consumes.
-func parseBitswanYAML(data []byte) (*Bitswan, error) {
+func ParseBitswanYAML(data []byte) (*Bitswan, error) {
 	var bs Bitswan
 	if err := yaml.Unmarshal(data, &bs); err != nil {
 		return nil, fmt.Errorf("parse bitswan.yaml: %w", err)
 	}
-	bs.hydrate()
+	bs.Hydrate()
 	return &bs, nil
 }
 
-// hydrate fills Deployments from BusinessProcesses when the tree form is used,
+// Hydrate fills Deployments from BusinessProcesses when the tree form is used,
 // matching _tree_to_flat: context defaults to the BP key, stage defaults to ""
 // for the "production" tree node else the node's stage key.
-func (bs *Bitswan) hydrate() {
+func (bs *Bitswan) Hydrate() {
 	for _, d := range bs.Deployments {
 		if d != nil {
 			d.stageSet = true

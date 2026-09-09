@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"crypto/sha256"
@@ -13,42 +13,42 @@ import (
 	toml "github.com/BurntSushi/toml"
 )
 
-// maxNameLen caps a workspace/automation name component (gitops
-// automation_service.MAX_NAME_LEN = 24). maxLabelLen is the hard DNS label
-// limit the FULL hostname must never exceed — see makeHostnameLabel, which caps
+// MaxNameLen caps a workspace/automation name component (gitops
+// automation_service.MAX_NAME_LEN = 24). MaxLabelLen is the hard DNS label
+// limit the FULL hostname must never exceed — see MakeHostnameLabel, which caps
 // the assembled label there while preserving the discriminating tail (context
 // hash + stage + slot), since the color slot names are far longer than a/b/c.
 const (
-	maxNameLen  = 24
-	maxLabelLen = 63
+	MaxNameLen  = 24
+	MaxLabelLen = 63
 )
 
-// appSlots is the blue-green app slot order (AutomationService.APP_SLOTS).
-var appSlots = [3]string{"blue", "green", "purple"}
+// AppSlots is the blue-green app slot order (AutomationService.APP_SLOTS).
+var AppSlots = [3]string{"blue", "green", "purple"}
 
 var (
 	sanitizeRe = regexp.MustCompile(`[^a-z0-9-]`)
 	copyDBRe   = regexp.MustCompile(`[^a-z0-9_]`)
 )
 
-// shortHash is the deterministic 4-char context hash (_short_hash).
-func shortHash(context string) string {
+// ShortHash is the deterministic 4-char context hash (_short_hash).
+func ShortHash(context string) string {
 	sum := sha256.Sum256([]byte(context))
 	return hex.EncodeToString(sum[:])[:4]
 }
 
-// sanitizeAutomationName mirrors utils.sanitize_automation_name: lowercase,
+// SanitizeAutomationName mirrors utils.sanitize_automation_name: lowercase,
 // replace each char outside [a-z0-9-] with '-', trim leading/trailing hyphens.
-func sanitizeAutomationName(name string) string {
+func SanitizeAutomationName(name string) string {
 	return strings.Trim(sanitizeRe.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// makeHostnameLabel builds a DNS hostname label from structured components
+// MakeHostnameLabel builds a DNS hostname label from structured components
 // (automation_service.make_hostname_label). slot ("blue"/"green") is appended as a
 // trailing segment; pass "" for non-production.
-func makeHostnameLabel(workspaceName, automationName, context, stage, slot string) string {
-	ws := truncate(workspaceName, maxNameLen)
-	an := truncate(automationName, maxNameLen)
+func MakeHostnameLabel(workspaceName, automationName, context, stage, slot string) string {
+	ws := Truncate(workspaceName, MaxNameLen)
+	an := Truncate(automationName, MaxNameLen)
 
 	// Build the discriminating tail (context hash + stage + slot). These MUST
 	// survive intact: the hash keeps distinct contexts distinct, the stage keeps
@@ -56,7 +56,7 @@ func makeHostnameLabel(workspaceName, automationName, context, stage, slot strin
 	// distinct. Only the human-readable ws/an names are truncated to fit 63.
 	tail := []string{}
 	if context != "" {
-		tail = append(tail, shortHash(context))
+		tail = append(tail, ShortHash(context))
 	}
 	if stage != "" {
 		tail = append(tail, stage)
@@ -65,8 +65,8 @@ func makeHostnameLabel(workspaceName, automationName, context, stage, slot strin
 		tail = append(tail, slot)
 	}
 
-	label := joinNonEmpty("-", ws, an, joinNonEmpty("-", tail...))
-	if len(label) <= maxLabelLen {
+	label := JoinNonEmpty("-", ws, an, JoinNonEmpty("-", tail...))
+	if len(label) <= MaxLabelLen {
 		return label
 	}
 
@@ -74,19 +74,19 @@ func makeHostnameLabel(workspaceName, automationName, context, stage, slot strin
 	// "purple"): shrink ws+an to the remaining budget, splitting it between them,
 	// keeping the tail whole. Collisions would need the same ws/an prefixes AND
 	// the same context hash — vanishingly unlikely.
-	tailStr := joinNonEmpty("-", tail...)
-	budget := maxLabelLen - len(tailStr) - 2 // 2 separators: ws-an-tail
+	tailStr := JoinNonEmpty("-", tail...)
+	budget := MaxLabelLen - len(tailStr) - 2 // 2 separators: ws-an-tail
 	if budget < 2 {
 		budget = 2
 	}
 	half := budget / 2
-	ws = truncate(ws, half)
-	an = truncate(an, budget-len(ws))
-	return joinNonEmpty("-", ws, an, tailStr)
+	ws = Truncate(ws, half)
+	an = Truncate(an, budget-len(ws))
+	return JoinNonEmpty("-", ws, an, tailStr)
 }
 
-// joinNonEmpty joins the non-empty parts with sep.
-func joinNonEmpty(sep string, parts ...string) string {
+// JoinNonEmpty joins the non-empty parts with sep.
+func JoinNonEmpty(sep string, parts ...string) string {
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
 		if p != "" {
@@ -96,16 +96,16 @@ func joinNonEmpty(sep string, parts ...string) string {
 	return strings.Join(out, sep)
 }
 
-func truncate(s string, n int) string {
+func Truncate(s string, n int) string {
 	if len(s) > n {
 		return s[:n]
 	}
 	return s
 }
 
-// realmForStage maps a deployment stage to its secret realm (bp_secrets).
+// RealmForStage maps a deployment stage to its secret realm (bp_secrets).
 // live-dev/dev -> dev; ""/production -> production; else the stage itself.
-func realmForStage(stage string) string {
+func RealmForStage(stage string) string {
 	switch stage {
 	case "live-dev", "dev":
 		return "dev"
@@ -116,28 +116,28 @@ func realmForStage(stage string) string {
 	}
 }
 
-// stageForDeployment maps a deployment stage to its service realm
+// StageForDeployment maps a deployment stage to its service realm
 // (infra_service.stage_for_deployment): live-dev shares dev; else identity.
-func stageForDeployment(stage string) string {
+func StageForDeployment(stage string) string {
 	if stage == "live-dev" {
 		return "dev"
 	}
 	return stage
 }
 
-// postureFor reports the default firewall posture for a realm
+// PostureFor reports the default firewall posture for a realm
 // (firewall_service.posture_for): staging/production enforce, else monitor.
-func postureFor(realm string) string {
+func PostureFor(realm string) string {
 	if realm == "staging" || realm == "production" {
 		return "enforce"
 	}
 	return "monitor"
 }
 
-// allowedHosts returns the sorted allow-listed hostnames for a BP+realm
+// AllowedHosts returns the sorted allow-listed hostnames for a BP+realm
 // (firewall_service.allowed_hosts): rules whose status == "allowed".
-func allowedHosts(bs *Bitswan, bp, realm string) []string {
-	node := firewallNode(bs, bp, realm)
+func AllowedHosts(bs *Bitswan, bp, realm string) []string {
+	node := FirewallNodeFor(bs, bp, realm)
 	if node == nil {
 		return nil
 	}
@@ -151,7 +151,7 @@ func allowedHosts(bs *Bitswan, bp, realm string) []string {
 	return out
 }
 
-func firewallNode(bs *Bitswan, bp, realm string) *FirewallNode {
+func FirewallNodeFor(bs *Bitswan, bp, realm string) *FirewallNode {
 	if bs.Firewall == nil {
 		return nil
 	}
@@ -162,10 +162,10 @@ func firewallNode(bs *Bitswan, bp, realm string) *FirewallNode {
 	return byRealm[realm]
 }
 
-// deriveBPAndCopy derives (bp_slug, copy_name) from a relative_path
+// DeriveBPAndCopy derives (bp_slug, copy_name) from a relative_path
 // (bp_databases.derive_bp_and_copy). relative_path looks like
 // "copies/<copy>/<bp>/<rel>"; the main copy yields an empty copy context.
-func deriveBPAndCopy(relativePath string) (bpSlug, copyName string) {
+func DeriveBPAndCopy(relativePath string) (bpSlug, copyName string) {
 	bpName := ""
 	if relativePath != "" {
 		parts := strings.Split(strings.ReplaceAll(relativePath, "\\", "/"), "/")
@@ -181,28 +181,28 @@ func deriveBPAndCopy(relativePath string) (bpSlug, copyName string) {
 		}
 	}
 	if bpName != "" {
-		bpSlug = sanitizeAutomationName(bpName)
+		bpSlug = SanitizeAutomationName(bpName)
 	}
 	return bpSlug, copyName
 }
 
-// bpResourceNames returns the stage-independent per-BP resource names
+// BPResourceNames returns the stage-independent per-BP resource names
 // (bp_databases.bp_resource_names). db (1/2) selects a blue-green logical DB;
 // db==0 means the single-backend scheme (Python db=None).
-func bpResourceNames(bpSlug string, db int) map[string]string {
+func BPResourceNames(bpSlug string, db int) map[string]string {
 	if db != 0 {
-		pg := truncate("bp_"+strings.ReplaceAll(bpSlug, "-", "_"), 61) + "_" + itoa(db)
-		bucket := strings.TrimRight(truncate("bp-"+bpSlug, 61), "-") + "-" + itoa(db)
-		couch := "bp-" + bpSlug + "-" + itoa(db) + "-"
+		pg := Truncate("bp_"+strings.ReplaceAll(bpSlug, "-", "_"), 61) + "_" + Itoa(db)
+		bucket := strings.TrimRight(Truncate("bp-"+bpSlug, 61), "-") + "-" + Itoa(db)
+		couch := "bp-" + bpSlug + "-" + Itoa(db) + "-"
 		return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "s3_bucket": bucket}
 	}
-	pg := truncate("bp_"+strings.ReplaceAll(bpSlug, "-", "_"), 63)
-	bucket := strings.TrimRight(truncate("bp-"+bpSlug, 63), "-")
+	pg := Truncate("bp_"+strings.ReplaceAll(bpSlug, "-", "_"), 63)
+	bucket := strings.TrimRight(Truncate("bp-"+bpSlug, 63), "-")
 	couch := "bp-" + bpSlug + "-"
 	return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "s3_bucket": bucket}
 }
 
-func itoa(n int) string {
+func Itoa(n int) string {
 	if n == 0 {
 		return "0"
 	}
@@ -224,50 +224,50 @@ func itoa(n int) string {
 	return string(b[i:])
 }
 
-// copyBPResourceNames returns the per-(copy, BP) live-dev resource names. A
+// CopyBPResourceNames returns the per-(copy, BP) live-dev resource names. A
 // non-main copy is a developer's sandbox: each BP's live-dev backend gets its
 // OWN Postgres database, S3 bucket and CouchDB prefix there — isolated from
 // other BPs in the copy, from other copies, and from dev. Capped at the 63-byte
 // Postgres/S3 limit (a truncation collision surfaces as a deploy error, not
 // silent data sharing). Mirrors bp_databases.copy_bp_resource_names.
-func copyBPResourceNames(copyName, bpSlug string) map[string]string {
+func CopyBPResourceNames(copyName, bpSlug string) map[string]string {
 	cpU := copyDBRe.ReplaceAllString(strings.ToLower(copyName), "_") // [a-z0-9_] for pg
-	cpD := sanitizeAutomationName(copyName)                          // [a-z0-9-] for s3/couch
+	cpD := SanitizeAutomationName(copyName)                          // [a-z0-9-] for s3/couch
 	bpU := strings.ReplaceAll(bpSlug, "-", "_")
-	pg := truncate("copy_"+cpU+"_bp_"+bpU, maxLabelLen)
-	bucket := strings.TrimRight(truncate("copy-"+cpD+"-bp-"+bpSlug, maxLabelLen), "-")
+	pg := Truncate("copy_"+cpU+"_bp_"+bpU, MaxLabelLen)
+	bucket := strings.TrimRight(Truncate("copy-"+cpD+"-bp-"+bpSlug, MaxLabelLen), "-")
 	couch := "copy-" + cpD + "-bp-" + bpSlug + "-"
 	return map[string]string{"postgres_db": pg, "couchdb_prefix": couch, "s3_bucket": bucket}
 }
 
 // ---- automation.toml ----
 
-// automationConfig is the resolved automation.toml config (utils.AutomationConfig).
+// AutomationConfig is the resolved automation.toml config (utils.AutomationConfig).
 // Services preserves TOML declaration order — env_file injection order is
 // observable in the generated compose, so it must match the Python (which
 // iterates the toml dict in file order).
-type automationConfig struct {
+type AutomationConfig struct {
 	Image              string
 	Expose             bool
 	Port               int
 	MountPath          string
 	ExternalTestingNet bool
-	Services           []serviceDep
+	Services           []ServiceDep
 }
 
-// serviceDep is one [services.<type>] dependency, in declaration order.
-type serviceDep struct {
+// ServiceDep is one [services.<type>] dependency, in declaration order.
+type ServiceDep struct {
 	Type    string
 	Enabled bool
 }
 
-// hasServices reports whether the automation declares any [services.*] deps.
-func (c automationConfig) hasServices() bool { return len(c.Services) > 0 }
+// HasServices reports whether the automation declares any [services.*] deps.
+func (c AutomationConfig) HasServices() bool { return len(c.Services) > 0 }
 
-const defaultRuntimeImage = "bitswan/pipeline-runtime-environment:latest"
+const DefaultRuntimeImage = "bitswan/pipeline-runtime-environment:latest"
 
-func defaultAutomationConfig() automationConfig {
-	return automationConfig{Image: defaultRuntimeImage, Expose: false, Port: 8080, MountPath: "/app/"}
+func DefaultAutomationConfig() AutomationConfig {
+	return AutomationConfig{Image: DefaultRuntimeImage, Expose: false, Port: 8080, MountPath: "/app/"}
 }
 
 // tomlAutomation mirrors the parsed automation.toml structure.
@@ -285,19 +285,19 @@ type tomlAutomation struct {
 	} `toml:"services"`
 }
 
-// parseAutomationTOML parses automation.toml content (utils.parse_automation_toml).
-func parseAutomationTOML(content string) (automationConfig, bool) {
+// ParseAutomationTOML parses automation.toml content (utils.parse_automation_toml).
+func ParseAutomationTOML(content string) (AutomationConfig, bool) {
 	if strings.TrimSpace(content) == "" {
-		return automationConfig{}, false
+		return AutomationConfig{}, false
 	}
 	var t tomlAutomation
 	if _, err := toml.Decode(content, &t); err != nil {
 		// Python raises ValueError on syntax error; the compiler treats an
 		// unreadable toml as "no config" rather than failing the whole apply.
-		return automationConfig{}, false
+		return AutomationConfig{}, false
 	}
-	cfg := automationConfig{
-		Image:              firstNonEmpty(t.Deployment.Image, defaultRuntimeImage),
+	cfg := AutomationConfig{
+		Image:              FirstNonEmpty(t.Deployment.Image, DefaultRuntimeImage),
 		Expose:             t.Deployment.Expose,
 		Port:               t.Deployment.Port,
 		MountPath:          "/app/",
@@ -306,7 +306,7 @@ func parseAutomationTOML(content string) (automationConfig, bool) {
 	if cfg.Port == 0 {
 		cfg.Port = 8080
 	}
-	for _, svc := range serviceOrder(content) {
+	for _, svc := range ServiceOrder(content) {
 		sc, ok := t.Services[svc]
 		if !ok {
 			continue
@@ -315,15 +315,15 @@ func parseAutomationTOML(content string) (automationConfig, bool) {
 		if sc.Enabled != nil {
 			enabled = *sc.Enabled
 		}
-		cfg.Services = append(cfg.Services, serviceDep{Type: svc, Enabled: enabled})
+		cfg.Services = append(cfg.Services, ServiceDep{Type: svc, Enabled: enabled})
 	}
 	return cfg, true
 }
 
-// serviceOrder returns the [services.<type>] section names in file order so the
+// ServiceOrder returns the [services.<type>] section names in file order so the
 // resolved config preserves TOML declaration order (matching Python's
 // insertion-ordered dict).
-func serviceOrder(content string) []string {
+func ServiceOrder(content string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, line := range strings.Split(content, "\n") {
@@ -346,20 +346,20 @@ func serviceOrder(content string) []string {
 	return out
 }
 
-func readAutomationConfig(sourceDir string) automationConfig {
+func ReadAutomationConfig(sourceDir string) AutomationConfig {
 	tomlPath := filepath.Join(sourceDir, "automation.toml")
 	data, err := os.ReadFile(tomlPath)
 	if err != nil {
-		return defaultAutomationConfig()
+		return DefaultAutomationConfig()
 	}
-	cfg, ok := parseAutomationTOML(string(data))
+	cfg, ok := ParseAutomationTOML(string(data))
 	if !ok {
-		return defaultAutomationConfig()
+		return DefaultAutomationConfig()
 	}
 	return cfg
 }
 
-func firstNonEmpty(a, b string) string {
+func FirstNonEmpty(a, b string) string {
 	if a != "" {
 		return a
 	}
@@ -368,38 +368,38 @@ func firstNonEmpty(a, b string) string {
 
 // ---- BP database registry ----
 
-type bpRegistry struct {
+type BPRegistry struct {
 	Version int                   `json:"version"`
-	BPs     map[string]bpRegEntry `json:"bps"`
+	BPs     map[string]BPRegEntry `json:"bps"`
 }
 
-type bpRegEntry struct {
+type BPRegEntry struct {
 	BPName string                     `json:"bp_name"`
 	Stages map[string]json.RawMessage `json:"stages"`
 }
 
-// loadRegistry reads <secrets>/bp-databases.json (bp_databases.load_registry).
+// LoadRegistry reads <secrets>/bp-databases.json (bp_databases.load_registry).
 // A missing registry is an empty registry; an unreadable one degrades to empty
 // for env-injection purposes (the Python warns and continues).
-func loadRegistry(secretsDir string) bpRegistry {
-	empty := bpRegistry{Version: 1, BPs: map[string]bpRegEntry{}}
+func LoadRegistry(secretsDir string) BPRegistry {
+	empty := BPRegistry{Version: 1, BPs: map[string]BPRegEntry{}}
 	path := filepath.Join(secretsDir, "bp-databases.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return empty
 	}
-	var reg bpRegistry
+	var reg BPRegistry
 	if err := json.Unmarshal(data, &reg); err != nil {
 		return empty
 	}
 	if reg.BPs == nil {
-		reg.BPs = map[string]bpRegEntry{}
+		reg.BPs = map[string]BPRegEntry{}
 	}
 	return reg
 }
 
-// isRegistered reports whether bp×realm is in the registry (bp_databases.is_registered).
-func (r bpRegistry) isRegistered(bpSlug, realm string) bool {
+// IsRegistered reports whether bp×realm is in the registry (bp_databases.is_registered).
+func (r BPRegistry) IsRegistered(bpSlug, realm string) bool {
 	e, ok := r.BPs[bpSlug]
 	if !ok {
 		return false

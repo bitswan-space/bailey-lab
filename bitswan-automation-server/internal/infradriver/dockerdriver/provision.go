@@ -492,7 +492,7 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 
 		// 2) A registered BP's per-stage database(s). Unregistered BPs use the
 		//    shared default DB — nothing to create.
-		if bpSlug == "" || !reg.isRegistered(bpSlug, realm) {
+		if bpSlug == "" || !reg.IsRegistered(bpSlug, realm) {
 			continue
 		}
 		secrets := serviceSecrets(wctx.SecretsDir, "postgres", realm)
@@ -573,7 +573,7 @@ func wantedBPResources(wctx infradriver.WorkspaceContext, bs *Bitswan) (pgWant, 
 			continue // other copy stages have no per-BP namespaces
 		}
 		key := bpSlug + ":" + realm
-		if seen[key] || !reg.isRegistered(bpSlug, realm) {
+		if seen[key] || !reg.IsRegistered(bpSlug, realm) {
 			continue
 		}
 		seen[key] = true

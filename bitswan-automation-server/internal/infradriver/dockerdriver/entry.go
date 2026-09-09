@@ -322,7 +322,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 
 	// Reflect on-disk services into conf so the infra merge can discover them.
-	if cfg.hasServices() && len(conf.Services) == 0 {
+	if cfg.HasServices() && len(conf.Services) == 0 {
 		conf.Services = map[string]interface{}{}
 		for _, svc := range cfg.Services {
 			conf.Services[svc.Type] = map[string]interface{}{"enabled": svc.Enabled}
@@ -421,7 +421,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		env["BITSWAN_DEPLOYMENT_CONTEXT"] = deploymentContext
 	}
 
-	if bpSanitized != "" && c.registry.isRegistered(bpSanitized, stageForDeployment(stage)) {
+	if bpSanitized != "" && c.registry.IsRegistered(bpSanitized, stageForDeployment(stage)) {
 		names := bpResourceNames(bpSanitized, db)
 		env["POSTGRES_DB"] = names["postgres_db"]
 		env["COUCHDB_DB_PREFIX"] = names["couchdb_prefix"]
@@ -855,7 +855,7 @@ func (c *compileState) copyS3Coordinates(env map[string]interface{}, realm strin
 // resolveServiceSecrets ports _resolve_service_secrets. Preserves TOML
 // declaration order — the env_file order it produces is observable.
 func (c *compileState) resolveServiceSecrets(cfg automationConfig, stage string) []string {
-	if !cfg.hasServices() {
+	if !cfg.HasServices() {
 		return nil
 	}
 	mapped := stageForDeployment(stage)
