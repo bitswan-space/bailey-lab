@@ -383,7 +383,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	// container that has NET_ADMIN and is gone by the time this container
 	// starts — so the workload itself cannot undo them.
 	if g := c.fwGroupFor(conf); g != nil {
-		w.InitContainers = append(w.InitContainers, ruleInstaller(g))
+		w.InitContainers = append(w.InitContainers, ruleInstaller(g, c.peersFor(realm, bpSlug)))
 	}
 	if conf.MemoryReservation != nil && *conf.MemoryReservation > 0 {
 		// A request, never a limit: on Docker a workload over its reservation is

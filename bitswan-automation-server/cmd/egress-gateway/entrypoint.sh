@@ -62,6 +62,26 @@ if [ "$ROLE" = "owner" ]; then
     done
     iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
     [ -n "$STAGE_SUBNET" ] && iptables -A OUTPUT -d "$STAGE_SUBNET" -j ACCEPT
+    # The infra peers this workload is entitled to reach, by name.
+    #
+    # On Docker they share the stage bridge, so the subnet rule above covers
+    # them. In a namespace a peer is reached through a service address on a
+    # range that has nothing to do with the pod's own, and there is no safe way
+    # to guess that range — on some clusters it is public address space, so a
+    # wrong guess opens the internet. Each peer is resolved and allowed as a
+    # single address instead: exact, and tighter than the subnet rule it stands
+    # in for.
+    for peer in $(echo "${BITSWAN_FW_PEERS:-}" | tr ',' ' '); do
+      [ -n "$peer" ] || continue
+      peer_ip=$(host -t A "$peer" 2>/dev/null | awk '/has address/{print $NF; exit}')
+      [ -n "$peer_ip" ] || peer_ip=$(nslookup "$peer" 2>/dev/null | awk -F'[: \t]+' '/^Address/ && $0 !~ /#/ {ip=$2} END{print ip}')
+      if [ -n "$peer_ip" ]; then
+        iptables -A OUTPUT -d "$peer_ip/32" -j ACCEPT
+        echo "egress-gateway[owner]: peer $peer -> $peer_ip allowed"
+      else
+        echo "egress-gateway[owner]: WARNING peer $peer did not resolve; it will be blocked"
+      fi
+    done
     iptables -A OUTPUT -d "$PROXY_IP/32" -j ACCEPT
     iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
     iptables -A OUTPUT -p tcp --dport 80  -j ACCEPT

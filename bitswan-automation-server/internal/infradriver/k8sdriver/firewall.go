@@ -145,7 +145,7 @@ func (g *fwGroup) attemptsPath() string {
 // It runs the same image and the same entrypoint as the Docker owner, told not
 // to hold the namespace: in a pod there is nothing to hold it for, and an init
 // container that does not exit is a pod that never starts.
-func ruleInstaller(g *fwGroup) k8srender.InitContainer {
+func ruleInstaller(g *fwGroup, peers []string) k8srender.InitContainer {
 	return k8srender.InitContainer{
 		Name:       "egress-rules",
 		Image:      gatewayImage(),
@@ -155,6 +155,10 @@ func ruleInstaller(g *fwGroup) k8srender.InitContainer {
 			"BITSWAN_FW_MODE":  g.mode,
 			"BITSWAN_FW_PROXY": k8srender.Name(g.proxy, k8srender.ServiceNameMax),
 			"BITSWAN_FW_HOLD":  "0",
+			// Under enforcement the pod's own subnet says nothing about where
+			// its peers are, so they are named. Empty in monitor mode, where
+			// nothing is blocked in the first place.
+			"BITSWAN_FW_PEERS": strings.Join(peers, ","),
 		},
 		Capabilities: []string{"NET_ADMIN"},
 	}
@@ -162,4 +166,50 @@ func ruleInstaller(g *fwGroup) k8srender.InitContainer {
 
 func gatewayImage() string {
 	return envOr("BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest")
+}
+
+// peersFor is what a workload in this realm is entitled to reach inside the
+// namespace: the infra services of its stage, and the other automations of its
+// own business process.
+//
+// Derived from the declaration rather than from the rendered objects, so it is
+// known before a workload is rendered — the rule installer is part of that
+// workload.
+func (c *compileState) peersFor(realm, bp string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		svc := k8srender.Name(name, k8srender.ServiceNameMax)
+		if svc == "" || seen[svc] {
+			return
+		}
+		seen[svc] = true
+		out = append(out, svc)
+	}
+
+	for _, svc := range []string{"postgres", "garage"} {
+		add(c.workspace + "__" + svc + core.ServiceSuffix(realm))
+	}
+	for _, depID := range core.SortedDepIDs(c.bs.Deployments) {
+		peer := c.bs.Deployments[depID]
+		if peer == nil || !peer.EnabledOrDefault() {
+			continue
+		}
+		if core.RealmForStage(peer.StageOrProduction()) != realm {
+			continue
+		}
+		peerBP, _ := core.DeriveBPAndCopy(peer.RelativePath)
+		if peerBP == "" {
+			peerBP = peer.Context
+		}
+		if peerBP != bp {
+			continue
+		}
+		name := peer.AutomationNameOr(depID)
+		for _, sd := range core.SlotDBPairs(c.bs, peer) {
+			add(core.MakeHostnameLabel(c.workspace, name, peer.Context, peer.StageOrProduction(), sd.Slot))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
