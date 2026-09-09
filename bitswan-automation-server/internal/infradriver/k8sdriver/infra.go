@@ -86,12 +86,21 @@ func (c *compileState) garage(container, realm string) k8srender.ObjectSet {
 	svcName := k8srender.Name(container, k8srender.ServiceNameMax)
 	labels := c.infraLabels(svcName, container, realm)
 
-	return statefulSet(statefulSetSpec{
+	objs := garageServiceSecret(c, realm, objName)
+	return append(objs, statefulSet(statefulSetSpec{
 		Name:    objName,
 		Service: svcName,
 		Labels:  labels,
 		Image:   imageOr("BITSWAN_GARAGE_IMAGE", "dxflrs/garage:v2.3.0"),
-		Command: []string{"/garage", "server"},
+		// --single-node creates the one-node cluster layout on first boot.
+		// Without it the process starts, listens, and answers every request
+		// with "Layout not ready" — an object store that is up and refuses
+		// everything, which reads as a credentials problem.
+		Command: []string{"/garage", "server", "--single-node"},
+		// The same service secrets the Docker service takes as an env_file.
+		// The config file carries the rpc secret and the admin token, but the
+		// tooling that execs in reads them from the environment.
+		EnvFrom: garageServiceEnv(c, realm, objName),
 		// The ports the config file actually binds, not the defaults: a client
 		// is handed S3_PORT out of the same secrets gitops wrote that config
 		// from, so a Service publishing anything else is a coordinate pointing
@@ -134,7 +143,25 @@ func (c *compileState) garage(container, realm string) k8srender.ObjectSet {
 			Image:   imageOr("BITSWAN_GARAGE_TOOLBOX_IMAGE", "rclone/rclone:1.68"),
 			Command: []string{"sleep", "infinity"},
 		}},
-	})
+	})...)
+}
+
+// garageServiceSecret carries the object store's own credentials, the ones the
+// Docker service takes as an env_file. Nothing when gitops has not written them
+// yet, which is a workspace whose object store has not been enabled.
+func garageServiceSecret(c *compileState, realm, objName string) k8srender.ObjectSet {
+	values := core.ServiceSecrets(c.ctx.SecretsDir, "garage", realm)
+	if len(values) == 0 {
+		return nil
+	}
+	return k8srender.ObjectSet{k8srender.Secret(objName+"-service", values)}
+}
+
+func garageServiceEnv(c *compileState, realm, objName string) []string {
+	if len(core.ServiceSecrets(c.ctx.SecretsDir, "garage", realm)) == 0 {
+		return nil
+	}
+	return []string{objName + "-service"}
 }
 
 func (c *compileState) infraLabels(svcName, container, realm string) map[string]interface{} {

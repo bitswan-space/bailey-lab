@@ -591,6 +591,22 @@ func TestGarageCarriesItsTooling(t *testing.T) {
 		t.Error("garage has no configuration mounted; it exits on its first line")
 	}
 
+	// Without --single-node there is no cluster layout, and every request is
+	// answered "Layout not ready" — an object store that is up and refuses
+	// everything, which reads at the client as a credentials problem.
+	var single bool
+	for _, con := range asSlice(spec["containers"]) {
+		cm, _ := con.(map[string]interface{})
+		for _, arg := range cm["command"].([]string) {
+			if arg == "--single-node" {
+				single = true
+			}
+		}
+	}
+	if !single {
+		t.Error("garage is started without --single-node; it will have no cluster layout")
+	}
+
 	// The Service has to publish what the config binds, or a client handed
 	// S3_PORT dials a port nothing is listening on.
 	var published []interface{}
