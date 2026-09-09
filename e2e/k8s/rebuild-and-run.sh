@@ -88,3 +88,4 @@ bash e2e/k8s/bringup-k8s.sh
 cd e2e
 rm -rf test-results
 npx playwright test --reporter=list
+

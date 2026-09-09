@@ -75,14 +75,14 @@ func (c *compileState) computeFirewallScope(deployments map[string]*Deployment) 
 		// (incl. the cloud metadata endpoint). Monitor realms (dev/live-dev)
 		// still get an observe-only gateway with no node, unchanged.
 		for _, sd := range c.slotDBPairs(conf) {
-			key := fwKey{depCtx, stage, sd.slot}
+			key := fwKey{depCtx, stage, sd.Slot}
 			if _, ok := scope[key]; !ok {
 				mode := postureFor(realm)
 				if fwnode != nil && fwnode.Posture != "" {
 					mode = fwnode.Posture
 				}
 				scope[key] = &fwGroup{
-					gw:    makeHostnameLabel(c.workspaceName, "fwgw", depCtx, stage, sd.slot),
+					gw:    makeHostnameLabel(c.workspaceName, "fwgw", depCtx, stage, sd.Slot),
 					mode:  mode,
 					allow: allowedHosts(c.bs, fwKeyBP, realm),
 					realm: realm,
@@ -167,14 +167,14 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 		name := conf.AutomationNameOr(depID)
 		depCtx := conf.Context
 		for _, sd := range c.slotDBPairs(conf) {
-			fw := fwActive(fwScope, depCtx, stage, sd.slot)
+			fw := fwActive(fwScope, depCtx, stage, sd.Slot)
 			if fw == nil || fw.mode != "enforce" {
 				continue
 			}
-			key := fwKey{depCtx, stage, sd.slot}
+			key := fwKey{depCtx, stage, sd.Slot}
 			app := take(key, cfg.Port)
 			ui := take(key, frontendUIPort)
-			ports[workerPortKey{depCtx, stage, sd.slot, name}] = workerPortAssignment{app: app, ui: ui}
+			ports[workerPortKey{depCtx, stage, sd.Slot, name}] = workerPortAssignment{app: app, ui: ui}
 		}
 	}
 
@@ -194,8 +194,8 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 			continue
 		}
 		for _, sd := range c.slotDBPairs(conf) {
-			key := fwKey{depCtx, stage, sd.slot}
-			fw := fwActive(fwScope, depCtx, stage, sd.slot)
+			key := fwKey{depCtx, stage, sd.Slot}
+			fw := fwActive(fwScope, depCtx, stage, sd.Slot)
 			port := cfg.Port
 			var host string
 			if fw != nil {
@@ -203,9 +203,9 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 				// Shared netns — resolve a collision-free port within the scope.
 				port = take(key, port)
 			} else {
-				host = makeHostnameLabel(c.workspaceName, name, depCtx, stage, sd.slot)
+				host = makeHostnameLabel(c.workspaceName, name, depCtx, stage, sd.Slot)
 			}
-			ports[workerPortKey{depCtx, stage, sd.slot, name}] = workerPortAssignment{app: port}
+			ports[workerPortKey{depCtx, stage, sd.Slot, name}] = workerPortAssignment{app: port}
 			out[key] = append(out[key], fmt.Sprintf("%s=%s:%d", name, host, port))
 		}
 	}

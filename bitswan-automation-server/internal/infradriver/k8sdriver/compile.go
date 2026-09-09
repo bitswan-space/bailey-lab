@@ -134,16 +134,22 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 		stage := conf.StageOrProduction()
 		realm := core.RealmForStage(stage)
 
-		w, route, emit, err := c.workload(id, conf)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !emit {
-			continue
-		}
-		objs = append(objs, k8srender.Deployment(w)...)
-		if route != nil {
-			routes = append(routes, *route)
+		// Production is blue/green: one workload per slot, both running, only
+		// one routed. A promote pins the new version onto the idle slot and the
+		// ingress flip is what cuts over — so both have to exist at once.
+		for _, sd := range core.SlotDBPairs(c.bs, conf) {
+			slotConf := core.EffectiveSlotConf(id, conf, sd.Slot, c.bs.Deployments)
+			w, route, emit, err := c.workload(id, slotConf, sd.Slot)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !emit {
+				continue
+			}
+			objs = append(objs, k8srender.Deployment(w)...)
+			if route != nil {
+				routes = append(routes, *route)
+			}
 		}
 
 		for _, svc := range enabledServices(conf) {
@@ -169,7 +175,7 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 // workload renders one automation. The bool reports whether it should be
 // emitted at all: a live-dev deployment with nothing to run is skipped rather
 // than being an error, exactly as the Docker compiler skips it.
-func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.Workload, *infradriver.Route, bool, error) {
+func (c *compileState) workload(depID string, conf *core.Deployment, slot string) (k8srender.Workload, *infradriver.Route, bool, error) {
 	stage := conf.StageOrProduction()
 	realm := core.RealmForStage(stage)
 	automation := conf.AutomationNameOr(depID)
@@ -180,7 +186,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 
 	// The name a route points at. Derived exactly as the Docker driver derives a
 	// container name, so an upstream written by either backend resolves.
-	svcName := core.MakeHostnameLabel(c.workspace, automation, conf.Context, stage, "")
+	svcName := core.MakeHostnameLabel(c.workspace, automation, conf.Context, stage, slot)
 
 	rel := conf.RelativePath
 	source := core.FirstNonEmpty(core.FirstNonEmpty(conf.Source, conf.Checksum), depID)
@@ -247,9 +253,13 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 		port = 8080
 	}
 
+	slotDepID := depID
+	if slot != "" {
+		slotDepID = depID + "@" + slot
+	}
 	env := map[string]string{
-		"DEPLOYMENT_ID":            depID,
-		"BITSWAN_DEPLOYMENT_ID":    depID,
+		"DEPLOYMENT_ID":            slotDepID,
+		"BITSWAN_DEPLOYMENT_ID":    slotDepID,
 		"BITSWAN_AUTOMATION_STAGE": stage,
 		"BITSWAN_WORKSPACE_NAME":   c.workspace,
 		"BITSWAN_GITOPS_DOMAIN":    c.domain,
@@ -257,14 +267,15 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 		"PORT":                     strconv.Itoa(port),
 	}
 	if cfg.Expose {
-		env["BITSWAN_AUTOMATION_URL"] = "https://" + svcName + "." + c.domain
+		env["BITSWAN_AUTOMATION_URL"] = "https://" +
+			core.MakeHostnameLabel(c.workspace, automation, conf.Context, stage, "") + "." + c.domain
 	}
 
 	// What the Docker driver hands a worker as a peer address is the firewall
 	// gateway it shares a network namespace with. Nothing shares a namespace
 	// here, so a peer is its own Service — which is also why a worker can be
 	// replicated on Kubernetes and cannot on Docker.
-	env["BITSWAN_WORKER_HOSTS"] = c.workerHosts(conf, bpSlug, stage)
+	env["BITSWAN_WORKER_HOSTS"] = c.workerHosts(conf, bpSlug, stage, slot)
 
 	w := k8srender.Workload{
 		Name:          svcName,
@@ -283,12 +294,13 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 			"gitops.bp":              bpSlug,
 			"gitops.stage":           stage,
 			"gitops.realm":           realm,
+			"gitops.slot":            slot,
 		},
 		Annotations: map[string]string{
 			// The raw values, because a label cannot hold all of them: an
 			// identifier carries an "@" once a slot is involved, and a content
 			// hash is a character over the limit.
-			"gitops.bitswan.io/deployment_id": depID,
+			"gitops.bitswan.io/deployment_id": slotDepID,
 			"gitops.bitswan.io/checksum":      conf.Checksum,
 		},
 		// Kubernetes ignores an image's own HEALTHCHECK, so without this a
@@ -313,8 +325,25 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 	if !cfg.Expose {
 		return w, nil, true, nil
 	}
+
+	// Which slot answers on the public name. The live one serves the stage's
+	// hostname; the standby serves the "dr" hostname so a rehearsal can be
+	// opened without touching production; an idle slot mid-promote serves
+	// nothing, which is what makes the cutover a single ingress change.
+	isDR := slot != "" && slot == core.DRSlotFor(c.bs, conf)
+	isLive := slot == "" || slot == core.LiveSlotFor(c.bs, conf)
+	hostStage := stage
+	if isDR {
+		hostStage = "dr"
+	}
+	if !isLive && !isDR {
+		w.Labels["gitops.intended_exposed"] = "false"
+		return w, nil, true, nil
+	}
+	w.Labels["gitops.intended_exposed"] = "true"
+
 	route := &infradriver.Route{
-		Hostname:       svcName + "." + c.domain,
+		Hostname:       core.MakeHostnameLabel(c.workspace, automation, conf.Context, hostStage, "") + "." + c.domain,
 		Upstream:       fmt.Sprintf("%s:%d", svcName, port),
 		Stage:          stage,
 		ParentEndpoint: c.workspace + "-dashboard." + c.domain,
@@ -371,8 +400,10 @@ func (c *compileState) resolveAutomationConfig(conf *core.Deployment) core.Autom
 	return core.DefaultAutomationConfig()
 }
 
-// workerHosts lists the peers an automation can reach, as name=host:port.
-func (c *compileState) workerHosts(conf *core.Deployment, bpSlug, stage string) string {
+// workerHosts lists the peers an automation can reach, as name=host:port,
+// within its own slot: a blue backend talks to the blue worker, not whichever
+// one a promote happens to be replacing.
+func (c *compileState) workerHosts(conf *core.Deployment, bpSlug, stage, slot string) string {
 	var parts []string
 	ids := make([]string, 0, len(c.bs.Deployments))
 	for id := range c.bs.Deployments {
@@ -403,7 +434,7 @@ func (c *compileState) workerHosts(conf *core.Deployment, bpSlug, stage string) 
 			port = 8080
 		}
 		name := peer.AutomationNameOr(id)
-		host := core.MakeHostnameLabel(c.workspace, name, peer.Context, stage, "")
+		host := core.MakeHostnameLabel(c.workspace, name, peer.Context, stage, slot)
 		parts = append(parts, fmt.Sprintf("%s=%s:%d", name, host, port))
 	}
 	return strings.Join(parts, ",")
