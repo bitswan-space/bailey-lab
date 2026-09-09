@@ -125,19 +125,32 @@ const NAVSYNC_SOURCE = `(function () {
 })();
 `;
 
-function writeHandbookScripts() {
+// The two sidecars answer different questions and are NOT written together.
+// handbook-navsync.js is generated from the constant above, so every build can
+// have it and every build wants it — #451 is about the browser tab, and a tab
+// reading "Bailey" with no icon is just as wrong on an unpaginated handbook.
+// The polyfill is an e2e dependency, and MANUAL_NO_PAGED is precisely the build
+// that does not have one to copy.
+function writeHandbookScripts({ paginate }) {
+  writeFileSync(join(BUILD, NAVSYNC_FILENAME), NAVSYNC_SOURCE);
+  if (!paginate) return;
   if (!existsSync(PAGED_POLYFILL_PATH)) {
     throw new Error(`Paged.js polyfill not found at ${PAGED_POLYFILL_PATH} — cannot paginate the handbook.`);
   }
   copyFileSync(PAGED_POLYFILL_PATH, join(BUILD, PAGED_FILENAME));
-  writeFileSync(join(BUILD, NAVSYNC_FILENAME), NAVSYNC_SOURCE);
 }
 
-function withPagedjs(html) {
-  return html.replace(
-    '</body>',
-    `<script src="${NAVSYNC_FILENAME}"></script><script src="${PAGED_FILENAME}"></script></body>`,
-  );
+// Only ever links what writeHandbookScripts actually wrote: a <script src> for
+// a file that isn't there is a 404 on every open.
+function withHandbookScripts(html, { paginate }) {
+  const tags = [`<script src="${NAVSYNC_FILENAME}"></script>`];
+  if (paginate) tags.push(`<script src="${PAGED_FILENAME}"></script>`);
+  return html.replace('</body>', `${tags.join('')}</body>`);
+}
+
+// The sidecars handbook.html loads, for whichever of them this build produced.
+function handbookScriptFiles({ paginate }) {
+  return paginate ? [NAVSYNC_FILENAME, PAGED_FILENAME] : [NAVSYNC_FILENAME];
 }
 
 /**
@@ -305,20 +318,17 @@ async function main() {
   // an unpaginated handbook. Either way the saved file is `savedHtml`, so the
   // measured classes are not lost with the pagination.
   //
-  // The scripts are sidecar files now rather than inlined, so this flag also
-  // decides whether they are written at all: writing them would throw on the
-  // very build the flag exists for (no node_modules, no polyfill to copy), and
-  // linking them without writing them would serve a document that 404s for its
-  // own pagination.
+  // The polyfill is a sidecar file now rather than inlined, so this flag also
+  // decides whether it is written at all: copying it would throw on the very
+  // build the flag exists for (no node_modules, nothing to copy), and linking
+  // it without writing it would serve a document that 404s for its own
+  // pagination. The tab-naming script is unaffected and is always written.
   const paginate = process.env.MANUAL_NO_PAGED !== '1';
-  if (paginate) {
-    writeHandbookScripts();
-    writeFileSync(htmlPath, withPagedjs(savedHtml));
-    console.log('Embedded Paged.js into ' + htmlPath + ' for standalone pagination.');
-  } else {
-    writeFileSync(htmlPath, savedHtml);
-    console.log('MANUAL_NO_PAGED=1 — leaving the handbook unpaginated.');
-  }
+  writeHandbookScripts({ paginate });
+  writeFileSync(htmlPath, withHandbookScripts(savedHtml, { paginate }));
+  console.log(paginate
+    ? 'Wrote ' + htmlPath + ' with ' + PAGED_FILENAME + ' + ' + NAVSYNC_FILENAME + ' beside it.'
+    : 'MANUAL_NO_PAGED=1 — unpaginated, ' + NAVSYNC_FILENAME + ' beside it.');
 
   // Publish into the Server Console so the manual is built INTO the product:
   // the console serves these as static assets (/handbook/handbook.{html,pdf})
@@ -331,12 +341,8 @@ async function main() {
     if (existsSync(pdfPath)) copyFileSync(pdfPath, join(pub, 'handbook.pdf'));
     // The scripts handbook.html loads. Without them the console serves an
     // unpaginated document (#451) and a tab titled "Bailey" with no icon.
-    // Skipped under MANUAL_NO_PAGED, where they were never written and the
-    // saved HTML does not reference them.
-    if (paginate) {
-      for (const f of [PAGED_FILENAME, NAVSYNC_FILENAME]) {
-        copyFileSync(join(BUILD, f), join(pub, f));
-      }
+    for (const f of handbookScriptFiles({ paginate })) {
+      copyFileSync(join(BUILD, f), join(pub, f));
     }
     console.log('Published handbook into the Server Console (' + pub + ').');
   }
