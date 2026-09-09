@@ -449,3 +449,22 @@ func TestAScopedBackendGetsItsCredentials(t *testing.T) {
 		})
 	}
 }
+
+// TestCredentialsRollTheWorkloadExceptInProduction states both halves of how a
+// changed secret reaches a running process. Kubernetes does not restart a pod
+// when a Secret it reads through envFrom changes, so the content's fingerprint
+// rides in the pod template — except on a production slot, which must not be
+// recreated in place.
+func TestCredentialsRollTheWorkloadExceptInProduction(t *testing.T) {
+	a := credentialsFingerprint("", map[string]string{"A": "1"})
+	b := credentialsFingerprint("", map[string]string{"A": "2"})
+	if a == b {
+		t.Error("two different credentials produced the same fingerprint; a change would not roll the workload")
+	}
+	if again := credentialsFingerprint("", map[string]string{"A": "1"}); again != a {
+		t.Error("the same credentials produced two fingerprints; every apply would roll the workload")
+	}
+	if got := credentialsFingerprint("blue", map[string]string{"A": "1"}); got != "none" {
+		t.Errorf("a production slot got fingerprint %q; a live slot must not be recreated in place", got)
+	}
+}

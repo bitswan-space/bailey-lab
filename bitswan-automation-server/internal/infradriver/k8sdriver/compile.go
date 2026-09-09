@@ -92,7 +92,22 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 			return nil, fmt.Errorf("ensure live postgres dbs: %w", err)
 		}
 		report("provision", "Provisioning per-BP namespaces...")
-		core.ProvisionForDeployments(x, ctx, req.Ctx, bs, report)
+		if changed := core.ProvisionForDeployments(x, ctx, req.Ctx, bs, report); len(changed) > 0 {
+			// Those workloads were compiled against placeholder credentials:
+			// Garage mints its keys server-side, and on a first apply there was
+			// no Garage yet to mint them. The material on disk is real now, so
+			// one more pass writes it into their Secrets — and because the
+			// content hash rides in the pod template, the workloads that need
+			// it roll and the ones that do not stay put.
+			report("provision", fmt.Sprintf("credentials arrived for %d resource(s); reapplying", len(changed)))
+			objs, routes, err = c.compile()
+			if err != nil {
+				return nil, err
+			}
+			if err := k8sctl.Apply(ctx, objs); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Nothing is routed at a workload that is not serving yet. A Service with no
@@ -368,6 +383,14 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 			"gitops.slot":            slot,
 		},
 		Annotations: map[string]string{
+			// A changed credential has to reach the process. Kubernetes does not
+			// restart a pod when a Secret it reads through envFrom changes, so
+			// the content's hash rides in the pod template: a new value is a new
+			// template and the workload rolls. Left off a production slot on
+			// purpose — a live slot must not be recreated in place, and a
+			// production credential is applied with no downtime by the next
+			// promotion, which brings the idle slot up reading the new value.
+			"bitswan.io/credentials": credentialsFingerprint(slot, secretContent),
 			// The raw values, because a label cannot hold all of them: an
 			// identifier carries an "@" once a slot is involved, and a content
 			// hash is a character over the limit.
@@ -702,4 +725,25 @@ func (c *compileState) routesKeptWhileAsleep(depID string, conf *core.Deployment
 		})
 	}
 	return out
+}
+
+// credentialsFingerprint is what makes a credential change roll a workload, and
+// empty for a production slot, which must not be recreated in place.
+func credentialsFingerprint(slot string, content map[string]string) string {
+	if slot != "" || len(content) == 0 {
+		return "none"
+	}
+	keys := make([]string, 0, len(content))
+	for k := range content {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(content[k])
+		b.WriteString("\n")
+	}
+	return k8srender.HashHex(b.String())[:16]
 }
