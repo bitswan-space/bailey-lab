@@ -1,0 +1,14 @@
+# The infra driver for a Kubernetes namespace.
+#
+# The Docker variant carries the docker CLI and compose, because that is what it
+# shells out to. This one carries kubectl for the same reason, and nothing that
+# speaks to a Docker socket, because there is none to speak to.
+ARG DRIVER_IMAGE=bitswan/infra-driver-dev:latest
+FROM ${DRIVER_IMAGE}
+
+ARG KUBECTL_VERSION=v1.31.5
+RUN curl -fsSL -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl" && \
+    chmod 0755 /usr/local/bin/kubectl && kubectl version --client=true
+
+CMD ["/usr/local/bin/infra-driver", "--help"]

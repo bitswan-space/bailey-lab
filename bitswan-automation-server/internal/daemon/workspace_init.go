@@ -752,6 +752,10 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 			CertsDir:          os.Getenv("HOME") + "/.config/bitswan/certauthorities",
 			WithDashboard:     !noDashboard,
 			WithCodingAgent:   !noCodingAgent,
+			EditorSSHPublicKey: readWorkspaceSSHPublicKey(gitopsConfig),
+			InfraDriverImage:   envOrDefault("BITSWAN_INFRA_DRIVER_IMAGE", "bitswan/infra-driver:latest"),
+			InfraDriverToken:   config.InfraDriverToken,
+			IngressURL:         envOrDefault("BITSWAN_INGRESS_URL", fmt.Sprintf("http://bailey:%d", workspaceAPIPort)),
 		}); err != nil {
 			return fmt.Errorf("failed to start workspace services: %w", err)
 		}

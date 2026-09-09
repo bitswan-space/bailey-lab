@@ -32,6 +32,7 @@ export OTEL_IMAGE="otel/opentelemetry-collector:0.115.1"
 export GITOPS_IMAGE="bitswan/gitops-dev:latest"
 export DASHBOARD_IMAGE="bitswan/workspace-dashboard-dev:latest"
 export CODING_AGENT_IMAGE="bitswan/coding-agent-dev:latest"
+export INFRA_DRIVER_IMAGE="bitswan/infra-driver-k8s:dev"
 
 export OIDC_ISSUER="http://${KC_HOST}:${KC_PORT}/realms/bitswan"
 export OIDC_HOST="${KC_HOST}:${KC_PORT}"
@@ -55,7 +56,7 @@ ${TRAEFIK_IMAGE} ${PROXY_IMAGE} ${REDIS_IMAGE} ${KEYCLOAK_IMAGE} ${OTEL_IMAGE}
 ${KC_HOST} ${KC_PORT} ${OIDC_ISSUER} ${OIDC_HOST} ${OIDC_CLIENT_ID}
 ${OIDC_CLIENT_SECRET} ${OIDC_COOKIE_SECRET} ${REALM_JSON_INDENTED}
 ${OTEL_CONFIG_INDENTED} ${GITOPS_IMAGE} ${DASHBOARD_IMAGE}
-${CODING_AGENT_IMAGE}'
+${CODING_AGENT_IMAGE} ${INFRA_DRIVER_IMAGE}'
 
 # The walkthrough starts from an UNCLAIMED server: it signs in as the first user
 # and claims it, which is only possible once. A second run against a claimed

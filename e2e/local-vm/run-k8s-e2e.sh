@@ -37,7 +37,12 @@ echo "=== the automation server as a self-contained image ==="
   && sudo docker build -q -f Dockerfile.k8s -t bitswan/automation-server:dev . )
 mark "k8s: build the automation-server image"
 
-sudo docker save "${IMAGES[@]}" bitswan/automation-server:dev \
+# The driver needs kubectl where the Docker one needs the docker CLI.
+sudo docker build -q -f bitswan-automation-server/Dockerfile.infra-driver.k8s \
+  -t bitswan/infra-driver-k8s:dev bitswan-automation-server
+mark "k8s: build the infra-driver image"
+
+sudo docker save "${IMAGES[@]}" bitswan/automation-server:dev bitswan/infra-driver-k8s:dev \
   | sudo k3s ctr images import --digests=false -
 mark "k8s: import images into containerd"
 

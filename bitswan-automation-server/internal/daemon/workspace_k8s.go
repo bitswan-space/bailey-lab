@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8sctl"
@@ -53,7 +55,19 @@ type workspaceK8sConfig struct {
 	CertsDir          string
 	WithDashboard     bool
 	WithCodingAgent   bool
+	// EditorSSHPublicKey is the key the agent will accept from the dashboard's
+	// terminal, read from the workspace's own ssh directory.
+	EditorSSHPublicKey string
+	InfraDriverImage   string
+	InfraDriverToken   string
+	IngressURL         string
 }
+
+// driverServiceAccount is the identity the infra driver runs as. It is created
+// by the seed, not by a workspace: a workspace that could create its own
+// service account could grant itself one, which is the whole reason the daemon's
+// own role cannot write RBAC.
+const driverServiceAccount = "bitswan-infra-driver"
 
 // workspaceObjects renders everything a workspace runs. Pure, so the shape is a
 // test rather than something only a cluster can tell you.
@@ -85,6 +99,9 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			// namespace there is no host path to fall back to, and the driver
 			// renders volume mounts itself, so it is left unset.
 			"BITSWAN_GITOPS_AGENT_SECRET": cfg.CodingAgentSecret,
+			"BITSWAN_INFRA_DRIVER_URL":    "http://" + ws + "-infra-driver:9090",
+			"BITSWAN_INFRA_DRIVER_TOKEN":  cfg.InfraDriverToken,
+			"BITSWAN_DEPLOY_REMOTE_BASE":  "http://x:" + cfg.InfraDriverToken + "@" + ws + "-infra-driver:9090/deploy-repos",
 		},
 		Mounts: []k8srender.Mount{
 			{Path: "/gitops/gitops", SubPath: sub("gitops")},
@@ -125,6 +142,48 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 		})...)
 	}
 
+	// The infra driver: what gitops pushes a business process to, and what turns
+	// that declaration into workloads. It is the one workspace service that
+	// reaches the API server, so it is the one with a service account.
+	objs = append(objs, k8srender.Deployment(k8srender.Workload{
+		Name:           ws + "-infra-driver",
+		ContainerName:  ws + "-infra-driver",
+		Workspace:      ws,
+		Image:          cfg.InfraDriverImage,
+		PullPolicy:     cfg.PullPolicy,
+		VolumeClaim:    cfg.VolumeClaim,
+		ServiceAccount: driverServiceAccount,
+		Ports:          []k8srender.Port{{Name: "api", Port: 9090}},
+		Command: []string{
+			"/usr/local/bin/infra-driver", "serve",
+			"--listen", ":9090",
+			"--deploy-repos-dir", "/git/deploy-repos",
+			"--gitops-dir", "/gitops/gitops",
+			"--secrets-dir", "/gitops/secrets",
+			"--workspace", ws,
+			"--domain", cfg.Domain,
+			"--driver", "k8s",
+		},
+		Env: map[string]string{
+			"BITSWAN_INFRA_DRIVER_TOKEN": cfg.InfraDriverToken,
+			"BITSWAN_INFRA_DRIVER_KIND":  "k8s",
+			"BITSWAN_K8S_PULL_POLICY":    cfg.PullPolicy,
+			"BITSWAN_WORKSPACE_NAME":     ws,
+			// There is no socket to reach the daemon by from another pod, so the
+			// driver converges ingress over the daemon's workspace listener.
+			"BITSWAN_INGRESS_URL": cfg.IngressURL,
+		},
+		Mounts: []k8srender.Mount{
+			{Path: "/git/deploy-repos", SubPath: sub("deploy-repos")},
+			{Path: "/gitops/gitops", SubPath: sub("gitops")},
+			{Path: "/gitops/secrets", SubPath: sub("secrets")},
+			{Path: "/gitops/snapshots", SubPath: sub("snapshots")},
+			{Path: "/gitops/firewall", SubPath: sub("firewall")},
+			{Path: "/workspace-repo/copies", SubPath: sub("copies")},
+		},
+		Readiness: &k8srender.Probe{TCPPort: 9090, PeriodSeconds: 5, Failures: 60},
+	})...)
+
 	if cfg.WithCodingAgent {
 		objs = append(objs, k8srender.Deployment(k8srender.Workload{
 			Name:          ws + "-coding-agent",
@@ -134,11 +193,7 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			PullPolicy:    cfg.PullPolicy,
 			VolumeClaim:   cfg.VolumeClaim,
 			Ports:         []k8srender.Port{{Name: "ssh", Port: 22}},
-			Env: map[string]string{
-				"BITSWAN_WORKSPACE_NAME":      ws,
-				"BITSWAN_GITOPS_URL":          "http://" + ws + "-gitops:8079",
-				"BITSWAN_GITOPS_AGENT_SECRET": cfg.CodingAgentSecret,
-			},
+			Env:           codingAgentEnv(ws, cfg),
 			Mounts: []k8srender.Mount{
 				{Path: "/workspace/copies", SubPath: sub("copies")},
 				{Path: "/home/agent", SubPath: sub("coding-agent-home")},
@@ -247,4 +302,42 @@ func k8sPullPolicy() string {
 		return p
 	}
 	return "IfNotPresent"
+}
+
+// codingAgentEnv is what the agent needs to be reachable and to reach gitops.
+//
+// The public key matters more than it looks: the dashboard opens the agent's
+// terminal over ssh through the proxy gitops runs, and the agent's entrypoint
+// installs this key as the one it will accept. Without it the terminal sits on
+// "Connecting…" forever, which reads as a broken agent rather than a missing
+// environment variable.
+func codingAgentEnv(ws string, cfg workspaceK8sConfig) map[string]string {
+	env := map[string]string{
+		"BITSWAN_WORKSPACE_NAME":      ws,
+		"BITSWAN_GITOPS_URL":          "http://" + ws + "-gitops:8079",
+		"BITSWAN_GITOPS_AGENT_SECRET": cfg.CodingAgentSecret,
+		"BITSWAN_GIT_REMOTE":          "http://" + ws + "-gitops:8079/git",
+	}
+	if key := strings.TrimSpace(cfg.EditorSSHPublicKey); key != "" {
+		env["EDITOR_SSH_PUBLIC_KEY"] = key
+	}
+	return env
+}
+
+// readWorkspaceSSHPublicKey reads the key the dashboard authenticates to the
+// agent with, from the workspace's own ssh directory. Absent is not an error:
+// a workspace without an agent has no use for it.
+func readWorkspaceSSHPublicKey(workspacePath string) string {
+	b, err := os.ReadFile(filepath.Join(workspacePath, "ssh", "id_ed25519.pub"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func envOrDefault(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
 }

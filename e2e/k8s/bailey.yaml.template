@@ -84,6 +84,69 @@ subjects:
     namespace: ${NAMESPACE}
 ---
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bitswan-infra-driver
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bitswan-infra-driver
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+rules:
+  # What a business process becomes. This is the namespace's form of the Docker
+  # socket the driver holds on a host, and far narrower than one: it can create
+  # workloads in this namespace and cannot touch a node, a namespace, or RBAC —
+  # so it cannot grant itself anything it was not given.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Created, never deleted: a business process losing its database to a bad
+  # reconcile should be impossible rather than unlikely.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bitswan-infra-driver
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bitswan-infra-driver
+subjects:
+  - kind: ServiceAccount
+    name: bitswan-infra-driver
+    namespace: ${NAMESPACE}
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: bailey-config
@@ -283,6 +346,8 @@ spec:
               value: ${DASHBOARD_IMAGE}
             - name: BITSWAN_CODING_AGENT_IMAGE
               value: ${CODING_AGENT_IMAGE}
+            - name: BITSWAN_INFRA_DRIVER_IMAGE
+              value: ${INFRA_DRIVER_IMAGE}
           ports:
             - name: docs
               containerPort: 8080
