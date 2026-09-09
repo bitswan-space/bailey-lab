@@ -103,6 +103,16 @@ func (c *compileState) garage(container, realm string) k8srender.ObjectSet {
 			ReadOnly: true,
 		}},
 		VolumeClaim: c.volumeClaim(),
+		// The rclone sidecar. Snapshot and restore move bucket contents by
+		// exec'ing rclone somewhere, and Garage's own image is a single static
+		// binary with no shell and no rclone in it. On Docker that somewhere is
+		// a sibling container; here it is a second container in the same pod,
+		// which is the same thing with one fewer object and a shared lifecycle.
+		Sidecars: []sidecar{{
+			Name:    "toolbox",
+			Image:   imageOr("BITSWAN_GARAGE_TOOLBOX_IMAGE", "rclone/rclone:1.68"),
+			Command: []string{"sleep", "infinity"},
+		}},
 	})
 }
 
@@ -131,6 +141,15 @@ type statefulSetSpec struct {
 	Readiness   *k8srender.Probe
 	Files       []k8srender.Mount
 	VolumeClaim string
+	Sidecars    []sidecar
+}
+
+// sidecar is a second container in an infra service's pod: a tool the main
+// image does not carry, kept alive so something can be exec'd into it.
+type sidecar struct {
+	Name    string
+	Image   string
+	Command []string
 }
 
 func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
@@ -300,6 +319,25 @@ func podVolumes(s statefulSetSpec) []interface{} {
 			"name":                  "workspace",
 			"persistentVolumeClaim": map[string]interface{}{"claimName": s.VolumeClaim},
 		})
+	}
+	return out
+}
+
+// statefulSetContainers is the service and whatever tooling it needs beside it.
+func statefulSetContainers(s statefulSetSpec, main map[string]interface{}) []interface{} {
+	out := []interface{}{main}
+	for _, sc := range s.Sidecars {
+		c := map[string]interface{}{
+			"name":  sc.Name,
+			"image": sc.Image,
+			"volumeMounts": []interface{}{
+				map[string]interface{}{"name": "tools", "mountPath": toolsDir},
+			},
+		}
+		if len(sc.Command) > 0 {
+			c["command"] = sc.Command
+		}
+		out = append(out, c)
 	}
 	return out
 }

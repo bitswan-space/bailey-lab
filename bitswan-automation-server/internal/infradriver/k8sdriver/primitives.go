@@ -127,12 +127,21 @@ func (d *K8sDriver) pods(ctx context.Context, filter infradriver.ContainerFilter
 		if name == "" {
 			name = item.Metadata.Name
 		}
+		primary := labels[k8srender.NameLabel]
 		for _, cs := range item.Status.ContainerStatuses {
 			state, health := stateAndHealth(cs.Ready, cs.State)
+			// A pod with more than one container needs more than one handle.
+			// The main one answers to the pod's name; a sidecar answers to that
+			// name with its own appended — which is how the Docker driver names
+			// the garage toolbox, so gitops asks for the same string either way.
+			handle := name
+			if cs.Name != primary && cs.Name != "" {
+				handle = name + "-" + cs.Name
+			}
 			out = append(out, podRef{
 				pod:       item.Metadata.Name,
 				container: cs.Name,
-				name:      name,
+				name:      handle,
 				labels:    labels,
 				state:     state,
 				health:    health,

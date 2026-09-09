@@ -53,6 +53,7 @@ BASE_IMAGES=(
   docker.io/library/golang:1.25-alpine
   docker.io/bitswan/pipeline-runtime-environment:latest
   docker.io/library/busybox:1.36
+  docker.io/rclone/rclone:1.68
   docker.io/library/registry:2
   docker.io/moby/buildkit:v0.19.0-rootless
 )
