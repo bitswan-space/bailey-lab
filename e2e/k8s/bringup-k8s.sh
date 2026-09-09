@@ -57,6 +57,22 @@ ${OIDC_CLIENT_SECRET} ${OIDC_COOKIE_SECRET} ${REALM_JSON_INDENTED}
 ${OTEL_CONFIG_INDENTED} ${GITOPS_IMAGE} ${DASHBOARD_IMAGE}
 ${CODING_AGENT_IMAGE}'
 
+# The walkthrough starts from an UNCLAIMED server: it signs in as the first user
+# and claims it, which is only possible once. A second run against a claimed
+# Bailey gets the device-trust page instead — a new browser profile is an
+# untrusted device, and there is no trusted device to approve it from. The Docker
+# suite guarantees this by deleting the bitswan volume and refusing to run if it
+# survives; here the namespace is the volume.
+if [ "${E2E_K8S_RESET:-1}" = "1" ]; then
+  echo "=== [0/5] delete namespace ${NAMESPACE} so the server is unclaimed ==="
+  $KUBECTL delete namespace "$NAMESPACE" --wait=true --timeout=300s >/dev/null 2>&1 || true
+  if $KUBECTL get namespace "$NAMESPACE" >/dev/null 2>&1; then
+    echo "ERROR: namespace $NAMESPACE survived deletion; the suite needs an unclaimed server." >&2
+    exit 1
+  fi
+  mark "k8s: reset"
+fi
+
 echo "=== [1/5] namespace ${NAMESPACE} ==="
 # Command one of the two. The label is part of it: the egress firewall's rule
 # installer needs NET_ADMIN, which PodSecurity's restricted profile forbids.
