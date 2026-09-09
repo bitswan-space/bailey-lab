@@ -101,16 +101,21 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 		return fmt.Errorf("failed to create BitSwan config directory: %w", err)
 	}
 
-	// Init bitswan network
-	if _, err := docker.EnsureDockerNetwork("bitswan_network", verbose); err != nil {
-		return err
-	}
-	// Dedicated per-workspace agent↔gitops bridge. The coding agent joins ONLY
-	// this network (never bitswan_network), so it can reach gitops's
-	// authenticated API/git but nothing else on the control-plane inner ring.
-	// Created up front because the gitops compose now declares it as external.
-	if _, err := docker.EnsureDockerNetwork(workspaceName+"-agent", verbose); err != nil {
-		return err
+	// Both networks are Docker objects. A namespace reaches services by name
+	// without them, and the agent's isolation — the reason the second one exists
+	// — is a NetworkPolicy applied with the workspace instead.
+	if !onKubernetes() {
+		// Init bitswan network
+		if _, err := docker.EnsureDockerNetwork("bitswan_network", verbose); err != nil {
+			return err
+		}
+		// Dedicated per-workspace agent↔gitops bridge. The coding agent joins ONLY
+		// this network (never bitswan_network), so it can reach gitops's
+		// authenticated API/git but nothing else on the control-plane inner ring.
+		// Created up front because the gitops compose now declares it as external.
+		if _, err := docker.EnsureDockerNetwork(workspaceName+"-agent", verbose); err != nil {
+			return err
+		}
 	}
 
 	// Ensure the global ingress proxy is running.
@@ -776,8 +781,10 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 			return fmt.Errorf("failed to create dashboard service: %w", err)
 		}
 
-		if err := dashboardService.Enable(token, bitswanDashboardImage, true); err != nil {
-			return fmt.Errorf("failed to enable dashboard service: %w", err)
+		if !onKubernetes() {
+			if err := dashboardService.Enable(token, bitswanDashboardImage, true); err != nil {
+				return fmt.Errorf("failed to enable dashboard service: %w", err)
+			}
 		}
 
 		dashboardHostname := fmt.Sprintf("%s-dashboard.%s", workspaceName, domain)
@@ -794,8 +801,10 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 			return fmt.Errorf("failed to register Dashboard service: %w", err)
 		}
 
-		if err := dashboardService.StartContainer(); err != nil {
-			return fmt.Errorf("failed to start dashboard container: %w", err)
+		if !onKubernetes() {
+			if err := dashboardService.StartContainer(); err != nil {
+				return fmt.Errorf("failed to start dashboard container: %w", err)
+			}
 		}
 
 		fmt.Println("------------WORKSPACE DASHBOARD INFO------------")
@@ -813,12 +822,14 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 
 		// Coding-agent has no durable live-dev mode (only gitops + dashboard do),
 		// so init never sets a dev config — enable with the plain image.
-		if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, domain, nil); err != nil {
-			return fmt.Errorf("failed to enable coding-agent service: %w", err)
-		}
+		if !onKubernetes() {
+			if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, domain, nil); err != nil {
+				return fmt.Errorf("failed to enable coding-agent service: %w", err)
+			}
 
-		if err := codingAgentService.StartContainer(); err != nil {
-			return fmt.Errorf("failed to start coding-agent container: %w", err)
+			if err := codingAgentService.StartContainer(); err != nil {
+				return fmt.Errorf("failed to start coding-agent container: %w", err)
+			}
 		}
 
 		fmt.Println("------------CODING AGENT INFO------------")
