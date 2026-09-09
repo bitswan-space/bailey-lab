@@ -58,7 +58,10 @@ data:
       template IN A ${DOMAIN} {
         match "^([^.]+\\.)*${DOMAIN//./\\.}\\.\$"
         answer "{{ .Name }} 60 IN A ${NODE_IP}"
-        fallthrough
+      }
+      template IN AAAA ${DOMAIN} {
+        match "^([^.]+\\.)*${DOMAIN//./\\.}\\.\$"
+        rcode NOERROR
       }
     }
     test:53 {
@@ -76,7 +79,7 @@ if ! command -v k3s >/dev/null; then
     --disable=traefik \
     --kubelet-arg=image-gc-high-threshold=95 \
     --kubelet-arg=image-gc-low-threshold=90 \
-    --kubelet-arg=eviction-hard=imagefs.available<2%,nodefs.available<2%
+    --kubelet-arg='eviction-hard=imagefs.available<2%,nodefs.available<2%'
 fi
 
 # k3s ships its own Traefik; the Bailey brings the Traefik it manages itself
