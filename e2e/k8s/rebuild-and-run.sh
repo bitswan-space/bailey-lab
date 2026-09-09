@@ -29,11 +29,22 @@ sudo docker run --rm --entrypoint sh bitswan/automation-server:dev \
 echo IMAGES_VERIFIED
 
 echo "=== hand them to containerd ==="
-# The kubelet pulls from containerd and cannot see the docker image store.
-for image in registry:2 moby/buildkit:v0.19.0-rootless; do
-  sudo docker pull -q "$image" >/dev/null
+# The kubelet pulls from containerd and cannot see the docker image store. The
+# base images matter as much as ours: an automation runs one directly in
+# live-dev, and a deploy builds FROM one, so a guest that has them only in
+# docker stalls on a rate-limited pull mid-chapter.
+BASE_IMAGES=(
+  postgres:16
+  dxflrs/garage:v2.3.0
+  node:24-alpine
+  golang:1.25-alpine
+  bitswan/pipeline-runtime-environment:latest
+)
+for image in registry:2 moby/buildkit:v0.19.0-rootless "${BASE_IMAGES[@]}"; do
+  sudo docker image inspect "$image" >/dev/null 2>&1 || sudo docker pull -q "$image" >/dev/null || true
 done
-sudo docker save \
+present=()
+for image in \
   bitswan/automation-server:dev \
   bitswan/infra-driver-k8s:dev \
   bitswan/gitops-dev:latest \
@@ -41,8 +52,11 @@ sudo docker save \
   bitswan/coding-agent-dev:latest \
   registry:2 \
   moby/buildkit:v0.19.0-rootless \
-  | sudo k3s ctr images import --digests=false - >/dev/null
-echo IMPORTED
+  "${BASE_IMAGES[@]}"; do
+  sudo docker image inspect "$image" >/dev/null 2>&1 && present+=("$image")
+done
+sudo docker save "${present[@]}" | sudo k3s ctr images import --digests=false - >/dev/null
+echo "IMPORTED ${#present[@]}"
 
 bash e2e/k8s/bringup-k8s.sh
 

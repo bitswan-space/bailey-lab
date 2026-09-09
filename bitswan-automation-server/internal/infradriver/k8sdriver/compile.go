@@ -3,6 +3,7 @@ package k8sdriver
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -106,9 +107,12 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 		stage := conf.StageOrProduction()
 		realm := core.RealmForStage(stage)
 
-		w, route, err := c.workload(id, conf)
+		w, route, emit, err := c.workload(id, conf)
 		if err != nil {
 			return nil, nil, err
+		}
+		if !emit {
+			continue
 		}
 		objs = append(objs, k8srender.Deployment(w)...)
 		if route != nil {
@@ -135,8 +139,10 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 	return append(infra, objs...), routes, nil
 }
 
-// workload renders one automation.
-func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.Workload, *infradriver.Route, error) {
+// workload renders one automation. The bool reports whether it should be
+// emitted at all: a live-dev deployment with nothing to run is skipped rather
+// than being an error, exactly as the Docker compiler skips it.
+func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.Workload, *infradriver.Route, bool, error) {
 	stage := conf.StageOrProduction()
 	realm := core.RealmForStage(stage)
 	automation := conf.AutomationNameOr(depID)
@@ -149,13 +155,66 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 	// container name, so an upstream written by either backend resolves.
 	svcName := core.MakeHostnameLabel(c.workspace, automation, conf.Context, stage, "")
 
-	image := conf.Image
-	if image == "" {
-		return k8srender.Workload{}, nil, fmt.Errorf(
-			"%s has no built image: the kubernetes driver deploys images built beforehand", depID)
+	rel := conf.RelativePath
+	source := core.FirstNonEmpty(core.FirstNonEmpty(conf.Source, conf.Checksum), depID)
+
+	// CONTAINMENT (#134): the checksum and the relative path come from the
+	// tenant-writable deployment record, and both end up as subPath values the
+	// kubelet joins onto a volume root. A "../.." in either would mount
+	// something else's directory into a tenant's pod, so the same lexical
+	// containment the Docker compiler applies to its bind sources applies here.
+	if _, err := core.ContainedJoin(c.ctx.GitopsDir, source); err != nil {
+		return k8srender.Workload{}, nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+	}
+	if rel != "" {
+		if _, err := core.ContainedJoin(c.workspaceRepo(), rel); err != nil {
+			return k8srender.Workload{}, nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+		}
 	}
 
-	cfg := core.ReadAutomationConfig(c.sourceDir(conf))
+	cfg := c.resolveAutomationConfig(conf)
+
+	switch {
+	case stage == "live-dev" && cfg.Image == "":
+		return k8srender.Workload{}, nil, false, nil
+	case stage == "live-dev" && rel == "":
+		return k8srender.Workload{}, nil, false, fmt.Errorf("live-dev deployment %s is missing relative_path", depID)
+	}
+
+	// The image, and where the code inside it comes from. Three cases, the same
+	// three the Docker compiler has: live-dev runs a base image over the
+	// author's working tree, a built deployment runs an image with the source
+	// baked in, and anything else runs a base image over the checksum tree.
+	//
+	// Only the baked one is a registry reference: a build here is a push, so the
+	// tag bitswan.yaml records is a name in the namespace's registry, while the
+	// base images are published ones the kubelet already knows how to find.
+	image := cfg.Image
+	var mounts []k8srender.Mount
+	switch {
+	case stage == "live-dev":
+		mounts = append(mounts, k8srender.Mount{
+			Path:     cfg.MountPath,
+			SubPath:  c.volumeSubPath(rel),
+			ReadOnly: true,
+		})
+	case conf.Image != "":
+		image = registryRef(conf.Image)
+	default:
+		mounts = append(mounts, k8srender.Mount{
+			Path:     cfg.MountPath,
+			SubPath:  c.volumeSubPath("gitops/" + source),
+			ReadOnly: true,
+		})
+	}
+	if image == "" {
+		return k8srender.Workload{}, nil, false, fmt.Errorf("deployment %s has no image to run", depID)
+	}
+	if len(mounts) > 0 && c.volumeClaim() == "" {
+		return k8srender.Workload{}, nil, false, fmt.Errorf(
+			"deployment %s needs its source mounted but no workspace volume claim is configured", depID)
+	}
+
 	port := cfg.Port
 	if port == 0 {
 		port = 8080
@@ -184,14 +243,13 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 		Name:          svcName,
 		ContainerName: svcName,
 		Workspace:     c.workspace,
-		// The registry reference, not the bare tag. A build here is a push, so
-		// the tag bitswan.yaml records is a name in the namespace's registry —
-		// the kubelet asked for the bare tag would go looking on Docker Hub.
-		Image:      registryRef(image),
-		PullPolicy: builtImagePullPolicy(),
-		Replicas:   conf.ReplicasOrOne(),
-		Env:        env,
-		Ports:      []k8srender.Port{{Name: "app", Port: port}},
+		Image:         image,
+		PullPolicy:    builtImagePullPolicy(),
+		VolumeClaim:   c.volumeClaim(),
+		Mounts:        mounts,
+		Replicas:      conf.ReplicasOrOne(),
+		Env:           env,
+		Ports:         []k8srender.Port{{Name: "app", Port: port}},
 		Labels: map[string]string{
 			"gitops.automation_name": automation,
 			"gitops.context":         conf.Context,
@@ -220,7 +278,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 	}
 
 	if !cfg.Expose {
-		return w, nil, nil
+		return w, nil, true, nil
 	}
 	route := &infradriver.Route{
 		Hostname:       svcName + "." + c.domain,
@@ -229,7 +287,55 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 		ParentEndpoint: c.workspace + "-dashboard." + c.domain,
 		Kind:           "frontend",
 	}
-	return w, route, nil
+	return w, route, true, nil
+}
+
+// workspaceRepo is where a live-dev deployment's working tree is read from, the
+// same path and the same default the Docker compiler uses.
+func (c *compileState) workspaceRepo() string {
+	return envOr("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
+}
+
+// volumeClaim is the workspace's volume, the namespace's answer to the named
+// volume the Docker compiler mounts subpaths of.
+func (c *compileState) volumeClaim() string {
+	return os.Getenv("BITSWAN_K8S_VOLUME_CLAIM")
+}
+
+// volumeSubPath is where inside that volume a workspace's directory lives. The
+// layout is byte-identical to the Docker named volume's, so the same path means
+// the same directory whichever backend wrote it.
+func (c *compileState) volumeSubPath(rel string) string {
+	return path.Join("workspaces", c.workspace, rel)
+}
+
+// resolveAutomationConfig reads automation.toml from wherever this deployment's
+// canonical source is: the working tree for live-dev, the checksum tree
+// otherwise, falling back to the working tree when the source is baked into an
+// image and no checksum tree was ever written.
+func (c *compileState) resolveAutomationConfig(conf *core.Deployment) core.AutomationConfig {
+	stage := conf.StageOrProduction()
+	rel := conf.RelativePath
+
+	var sourceDir string
+	if stage == "live-dev" && rel != "" {
+		sourceDir, _ = core.ContainedJoin(c.workspaceRepo(), rel)
+	} else if src := core.FirstNonEmpty(conf.Source, conf.Checksum); src != "" {
+		sourceDir, _ = core.ContainedJoin(c.ctx.GitopsDir, src)
+	}
+	if sourceDir != "" {
+		if _, err := os.Stat(sourceDir); err == nil {
+			return core.ReadAutomationConfig(sourceDir)
+		}
+	}
+	if rel != "" {
+		if wsDir, err := core.ContainedJoin(c.workspaceRepo(), rel); err == nil {
+			if _, err := os.Stat(wsDir); err == nil {
+				return core.ReadAutomationConfig(wsDir)
+			}
+		}
+	}
+	return core.DefaultAutomationConfig()
 }
 
 // workerHosts lists the peers an automation can reach, as name=host:port.
@@ -255,7 +361,7 @@ func (c *compileState) workerHosts(conf *core.Deployment, bpSlug, stage string) 
 		if peerBP != bpSlug {
 			continue
 		}
-		cfg := core.ReadAutomationConfig(c.sourceDir(peer))
+		cfg := c.resolveAutomationConfig(peer)
 		if cfg.Expose {
 			continue
 		}
@@ -268,13 +374,6 @@ func (c *compileState) workerHosts(conf *core.Deployment, bpSlug, stage string) 
 		parts = append(parts, fmt.Sprintf("%s=%s:%d", name, host, port))
 	}
 	return strings.Join(parts, ",")
-}
-
-func (c *compileState) sourceDir(conf *core.Deployment) string {
-	if conf.Checksum == "" {
-		return ""
-	}
-	return path.Join(c.ctx.GitopsDir, conf.Checksum)
 }
 
 func enabledServices(conf *core.Deployment) []string {
