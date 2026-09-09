@@ -56,8 +56,13 @@ func (d *K8sDriver) BuildImage(ctx context.Context, req infradriver.BuildRequest
 		// A layer cache that outlives the builder pod, and is shared across
 		// business processes: the expensive layers are the dependency installs,
 		// and they are identical between them.
-		"--export-cache", "type=registry,mode=max,ref=" + cacheRef(),
-		"--import-cache", "type=registry,ref=" + cacheRef(),
+		//
+		// registry.insecure belongs on the cache refs too, not only on the
+		// output: the cache is written to the same plain-HTTP registry, and
+		// without it the export half of a successful build fails the whole
+		// build on "server gave HTTP response to HTTPS client".
+		"--export-cache", "type=registry,mode=max,registry.insecure=true,ref=" + cacheRef(),
+		"--import-cache", "type=registry,registry.insecure=true,ref=" + cacheRef(),
 	}
 	if gp := os.Getenv("BITSWAN_GOPROXY"); gp != "" {
 		args = append(args, "--opt", "build-arg:GOPROXY="+gp)
