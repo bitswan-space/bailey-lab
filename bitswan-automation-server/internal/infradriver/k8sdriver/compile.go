@@ -99,7 +99,7 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 	// new one answers, not before.
 	if len(routes) > 0 {
 		report("wait", fmt.Sprintf("waiting for %d routed workload(s)", len(routes)))
-		if err := waitForRouted(ctx, routes, report); err != nil {
+		if err := waitForRouted(ctx, objs, routes, report); err != nil {
 			return nil, err
 		}
 	}
@@ -554,18 +554,33 @@ func stagesIn(objs k8srender.ObjectSet) []string {
 
 // waitForRouted blocks until each routed workload has a ready replica.
 //
-// The upstream a route names is the Service, and the Service is named for the
-// Deployment, so the thing to wait on is derivable from the route itself — no
-// second bookkeeping to fall out of step with what was actually applied.
-func waitForRouted(ctx context.Context, routes []infradriver.Route, report func(step, msg string)) error {
+// The Deployment behind a route is looked up in what was just applied rather
+// than re-derived from the Service name: the two names are shortened to
+// different budgets, so shortening one again does not reliably produce the
+// other.
+func waitForRouted(ctx context.Context, objs k8srender.ObjectSet, routes []infradriver.Route, report func(step, msg string)) error {
+	deploymentFor := map[string]string{}
+	for _, obj := range objs {
+		if kind, _ := obj["kind"].(string); kind != "Deployment" {
+			continue
+		}
+		meta, _ := obj["metadata"].(map[string]interface{})
+		name, _ := meta["name"].(string)
+		labels, _ := meta["labels"].(map[string]interface{})
+		if svc, _ := labels[k8srender.NameLabel].(string); svc != "" && name != "" {
+			deploymentFor[svc] = name
+		}
+	}
+
 	seen := map[string]bool{}
 	for _, r := range routes {
 		svc, _, _ := strings.Cut(r.Upstream, ":")
-		if svc == "" || seen[svc] {
+		dep := deploymentFor[svc]
+		if dep == "" || seen[dep] {
 			continue
 		}
-		seen[svc] = true
-		if err := k8sctl.WaitAvailable(ctx, k8srender.Name(svc, k8srender.WorkloadNameMax), routeReadyTimeout); err != nil {
+		seen[dep] = true
+		if err := k8sctl.WaitAvailable(ctx, dep, routeReadyTimeout); err != nil {
 			return fmt.Errorf("%s is routed but never became ready: %w", svc, err)
 		}
 		report("wait", svc+" is serving")
