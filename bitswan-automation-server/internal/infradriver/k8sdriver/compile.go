@@ -204,14 +204,13 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 	var infra k8srender.ObjectSet
 	for _, realm := range sortedKeys(realms) {
 		for _, svc := range sortedBoolKeys(realms[realm]) {
-			objs := c.infraService(svc, realm)
-			if objs == nil {
-				// Saying so beats standing nothing up: a workload whose declared
-				// service silently never appears fails much later, as a
-				// connection refused with no indication that the thing it is
-				// connecting to was never asked for.
-				return nil, nil, fmt.Errorf(
-					"%q is declared as a service but the kubernetes driver cannot stand it up yet", svc)
+			// Saying so beats standing nothing up: a workload whose declared
+			// service silently never appears fails much later, as a connection
+			// refused with no indication that the thing it was connecting to
+			// was never asked for.
+			objs, err := c.infraService(svc, realm)
+			if err != nil {
+				return nil, nil, err
 			}
 			infra = append(infra, objs...)
 		}

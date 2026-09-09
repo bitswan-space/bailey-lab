@@ -1,6 +1,7 @@
 package k8sdriver
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
@@ -16,21 +17,23 @@ import (
 // workload being replaced, and the pod's name is derived from the object's — it
 // is always <name>-0 — which is what makes an exec-based backup or a psql
 // provisioning step able to find it without a lookup.
-func (c *compileState) infraService(service, realm string) k8srender.ObjectSet {
-	if c.volumeClaim() == "" {
-		// Every infra service reads a config file off the workspace volume.
-		// Rendering the mount without the volume produces a pod the API server
-		// rejects for a reason that names neither the setting nor the service.
-		return nil
-	}
+func (c *compileState) infraService(service, realm string) (k8srender.ObjectSet, error) {
 	name := c.workspace + "__" + service + core.ServiceSuffix(realm)
 	switch service {
 	case "postgres":
-		return c.postgres(name, realm)
+		return c.postgres(name, realm), nil
 	case "garage":
-		return c.garage(name, realm)
+		// Garage reads its config off the workspace volume. Rendering the mount
+		// without the volume produces a pod the API server rejects for a reason
+		// that names neither the setting nor the service.
+		if c.volumeClaim() == "" {
+			return nil, fmt.Errorf(
+				"%s needs the workspace volume to read its configuration, and none is configured", name)
+		}
+		return c.garage(name, realm), nil
 	}
-	return nil
+	return nil, fmt.Errorf(
+		"%q is declared as a service but the kubernetes driver cannot stand it up yet", service)
 }
 
 func (c *compileState) postgres(container, realm string) k8srender.ObjectSet {
