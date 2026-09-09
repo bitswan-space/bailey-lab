@@ -33,27 +33,34 @@ echo "=== hand them to containerd ==="
 # base images matter as much as ours: an automation runs one directly in
 # live-dev, and a deploy builds FROM one, so a guest that has them only in
 # docker stalls on a rate-limited pull mid-chapter.
+#
+# containerd pulls those itself rather than taking them out of docker: several
+# are multi-arch, and a docker save of one holds a manifest whose layers the
+# export does not carry, which the import rejects with "content digest not
+# found". Pulling straight into containerd has neither problem, and these are
+# published images — nothing about them is under test.
 BASE_IMAGES=(
-  postgres:16
-  dxflrs/garage:v2.3.0
-  node:24-alpine
-  golang:1.25-alpine
-  bitswan/pipeline-runtime-environment:latest
-  busybox:1.36
+  docker.io/library/postgres:16
+  docker.io/dxflrs/garage:v2.3.0
+  docker.io/library/node:24-alpine
+  docker.io/library/golang:1.25-alpine
+  docker.io/bitswan/pipeline-runtime-environment:latest
+  docker.io/library/busybox:1.36
+  docker.io/library/registry:2
+  docker.io/moby/buildkit:v0.19.0-rootless
 )
-for image in registry:2 moby/buildkit:v0.19.0-rootless "${BASE_IMAGES[@]}"; do
-  sudo docker image inspect "$image" >/dev/null 2>&1 || sudo docker pull -q "$image" >/dev/null || true
+for image in "${BASE_IMAGES[@]}"; do
+  sudo k3s ctr images pull --platform linux/amd64 "$image" >/dev/null 2>&1 \
+    || echo "PREPULL_FAILED $image"
 done
+# Only what this checkout builds has to make the docker-to-containerd hop.
 present=()
 for image in \
   bitswan/automation-server:dev \
   bitswan/infra-driver-k8s:dev \
   bitswan/gitops-dev:latest \
   bitswan/workspace-dashboard-dev:latest \
-  bitswan/coding-agent-dev:latest \
-  registry:2 \
-  moby/buildkit:v0.19.0-rootless \
-  "${BASE_IMAGES[@]}"; do
+  bitswan/coding-agent-dev:latest; do
   sudo docker image inspect "$image" >/dev/null 2>&1 && present+=("$image")
 done
 # One image per archive. A single save of the whole set has failed the import
@@ -63,7 +70,6 @@ done
 # that will not import is reported and left to be pulled.
 TARBALL=/var/tmp/bitswan-image.tar
 trap 'sudo rm -f "$TARBALL"' EXIT
-import_failures=0
 for image in "${present[@]}"; do
   sudo rm -f "$TARBALL"
   if sudo docker save -o "$TARBALL" "$image" &&
@@ -71,15 +77,10 @@ for image in "${present[@]}"; do
     continue
   fi
   echo "IMPORT_FAILED $image"
-  case "$image" in
-    bitswan/automation-server:dev|bitswan/infra-driver-k8s:dev|bitswan/*-dev:latest)
-      echo "that image is the one under test; refusing to run against whatever containerd already had" >&2
-      exit 1
-      ;;
-  esac
-  import_failures=$((import_failures + 1))
+  echo "that image is one this checkout builds; refusing to run against whatever containerd already had" >&2
+  exit 1
 done
-echo "IMPORTED $(( ${#present[@]} - import_failures )) of ${#present[@]}"
+echo "IMPORTED ${#present[@]}"
 
 bash e2e/k8s/bringup-k8s.sh
 
