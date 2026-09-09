@@ -242,7 +242,7 @@ mark "host: rsync repo into guest"
 echo "=== provision + run E2E in guest ==="
 # `sudo env ...` so the proxy reaches provision.sh's curl calls (go.dev,
 # nodesource, docker gpg, mkcert); apt already picks it up from 99proxy.
-$SSH "$VM" "sudo env $PROXY_ENV bash /repo/e2e/local-vm/provision.sh"
+$SSH "$VM" "sudo env $PROXY_ENV bash ${E2E_GUEST_PROVISION:-/repo/e2e/local-vm/provision.sh}"
 mark "guest: provision (apt deps)"
 
 # Now that docker is installed, point the daemon (image pulls) AND the build
@@ -283,6 +283,7 @@ fi
 # registry-pulled image (the walkthrough goes dark mid-chapter when the guest
 # stalls on a rate-limited pull instead). The tarball is built here when
 # absent; delete it (or set BITSWAN_E2E_RESEED=1) after changing the list.
+if [ "${E2E_SEED_IMAGES:-1}" = "1" ]; then
 SEED_IMAGES=(
   # infra services a BP enables + the app-image bases (bringup.sh pre-pull)
   postgres:16
@@ -313,6 +314,7 @@ if [ -f "$WORK/base-images.tar" ]; then
     && $SSH "$VM" 'sudo docker load -i /tmp/base-images.tar 2>&1 | tail -3; rm -f /tmp/base-images.tar' \
     || echo "--- base-image seed failed (continuing; build will pull) ---"
   mark "guest: seed base images"
+fi
 fi
 
 $SSH "$VM" "env $PROXY_ENV bash ${E2E_GUEST_RUN:-/repo/e2e/local-vm/run-e2e.sh}" || RC=$? || true

@@ -346,7 +346,7 @@ func setupBaileyRoutes() {
 	if domain == "" {
 		return
 	}
-	if !containerRunning("bitswan-protected-proxy") {
+	if !protectedProxyAvailable() {
 		fmt.Println("bitswan-protected-proxy not running — Bailey routes not registered (provision protected ingress first).")
 		return
 	}
@@ -356,7 +356,7 @@ func setupBaileyRoutes() {
 	}
 	resolver, tlsDomains := certResolverForHostname(outer)
 	for _, h := range []string{outer, toInnerHost(outer)} {
-		if err := traefikapi.AddRouteWithTLSDomains(h, "bitswan-protected-proxy:80", "", resolver, tlsDomains); err != nil {
+		if err := traefikapi.AddRouteWithTLSDomains(h, protectedProxyUpstream(), "", resolver, tlsDomains); err != nil {
 			fmt.Printf("Warning: register platform route for %s: %v\n", h, err)
 		}
 	}
@@ -370,7 +370,7 @@ func setupBaileyRoutes() {
 		fmt.Printf("Warning: AOC didn't accept protected-client redirect URIs for %s: %v\n", onboard, err)
 	}
 	oResolver, oTLSDomains := certResolverForHostname(onboard)
-	if err := traefikapi.AddRouteWithTLSDomains(onboard, "bitswan-protected-proxy:80", "", oResolver, oTLSDomains); err != nil {
+	if err := traefikapi.AddRouteWithTLSDomains(onboard, protectedProxyUpstream(), "", oResolver, oTLSDomains); err != nil {
 		fmt.Printf("Warning: register platform route for %s: %v\n", onboard, err)
 	}
 }
