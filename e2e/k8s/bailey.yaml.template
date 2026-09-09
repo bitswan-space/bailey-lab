@@ -31,10 +31,10 @@ metadata:
     app.kubernetes.io/managed-by: bitswan
 rules:
   # Traefik's static config is not watched, so applying a change to it means
-  # replacing the pod. Scoped to this one object by name: patching the
-  # StatefulSet is enough to restart, and nothing else needs writing.
+  # replacing the pod. Scoped to this one object by name: patching the Deployment
+  # is enough to restart, and nothing else needs writing.
   - apiGroups: ["apps"]
-    resources: ["statefulsets"]
+    resources: ["deployments"]
     resourceNames: ["bailey"]
     verbs: ["get", "patch"]
   - apiGroups: [""]
@@ -114,7 +114,7 @@ stringData:
   OAUTH2_PROXY_EMAIL_DOMAINS: "*"
   OAUTH2_PROXY_SCOPE: openid email profile
   OAUTH2_PROXY_UPSTREAMS: http://127.0.0.1:9080
-  OAUTH2_PROXY_HTTP_ADDRESS: 127.0.0.1:4180
+  OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
   OAUTH2_PROXY_REVERSE_PROXY: "true"
   OAUTH2_PROXY_PASS_HOST_HEADER: "true"
   OAUTH2_PROXY_PASS_USER_HEADERS: "true"
@@ -170,7 +170,7 @@ spec:
       targetPort: 443
 ---
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: bailey
   labels:
@@ -178,7 +178,13 @@ metadata:
     app.kubernetes.io/managed-by: bitswan
 spec:
   replicas: 1
-  serviceName: bailey
+  # Recreate, not RollingUpdate: the volume has exactly one writer, so a second
+  # pod must never exist alongside the first. A StatefulSet would give the same
+  # guarantee and a stable pod name, but it also refuses to replace a pod that is
+  # not Ready — so a bad config deadlocks its own fix. A Deployment always
+  # replaces, and the object name is stable even though the pod name is not.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: bailey
@@ -190,8 +196,6 @@ spec:
         bitswan.io/role: control-plane
     spec:
       serviceAccountName: bailey
-      # A StatefulSet replaces the pod rather than surging a second one, which is
-      # what an RWO volume with exactly one writer requires.
       terminationGracePeriodSeconds: 30
       securityContext:
         fsGroup: 0
@@ -287,14 +291,15 @@ spec:
           envFrom:
             - secretRef:
                 name: bailey-oauth
-          # Loopback: the only thing that may reach the proxy is Traefik in this
-          # same pod, and the only thing the proxy forwards to is the gate beside
-          # it.
+          # Traefik reaches the proxy over loopback in this pod, and the proxy
+          # forwards to the gate beside it — but the readiness probe comes from
+          # the kubelet, for which 127.0.0.1 is the NODE's loopback, so the
+          # listener binds the pod's addresses and a NetworkPolicy is what keeps
+          # it private rather than the bind address.
           readinessProbe:
             httpGet:
               path: /ping
               port: 4180
-              host: 127.0.0.1
             initialDelaySeconds: 2
             periodSeconds: 3
         - name: redis

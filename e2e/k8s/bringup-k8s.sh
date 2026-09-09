@@ -15,6 +15,7 @@ export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 KUBECTL="${KUBECTL:-kubectl}"
 
 export NAMESPACE="${E2E_K8S_NAMESPACE:-bitswan}"
+export HARNESS_NAMESPACE="${E2E_K8S_HARNESS_NAMESPACE:-bitswan-harness}"
 export DOMAIN="${E2E_DOMAIN:-bs-e2e.localhost}"
 KC_DOMAIN="${E2E_KC_DOMAIN:-$DOMAIN}"
 export KC_HOST="keycloak.${KC_DOMAIN}"
@@ -62,8 +63,14 @@ mark "k8s: namespace"
 echo "=== [2/5] harness: keycloak (seeded realm) + otlp collector ==="
 export REALM_JSON_INDENTED="$(sed 's/^/    /' "$REPO_ROOT/e2e/keycloak/realm-export.json")"
 export OTEL_CONFIG_INDENTED="$(sed 's/^/    /' "$REPO_ROOT/e2e/otel/collector-config.yaml")"
-envsubst "$SUBST" < "$HERE/harness.yaml.template" | $KUBECTL -n "$NAMESPACE" apply -f -
-$KUBECTL -n "$NAMESPACE" rollout status deploy/keycloak --timeout=300s
+# Keycloak goes in its own namespace: it needs a hostPort so the browser and
+# every pod reach the issuer at the same url, and hostPort is forbidden by the
+# baseline profile the Bailey's namespace enforces. The collector stays in the
+# Bailey's namespace, where the walkthrough's bare-name endpoint resolves.
+$KUBECTL create namespace "$HARNESS_NAMESPACE" --dry-run=client -o yaml | $KUBECTL apply -f -
+envsubst "$SUBST" < "$HERE/keycloak.yaml.template" | $KUBECTL -n "$HARNESS_NAMESPACE" apply -f -
+envsubst "$SUBST" < "$HERE/otel.yaml.template" | $KUBECTL -n "$NAMESPACE" apply -f -
+$KUBECTL -n "$HARNESS_NAMESPACE" rollout status deploy/keycloak --timeout=300s
 $KUBECTL -n "$NAMESPACE" rollout status deploy/bitswan-e2e-otel --timeout=180s
 mark "k8s: harness (keycloak + otel)"
 
@@ -73,12 +80,13 @@ $KUBECTL -n "$NAMESPACE" apply -f /tmp/bailey-seed.yaml
 mark "k8s: apply the seed"
 
 echo "=== [4/5] wait for the control plane ==="
-$KUBECTL -n "$NAMESPACE" rollout status statefulset/bailey --timeout=420s || {
-  echo "--- statefulset did not become ready ---" >&2
+$KUBECTL -n "$NAMESPACE" rollout status deploy/bailey --timeout=420s || {
+  echo "--- the control plane did not become ready ---" >&2
   $KUBECTL -n "$NAMESPACE" get pods -o wide >&2
-  $KUBECTL -n "$NAMESPACE" describe pod bailey-0 | tail -40 >&2
-  $KUBECTL -n "$NAMESPACE" logs bailey-0 -c seed-state --tail=30 >&2 || true
-  $KUBECTL -n "$NAMESPACE" logs bailey-0 -c daemon --tail=40 >&2 || true
+  POD="$($KUBECTL -n "$NAMESPACE" get pod -l app.kubernetes.io/name=bailey -o name | head -1)"
+  $KUBECTL -n "$NAMESPACE" describe "$POD" | tail -40 >&2
+  $KUBECTL -n "$NAMESPACE" logs "$POD" -c seed-state --tail=30 >&2 || true
+  $KUBECTL -n "$NAMESPACE" logs "$POD" -c daemon --tail=40 >&2 || true
   exit 1
 }
 mark "k8s: control plane ready"
@@ -90,9 +98,10 @@ for i in $(seq 1 60); do
   sleep 3
   if [ "$i" = 60 ]; then
     echo "ERROR: onboarding host not reachable (last HTTP $code)" >&2
-    $KUBECTL -n "$NAMESPACE" logs bailey-0 -c daemon --tail=40 >&2 || true
-    $KUBECTL -n "$NAMESPACE" logs bailey-0 -c traefik --tail=20 >&2 || true
-    $KUBECTL -n "$NAMESPACE" logs bailey-0 -c protected-proxy --tail=20 >&2 || true
+    POD="$($KUBECTL -n "$NAMESPACE" get pod -l app.kubernetes.io/name=bailey -o name | head -1)"
+    $KUBECTL -n "$NAMESPACE" logs "$POD" -c daemon --tail=40 >&2 || true
+    $KUBECTL -n "$NAMESPACE" logs "$POD" -c traefik --tail=20 >&2 || true
+    $KUBECTL -n "$NAMESPACE" logs "$POD" -c protected-proxy --tail=20 >&2 || true
     exit 1
   fi
 done

@@ -509,7 +509,18 @@ func (s *Server) Run() error {
 		if err := startProtectedGate(); err != nil {
 			fmt.Printf("Warning: protected gate failed to start: %v\n", err)
 		}
-		setupBaileyRoutes()
+		// setupBaileyRoutes registers nothing while the auth proxy is down,
+		// because a Bailey hostname without the proxy in front of it is a
+		// hostname with no authentication. It used to run once, three seconds
+		// after boot, and stay silent — so a proxy that finished starting a
+		// moment later left the console 404ing until someone restarted the
+		// daemon. In a pod that is the normal case: the proxy has to complete
+		// OIDC discovery first, which takes longer than three seconds.
+		//
+		// So it retries until it takes. Idempotent: it rewrites the same routes.
+		if !registerBaileyRoutesWhenProxyUp(2*time.Minute, 3*time.Second) {
+			fmt.Println("Warning: Bailey routes not registered — the auth proxy never came up.")
+		}
 		// Bailey's own hostnames are registered above; every other
 		// protected host this server ever created is reconciled here,
 		// so a Keycloak allowlist that drifted (a callback without its
