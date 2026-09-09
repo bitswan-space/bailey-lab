@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
@@ -90,6 +91,17 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		}
 		report("provision", "Provisioning per-BP namespaces...")
 		core.ProvisionForDeployments(x, ctx, req.Ctx, bs, report)
+	}
+
+	// Nothing is routed at a workload that is not serving yet. A Service with no
+	// ready endpoints is a 502, and on a promotion that 502 is production: the
+	// whole point of running both slots is that the cutover happens after the
+	// new one answers, not before.
+	if len(routes) > 0 {
+		report("wait", fmt.Sprintf("waiting for %d routed workload(s)", len(routes)))
+		if err := waitForRouted(ctx, routes, report); err != nil {
+			return nil, err
+		}
 	}
 
 	report("ingress", fmt.Sprintf("converging %d route(s)", len(routes)))
@@ -539,3 +551,30 @@ func stagesIn(objs k8srender.ObjectSet) []string {
 	}
 	return sortedBoolKeys(seen)
 }
+
+// waitForRouted blocks until each routed workload has a ready replica.
+//
+// The upstream a route names is the Service, and the Service is named for the
+// Deployment, so the thing to wait on is derivable from the route itself — no
+// second bookkeeping to fall out of step with what was actually applied.
+func waitForRouted(ctx context.Context, routes []infradriver.Route, report func(step, msg string)) error {
+	seen := map[string]bool{}
+	for _, r := range routes {
+		svc, _, _ := strings.Cut(r.Upstream, ":")
+		if svc == "" || seen[svc] {
+			continue
+		}
+		seen[svc] = true
+		if err := k8sctl.WaitAvailable(ctx, k8srender.Name(svc, k8srender.WorkloadNameMax), routeReadyTimeout); err != nil {
+			return fmt.Errorf("%s is routed but never became ready: %w", svc, err)
+		}
+		report("wait", svc+" is serving")
+	}
+	return nil
+}
+
+// routeReadyTimeout is how long a workload has to start answering before the
+// deploy gives up. Generous, because a first pull of a freshly built image on a
+// cold node is minutes, and reporting a deploy failed because an image was
+// still downloading would be a lie.
+const routeReadyTimeout = 10 * time.Minute
