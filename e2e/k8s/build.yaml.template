@@ -128,6 +128,8 @@ spec:
             # Rootless without a process sandbox: the sandbox is what needs
             # privileges this pod does not have.
             - --oci-worker-no-process-sandbox
+            - --config
+            - /etc/buildkit/buildkitd.toml
           securityContext:
             seccompProfile:
               type: Unconfined
@@ -139,6 +141,8 @@ spec:
           volumeMounts:
             - name: cache
               mountPath: /home/user/.local/share/buildkit
+            - name: config
+              mountPath: /etc/buildkit
           readinessProbe:
             exec:
               command: ["buildctl", "debug", "workers"]
@@ -147,6 +151,27 @@ spec:
       volumes:
         - name: cache
           emptyDir: {}
+        - name: config
+          configMap:
+            name: bitswan-buildkit
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bitswan-buildkit
+  labels:
+    app.kubernetes.io/name: bitswan-buildkit
+    app.kubernetes.io/managed-by: bitswan
+data:
+  # The registry in this namespace speaks plain HTTP. buildkit needs to be told
+  # so for PULLS as well as pushes: a source bake often builds FROM an image
+  # this driver built earlier, and without this the builder tries HTTPS, fails,
+  # falls back to Docker Hub, and reports "pull access denied" for a repository
+  # that exists here and nowhere else.
+  buildkitd.toml: |
+    [registry."bitswan-registry:5000"]
+      http = true
+      insecure = true
 ---
 apiVersion: v1
 kind: Service

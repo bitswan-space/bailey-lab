@@ -175,7 +175,11 @@ func dockerfileFor(req infradriver.BuildRequest) (string, func(), error) {
 	if mount == "" {
 		mount = "/app"
 	}
-	body := fmt.Sprintf("FROM %s\nCOPY . %s\n", req.BaseImage, mount)
+	// The base is resolved the same way a workload's image is. A source bake
+	// often builds FROM an image this driver built earlier, and handed to the
+	// builder as a bare tag that goes to Docker Hub for something that exists
+	// only in this namespace's registry.
+	body := fmt.Sprintf("FROM %s\nCOPY . %s\n", resolveImage(req.BaseImage), mount)
 	// A build.sh runs as the final layer so the work happens once, here, and the
 	// deployed workload serves what was built rather than building on every
 	// start. A failing build.sh fails the build, which is correct.
