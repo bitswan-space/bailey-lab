@@ -9,6 +9,11 @@ set -euo pipefail
 export PATH="$PATH:/usr/local/go/bin"
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# The symlink a watcher follows, pointed at this run's own log. Set by the run
+# itself rather than by whatever launched it: the launcher's clock is not the
+# guest's, and a stamp computed on the wrong side names a file nobody writes.
+ln -sfn "$(readlink -f /proc/$$/fd/1)" /tmp/current-run.log 2>/dev/null || true
+
 echo "=== build the binaries and images ==="
 cd bitswan-automation-server
 make console >/dev/null
