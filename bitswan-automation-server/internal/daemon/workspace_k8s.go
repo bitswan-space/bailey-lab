@@ -31,11 +31,15 @@ func bringUpWorkspaceK8s(ctx context.Context, cfg workspaceK8sConfig) error {
 	if err := k8sctl.Apply(ctx, objs); err != nil {
 		return fmt.Errorf("apply workspace objects: %w", err)
 	}
-	// gitops is what the dashboard and the agent talk to, and what the console
-	// polls, so it is the one worth blocking on. The other two are reported by
-	// the console as they arrive.
-	if err := k8sctl.WaitAvailable(ctx, k8srender.Name(cfg.Workspace+"-gitops", k8srender.WorkloadNameMax), 5*time.Minute); err != nil {
-		return err
+	// gitops is what the dashboard and the agent talk to, and the driver is what
+	// every deploy goes through. A workspace missing either is broken, and it
+	// should say so now rather than at the first deploy — where it surfaces as a
+	// build failing to connect, which reads as a problem with the deploy rather
+	// than with the workspace.
+	for _, name := range []string{cfg.Workspace + "-gitops", cfg.Workspace + "-infra-driver"} {
+		if err := k8sctl.WaitAvailable(ctx, k8srender.Name(name, k8srender.WorkloadNameMax), 5*time.Minute); err != nil {
+			return err
+		}
 	}
 	return nil
 }
