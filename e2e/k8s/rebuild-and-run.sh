@@ -56,14 +56,30 @@ for image in \
   "${BASE_IMAGES[@]}"; do
   sudo docker image inspect "$image" >/dev/null 2>&1 && present+=("$image")
 done
-# Through a file rather than a pipe: a multi-image stream large enough to
-# matter has failed the import mid-way with "content digest not found", and a
-# half-imported set is worse than a slow one.
-TARBALL=$(mktemp /var/tmp/bitswan-images-XXXXXX.tar)
-trap 'rm -f "$TARBALL"' EXIT
-sudo docker save -o "$TARBALL" "${present[@]}"
-sudo k3s ctr images import --digests=false "$TARBALL" >/dev/null
-echo "IMPORTED ${#present[@]}"
+# One image per archive. A single save of the whole set has failed the import
+# with "content digest not found" — one image whose export containerd will not
+# resolve takes the whole batch with it, and a half-imported set looks exactly
+# like a stale image. Ours are load-bearing and fail the cycle; a base image
+# that will not import is reported and left to be pulled.
+TARBALL=/var/tmp/bitswan-image.tar
+trap 'sudo rm -f "$TARBALL"' EXIT
+import_failures=0
+for image in "${present[@]}"; do
+  sudo rm -f "$TARBALL"
+  if sudo docker save -o "$TARBALL" "$image" &&
+     sudo k3s ctr images import --digests=false "$TARBALL" >/dev/null 2>&1; then
+    continue
+  fi
+  echo "IMPORT_FAILED $image"
+  case "$image" in
+    bitswan/automation-server:dev|bitswan/infra-driver-k8s:dev|bitswan/*-dev:latest)
+      echo "that image is the one under test; refusing to run against whatever containerd already had" >&2
+      exit 1
+      ;;
+  esac
+  import_failures=$((import_failures + 1))
+done
+echo "IMPORTED $(( ${#present[@]} - import_failures )) of ${#present[@]}"
 
 bash e2e/k8s/bringup-k8s.sh
 
