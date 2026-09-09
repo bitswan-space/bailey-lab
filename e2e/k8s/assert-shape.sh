@@ -43,15 +43,15 @@ for p in json.load(sys.stdin)["items"]:
     spec=p["spec"]
     name=p["metadata"]["name"]
     for key in ("hostNetwork","hostPID","hostIPC"):
-        if spec.get(key): bad.append(f"{name}: {key}")
+        if spec.get(key): bad.append(name + ": " + key)
     for v in spec.get("volumes") or []:
         hp=(v.get("hostPath") or {}).get("path","")
-        if hp: bad.append(f"{name}: hostPath {hp}")
+        if hp: bad.append(name + ": hostPath " + hp)
     for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
         sc=c.get("securityContext") or {}
-        if sc.get("privileged"): bad.append(f"{name}/{c[\"name\"]}: privileged")
+        if sc.get("privileged"): bad.append(name + "/" + c["name"] + ": privileged")
         for port in c.get("ports") or []:
-            if port.get("hostPort"): bad.append(f"{name}/{c[\"name\"]}: hostPort")
+            if port.get("hostPort"): bad.append(name + "/" + c["name"] + ": hostPort")
 print("\n".join(bad))')
 if [ -n "$priv" ]; then
   fail "privileged or host-bound workloads:"$'\n'"$priv"
@@ -67,7 +67,7 @@ bad=[]
 for p in json.load(sys.stdin)["items"]:
     for c in p["spec"].get("containers") or []:
         add=((c.get("securityContext") or {}).get("capabilities") or {}).get("add") or []
-        if add: bad.append(f"{p[\"metadata\"][\"name\"]}/{c[\"name\"]}: {add}")
+        if add: bad.append(p["metadata"]["name"] + "/" + c["name"] + ": " + str(add))
 print("\n".join(bad))')
 if [ -n "$caps" ]; then
   fail "app containers hold capabilities:"$'\n'"$caps"
@@ -130,7 +130,11 @@ target=$($KUBECTL -n "$NS" get pods -l gitops.bp -o name 2>/dev/null |
 if [ -z "$proxy" ] || [ -z "$target" ]; then
   fail "no firewall proxy or no firewalled workload to test through"
 else
-  probe_host="egress-probe.invalid"
+  # A name that resolves, deliberately. The interception is a destination
+  # rewrite, so the client has to get as far as opening a connection — a name
+  # that does not resolve produces no packet and the check would fail whether
+  # or not the firewall works.
+  probe_host="${E2E_EGRESS_PROBE_HOST:-example.com}"
   $KUBECTL -n "$NS" exec "$target" -- sh -c \
     "wget -q -T 4 -O /dev/null https://$probe_host/ 2>/dev/null || true" >/dev/null 2>&1
   sleep 3
