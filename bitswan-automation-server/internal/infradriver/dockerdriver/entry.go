@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
 )
 
 // fwGroup is one active/inactive egress-firewall group keyed by (ctx, stage, slot).
@@ -852,24 +853,8 @@ func (c *compileState) copyS3Coordinates(env map[string]interface{}, realm strin
 	}
 }
 
-// resolveServiceSecrets ports _resolve_service_secrets. Preserves TOML
-// declaration order — the env_file order it produces is observable.
 func (c *compileState) resolveServiceSecrets(cfg automationConfig, stage string) []string {
-	if !cfg.HasServices() {
-		return nil
-	}
-	mapped := stageForDeployment(stage)
-	var out []string
-	for _, svc := range cfg.Services {
-		if !svc.Enabled {
-			continue
-		}
-		if !isKnownInfraType(svc.Type) {
-			continue // unknown service type
-		}
-		out = append(out, infraServiceSecretsName(svc.Type, mapped))
-	}
-	return out
+	return core.ResolveServiceSecrets(cfg, stage)
 }
 
 // emitGateways ports the egress-gateway emission block. One gateway service per

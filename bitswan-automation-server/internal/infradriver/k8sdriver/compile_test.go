@@ -374,3 +374,77 @@ func asSlice(v interface{}) []interface{} {
 	s, _ := v.([]interface{})
 	return s
 }
+
+// TestEveryEnvFromExists is referential integrity for the credentials: a
+// workload that names a Secret which was not created starts with none of its
+// environment — no database URL, no bucket key — and fails at its first query
+// rather than at apply, which is far from where the mistake is.
+func TestEveryEnvFromExists(t *testing.T) {
+	for _, name := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			objs, _, _ := compileScenario(t, name)
+			secrets := map[string]bool{}
+			for _, o := range objs {
+				if kindOf(o) == "Secret" {
+					secrets[nameOf(o)] = true
+				}
+			}
+			for _, o := range objs {
+				spec := podSpecOf(o)
+				if spec == nil {
+					continue
+				}
+				for _, c := range asSlice(spec["containers"]) {
+					cm, _ := c.(map[string]interface{})
+					for _, ef := range asSlice(cm["envFrom"]) {
+						efm, _ := ef.(map[string]interface{})
+						ref, _ := efm["secretRef"].(map[string]interface{})
+						n, _ := ref["name"].(string)
+						if !secrets[n] {
+							t.Errorf("%s %q reads env from Secret %q, which this compile does not create",
+								kindOf(o), nameOf(o), n)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestAScopedBackendGetsItsCredentials states the point of the whole
+// credentials pass: a process with a database of its own must actually be told
+// how to reach it.
+//
+// Frontends are excluded, and deliberately: they carry the resource names for
+// display but never the credentials, because a frontend is served to a browser
+// and the code that talks to the database is behind it. The Docker compiler
+// draws the line in the same place.
+func TestAScopedBackendGetsItsCredentials(t *testing.T) {
+	for _, name := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			objs, _, _ := compileScenario(t, name)
+			for _, o := range objs {
+				spec := podSpecOf(o)
+				if spec == nil || labelsOf(o)["gitops.intended_exposed"] == "true" {
+					continue
+				}
+				for _, c := range asSlice(spec["containers"]) {
+					cm, _ := c.(map[string]interface{})
+					scoped := false
+					for _, e := range asSlice(cm["env"]) {
+						em, _ := e.(map[string]interface{})
+						if n, _ := em["name"].(string); n == "POSTGRES_DB" {
+							if v, _ := em["value"].(string); v != "" {
+								scoped = true
+							}
+						}
+					}
+					if scoped && len(asSlice(cm["envFrom"])) == 0 {
+						t.Errorf("%s %q names a database of its own but is given no credentials for it",
+							kindOf(o), nameOf(o))
+					}
+				}
+			}
+		})
+	}
+}

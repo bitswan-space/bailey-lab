@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"crypto/aes"
@@ -31,9 +31,9 @@ const (
 // silently unreadable to gitops. Hand everything the driver creates here to
 // the gitops user.
 
-// bpSecretEnvFilePath is <secrets>/bp/<slug>/<realm> (bp_secrets.env_file_path).
-func bpSecretEnvFilePath(secretsDir, bp, stage string) string {
-	return filepath.Join(secretsDir, "bp", sanitizeAutomationName(bp), realmForStage(stage))
+// BPSecretEnvFilePath is <secrets>/bp/<slug>/<realm> (bp_secrets.env_file_path).
+func BPSecretEnvFilePath(secretsDir, bp, stage string) string {
+	return filepath.Join(secretsDir, "bp", SanitizeAutomationName(bp), RealmForStage(stage))
 }
 
 // loadAESKey reads (or creates) the workspace-local AES key on the secrets
@@ -57,13 +57,13 @@ func loadAESKey(secretsDir string) ([]byte, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return nil, err
 	}
-	ownForGitops(secretsDir, path)
+	OwnForGitops(secretsDir, path)
 	return key, nil
 }
 
-// decryptSecrets decrypts a base64(nonce + GCM ciphertext) blob to {KEY: value}
+// DecryptSecrets decrypts a base64(nonce + GCM ciphertext) blob to {KEY: value}
 // (bp_secrets.decrypt_secrets). Returns nil if the blob is unreadable.
-func decryptSecrets(secretsDir, blob string) map[string]string {
+func DecryptSecrets(secretsDir, blob string) map[string]string {
 	if blob == "" {
 		return nil
 	}
@@ -98,14 +98,14 @@ func decryptSecrets(secretsDir, blob string) map[string]string {
 	return out
 }
 
-// materializeEnv (re)writes the stage's plaintext env file from decrypted
+// MaterializeEnv (re)writes the stage's plaintext env file from decrypted
 // values (non-empty only) and returns its path (bp_secrets.materialize_env).
-func materializeEnv(secretsDir, bp, stage string, values map[string]string) (string, error) {
-	path := bpSecretEnvFilePath(secretsDir, bp, stage)
+func MaterializeEnv(secretsDir, bp, stage string, values map[string]string) (string, error) {
+	path := BPSecretEnvFilePath(secretsDir, bp, stage)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	ownForGitops(filepath.Join(secretsDir, "bp"), filepath.Dir(path))
+	OwnForGitops(filepath.Join(secretsDir, "bp"), filepath.Dir(path))
 	keys := make([]string, 0, len(values))
 	for k := range values {
 		keys = append(keys, k)
@@ -128,18 +128,18 @@ func materializeEnv(secretsDir, bp, stage string, values map[string]string) (str
 	if err := os.Rename(tmp, path); err != nil {
 		return "", err
 	}
-	ownForGitops(path)
+	OwnForGitops(path)
 	return path, nil
 }
 
-// secretsContentHash is a stable digest of the NON-EMPTY, sorted KEY=VALUE
+// SecretsContentHash is a stable digest of the NON-EMPTY, sorted KEY=VALUE
 // content materialized into the env file — identical inputs → identical hash.
 // It is folded into a service label so a secret-only change (same image, same
 // env_file path) still changes the service config and `docker compose up`
 // recreates the container; without it compose keys recreation off the config
 // alone and never reloads changed env_file CONTENTS. Empty ⇒ "" (no label, so
 // secret-less services never churn).
-func secretsContentHash(values map[string]string) string {
+func SecretsContentHash(values map[string]string) string {
 	if len(values) == 0 {
 		return ""
 	}
@@ -177,4 +177,46 @@ func stringify(v interface{}) string {
 		b, _ := json.Marshal(t)
 		return string(b)
 	}
+}
+
+// ServiceSuffix is what a non-production realm adds to an infra service's name.
+func ServiceSuffix(stage string) string {
+	if stage == "production" || stage == "" {
+		return ""
+	}
+	return "-" + stage
+}
+
+// InfraServiceSecretsName is the secrets file a declared service dependency
+// contributes to a workload's environment.
+func InfraServiceSecretsName(svcType, stage string) string {
+	return svcType + ServiceSuffix(stage)
+}
+
+// IsKnownInfraType reports whether a declared service is one a driver can
+// actually stand up.
+func IsKnownInfraType(svcType string) bool {
+	switch svcType {
+	case "couchdb", "garage", "postgres", "kafka":
+		return true
+	}
+	return false
+}
+
+// ResolveServiceSecrets is the secrets files a workload's declared service
+// dependencies contribute, in declaration order — the order is observable,
+// because a later file overrides an earlier one.
+func ResolveServiceSecrets(cfg AutomationConfig, stage string) []string {
+	if !cfg.HasServices() {
+		return nil
+	}
+	mapped := StageForDeployment(stage)
+	var out []string
+	for _, svc := range cfg.Services {
+		if !svc.Enabled || !IsKnownInfraType(svc.Type) {
+			continue
+		}
+		out = append(out, InfraServiceSecretsName(svc.Type, mapped))
+	}
+	return out
 }

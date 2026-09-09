@@ -98,6 +98,10 @@ var (
 	scopedROPGRole        = core.ScopedROPGRole
 	readEnvFile           = core.ReadEnvFile
 	readBucketCreds       = core.ReadBucketCreds
+	bpSecretEnvFilePath   = core.BPSecretEnvFilePath
+	decryptSecrets        = core.DecryptSecrets
+	materializeEnv        = core.MaterializeEnv
+	secretsContentHash    = core.SecretsContentHash
 	writeBucketCreds      = core.WriteBucketCreds
 )
 

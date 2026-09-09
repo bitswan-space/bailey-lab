@@ -160,13 +160,14 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 		// ingress flip is what cuts over — so both have to exist at once.
 		for _, sd := range core.SlotDBPairs(c.bs, conf) {
 			slotConf := core.EffectiveSlotConf(id, conf, sd.Slot, c.bs.Deployments)
-			w, route, emit, err := c.workload(id, slotConf, sd.Slot)
+			w, extra, route, emit, err := c.workload(id, slotConf, sd.Slot, sd.DB)
 			if err != nil {
 				return nil, nil, err
 			}
 			if !emit {
 				continue
 			}
+			objs = append(objs, extra...)
 			objs = append(objs, k8srender.Deployment(w)...)
 			if route != nil {
 				routes = append(routes, *route)
@@ -196,11 +197,11 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 // workload renders one automation. The bool reports whether it should be
 // emitted at all: a live-dev deployment with nothing to run is skipped rather
 // than being an error, exactly as the Docker compiler skips it.
-func (c *compileState) workload(depID string, conf *core.Deployment, slot string) (k8srender.Workload, *infradriver.Route, bool, error) {
+func (c *compileState) workload(depID string, conf *core.Deployment, slot string, db int) (k8srender.Workload, k8srender.ObjectSet, *infradriver.Route, bool, error) {
 	stage := conf.StageOrProduction()
 	realm := core.RealmForStage(stage)
 	automation := conf.AutomationNameOr(depID)
-	bpSlug, _ := core.DeriveBPAndCopy(conf.RelativePath)
+	bpSlug, copyName := core.DeriveBPAndCopy(conf.RelativePath)
 	if bpSlug == "" {
 		bpSlug = conf.Context
 	}
@@ -218,11 +219,11 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	// something else's directory into a tenant's pod, so the same lexical
 	// containment the Docker compiler applies to its bind sources applies here.
 	if _, err := core.ContainedJoin(c.ctx.GitopsDir, source); err != nil {
-		return k8srender.Workload{}, nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+		return k8srender.Workload{}, nil, nil, false, fmt.Errorf("deployment %s: %w", depID, err)
 	}
 	if rel != "" {
 		if _, err := core.ContainedJoin(c.workspaceRepo(), rel); err != nil {
-			return k8srender.Workload{}, nil, false, fmt.Errorf("deployment %s: %w", depID, err)
+			return k8srender.Workload{}, nil, nil, false, fmt.Errorf("deployment %s: %w", depID, err)
 		}
 	}
 
@@ -230,9 +231,9 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 
 	switch {
 	case stage == "live-dev" && cfg.Image == "":
-		return k8srender.Workload{}, nil, false, nil
+		return k8srender.Workload{}, nil, nil, false, nil
 	case stage == "live-dev" && rel == "":
-		return k8srender.Workload{}, nil, false, fmt.Errorf("live-dev deployment %s is missing relative_path", depID)
+		return k8srender.Workload{}, nil, nil, false, fmt.Errorf("live-dev deployment %s is missing relative_path", depID)
 	}
 
 	// The image, and where the code inside it comes from. Three cases, the same
@@ -262,10 +263,10 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		})
 	}
 	if image == "" {
-		return k8srender.Workload{}, nil, false, fmt.Errorf("deployment %s has no image to run", depID)
+		return k8srender.Workload{}, nil, nil, false, fmt.Errorf("deployment %s has no image to run", depID)
 	}
 	if len(mounts) > 0 && c.volumeClaim() == "" {
-		return k8srender.Workload{}, nil, false, fmt.Errorf(
+		return k8srender.Workload{}, nil, nil, false, fmt.Errorf(
 			"deployment %s needs its source mounted but no workspace volume claim is configured", depID)
 	}
 
@@ -298,6 +299,27 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	// replicated on Kubernetes and cannot on Docker.
 	env["BITSWAN_WORKER_HOSTS"] = c.workerHosts(conf, bpSlug, stage, slot)
 
+	// What this process authenticates as, and where it finds what it talks to.
+	resources := c.resourceNames(bpSlug, copyName, stage, db)
+	for envName, key := range map[string]string{
+		"POSTGRES_DB":       "postgres_db",
+		"COUCHDB_DB_PREFIX": "couchdb_prefix",
+		"S3_BUCKET":         "s3_bucket",
+	} {
+		if v := resources[key]; v != "" {
+			env[envName] = v
+		}
+	}
+	secretContent, inline := c.credentials(conf, cfg, bpSlug, stage, resources)
+	for k, v := range inline {
+		env[k] = v
+	}
+	secretName, extra := credentialSecret(svcName, secretContent)
+	var envFrom []string
+	if secretName != "" {
+		envFrom = append(envFrom, secretName)
+	}
+
 	w := k8srender.Workload{
 		Name:          svcName,
 		ContainerName: svcName,
@@ -308,6 +330,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		Mounts:        mounts,
 		Replicas:      conf.ReplicasOrOne(),
 		Env:           env,
+		EnvFrom:       envFrom,
 		Ports:         []k8srender.Port{{Name: "app", Port: port}},
 		Labels: map[string]string{
 			"gitops.automation_name": automation,
@@ -344,7 +367,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	}
 
 	if !cfg.Expose {
-		return w, nil, true, nil
+		return w, extra, nil, true, nil
 	}
 
 	// Which slot answers on the public name. The live one serves the stage's
@@ -359,7 +382,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	}
 	if !isLive && !isDR {
 		w.Labels["gitops.intended_exposed"] = "false"
-		return w, nil, true, nil
+		return w, extra, nil, true, nil
 	}
 	w.Labels["gitops.intended_exposed"] = "true"
 
@@ -370,7 +393,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		ParentEndpoint: c.workspace + "-dashboard." + c.domain,
 		Kind:           "frontend",
 	}
-	return w, route, true, nil
+	return w, extra, route, true, nil
 }
 
 // workspaceRepo is where a live-dev deployment's working tree is read from, the
