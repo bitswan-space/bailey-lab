@@ -34,6 +34,16 @@ else
   pass "no docker daemon"
 fi
 
+echo "=== what PodSecurity is actually enforcing ==="
+# Reported, not asserted. Baseline rejects NET_ADMIN, which the egress
+# firewall's rule installer needs, and rejects the unconfined seccomp profile
+# rootless buildkit needs — so a namespace that both builds images and enforces
+# its own egress cannot carry that label, and there is no level between. The
+# checks below are what actually holds the line; this line exists so nobody
+# reads "baseline" somewhere and believes the API server is enforcing it.
+level=$($KUBECTL get ns "$NS" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)
+echo "note: PodSecurity enforce=${level:-<unset>} on $NS — the assertions below, not this label, are the guarantee"
+
 echo "=== nothing in the namespace is privileged or holds a socket ==="
 priv=$($KUBECTL -n "$NS" get pods -o json |
   python3 -c '

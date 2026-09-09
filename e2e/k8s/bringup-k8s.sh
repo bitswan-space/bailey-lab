@@ -83,10 +83,24 @@ if [ "${E2E_K8S_RESET:-1}" = "1" ]; then
 fi
 
 echo "=== [1/5] namespace ${NAMESPACE} ==="
-# Command one of the two. The label is part of it: the egress firewall's rule
-# installer needs NET_ADMIN, which PodSecurity's restricted profile forbids.
+# Command one of the two.
+#
+# The PodSecurity level is not baseline, and saying so is the honest version.
+# Baseline permits adding only the default capability set, so it rejects
+# NET_ADMIN — which the egress firewall's rule installer needs in order to write
+# a pod's egress rules at all. Baseline also rejects the unconfined seccomp
+# profile rootless buildkit needs. There is no "baseline plus one capability"
+# level to ask for, so a namespace that both builds images and enforces its own
+# egress cannot be labelled baseline, and pretending otherwise would make the
+# label the claim rather than the enforcement.
+#
+# What actually holds the line is asserted instead of labelled: the compiler
+# refuses to render a host namespace, a host path, a host port or a privileged
+# container, a test proves that over every scenario, and assert-shape.sh proves
+# it again against the running namespace — including that NET_ADMIN exists in
+# exactly one init container and nowhere a tenant process can reach.
 $KUBECTL create namespace "$NAMESPACE" --dry-run=client -o yaml | $KUBECTL apply -f -
-$KUBECTL label --overwrite namespace "$NAMESPACE" pod-security.kubernetes.io/enforce=baseline
+$KUBECTL label --overwrite namespace "$NAMESPACE" pod-security.kubernetes.io/enforce=privileged
 mark "k8s: namespace"
 
 echo "=== [2/5] harness: keycloak (seeded realm) + otlp collector ==="
@@ -94,7 +108,7 @@ export REALM_JSON_INDENTED="$(sed 's/^/    /' "$REPO_ROOT/e2e/keycloak/realm-exp
 export OTEL_CONFIG_INDENTED="$(sed 's/^/    /' "$REPO_ROOT/e2e/otel/collector-config.yaml")"
 # Keycloak goes in its own namespace: it needs a hostPort so the browser and
 # every pod reach the issuer at the same url, and hostPort is forbidden by the
-# baseline profile the Bailey's namespace enforces. The collector stays in the
+# baseline profile that namespace enforces. The collector stays in the
 # Bailey's namespace, where the walkthrough's bare-name endpoint resolves.
 $KUBECTL create namespace "$HARNESS_NAMESPACE" --dry-run=client -o yaml | $KUBECTL apply -f -
 envsubst "$SUBST" < "$HERE/keycloak.yaml.template" | $KUBECTL -n "$HARNESS_NAMESPACE" apply -f -
@@ -104,11 +118,10 @@ $KUBECTL -n "$NAMESPACE" rollout status deploy/bitswan-e2e-otel --timeout=180s
 mark "k8s: harness (keycloak + otel)"
 
 echo "=== [2b/5] the builder and the registry ==="
-# PodSecurity has to allow more than baseline here: a builder in the namespace
-# needs an unconfined seccomp profile (rootless) or privileged (not), and
-# baseline permits neither. A cluster that enforces baseline has to build
-# elsewhere — recorded rather than worked around.
-$KUBECTL label --overwrite namespace "$NAMESPACE" pod-security.kubernetes.io/enforce=privileged
+# The builder is the second reason the namespace cannot be baseline (see the
+# namespace above): rootless buildkit needs an unconfined seccomp profile, and
+# baseline permits neither that nor privileged. A cluster that insists on
+# baseline has to build elsewhere — recorded rather than worked around.
 envsubst "$SUBST" < "$HERE/build.yaml.template" | $KUBECTL -n "$NAMESPACE" apply -f -
 $KUBECTL -n "$NAMESPACE" rollout status deploy/bitswan-registry --timeout=300s
 $KUBECTL -n "$NAMESPACE" rollout status deploy/bitswan-buildkit --timeout=300s
