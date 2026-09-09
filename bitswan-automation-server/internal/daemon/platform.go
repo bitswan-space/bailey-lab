@@ -37,15 +37,18 @@ var (
 // permission to register routes WITHOUT it — so a detected platform would turn a
 // missing socket into publicly reachable, unauthenticated workspace endpoints.
 func currentPlatform() platform {
-	platformOnce.Do(func() {
-		switch strings.ToLower(strings.TrimSpace(os.Getenv(platformEnv))) {
-		case "kubernetes", "k8s":
-			resolvedPlatform = platformKubernetes
-		default:
-			resolvedPlatform = platformDocker
-		}
-	})
+	platformOnce.Do(func() { resolvedPlatform = parsePlatform(os.Getenv(platformEnv)) })
 	return resolvedPlatform
+}
+
+// parsePlatform is the reading itself, separate from the caching so it can be
+// exercised without the process having to be one platform for its whole life.
+func parsePlatform(v string) platform {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "kubernetes", "k8s":
+		return platformKubernetes
+	}
+	return platformDocker
 }
 
 func onKubernetes() bool { return currentPlatform() == platformKubernetes }
@@ -101,7 +104,9 @@ func protectedProxyAvailable() bool {
 // same pod as this daemon and is never legitimately absent, so its absence is a
 // fault: registering the route anyway would publish a workspace endpoint with no
 // authentication in front of it.
-func mustWrapRoutes() bool { return onKubernetes() }
+func mustWrapRoutes() bool { return wrapRequiredOn(currentPlatform()) }
+
+func wrapRequiredOn(p platform) bool { return p == platformKubernetes }
 
 // workspaceIngressUpstream is the per-workspace Traefik. The Docker name
 // contains a double underscore, which is not a legal DNS label, so the

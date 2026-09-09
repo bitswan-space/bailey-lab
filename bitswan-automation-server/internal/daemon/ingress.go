@@ -1160,6 +1160,14 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 	//     404 every outer host (gitops, dashboard, frontends) until its next
 	//     deploy.
 	wrapAvailable := protectedProxyAvailable()
+	if !wrapAvailable && mustWrapRoutes() {
+		// Restoring the outer host without the wrap would republish every one
+		// of this workspace's endpoints unauthenticated. Leaving them 404 until
+		// the proxy answers is the safe half of the choice, and saying so is
+		// what stops it looking like the re-push simply did nothing.
+		fmt.Printf("Warning: the authentication proxy is not answering — "+
+			"%s's outer routes are left unpublished rather than published unwrapped.\n", workspaceName)
+	}
 	for _, r := range routes {
 		if r.Upstream == "" {
 			continue
@@ -1169,7 +1177,7 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 			continue
 		}
 		_ = traefikapi.AddRouteWithTraefik(toInnerHost(r.Hostname), r.Upstream, subURL)
-		if !wrapAvailable {
+		if !wrapAvailable && !mustWrapRoutes() {
 			_ = traefikapi.AddRouteWithTraefik(toOuterHost(r.Hostname), r.Upstream, subURL)
 		}
 	}
@@ -1249,6 +1257,16 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 	}
 
 	wrapAvailable := protectedProxyAvailable()
+	if !wrapAvailable && mustWrapRoutes() {
+		// Every branch below that runs without the wrap publishes the outer
+		// hostname straight at the workload. On Docker that is the single-tier
+		// install and is meant. In a namespace the proxy is a container of this
+		// same pod and is never legitimately absent, so publishing anyway would
+		// put a workspace endpoint on the internet with no authentication in
+		// front of it — a fault worth failing on, not degrading through.
+		return fmt.Errorf(
+			"the authentication proxy is not answering; refusing to publish %s without it", outer)
+	}
 	if wrapAvailable && workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
 		// INNER hostname carries the actual app content: route it in
 		// the workspace's own traefik and through the auth chain in
