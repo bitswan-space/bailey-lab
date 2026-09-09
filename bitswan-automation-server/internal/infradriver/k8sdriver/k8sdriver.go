@@ -68,18 +68,6 @@ func (d *K8sDriver) notYet(what string) error {
 	return fmt.Errorf("%s is not implemented by the kubernetes driver yet", what)
 }
 
-func (d *K8sDriver) ImageList(ctx context.Context, req infradriver.WorkspaceContext) ([]infradriver.Image, error) {
-	return nil, d.notYet("listing images")
-}
-
-func (d *K8sDriver) ImageRemove(ctx context.Context, req infradriver.WorkspaceContext, tag string) error {
-	return d.notYet("removing images")
-}
-
-func (d *K8sDriver) ImageSBOM(ctx context.Context, req infradriver.WorkspaceContext, tag string) ([]byte, error) {
-	return nil, d.notYet("scanning images")
-}
-
 func (d *K8sDriver) ContainerCopyOut(ctx context.Context, req infradriver.WorkspaceContext, container, srcPath string) (io.ReadCloser, error) {
 	return nil, d.notYet("copying out of a container")
 }
