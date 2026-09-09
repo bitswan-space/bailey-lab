@@ -39,6 +39,7 @@ BASE_IMAGES=(
   node:24-alpine
   golang:1.25-alpine
   bitswan/pipeline-runtime-environment:latest
+  busybox:1.36
 )
 for image in registry:2 moby/buildkit:v0.19.0-rootless "${BASE_IMAGES[@]}"; do
   sudo docker image inspect "$image" >/dev/null 2>&1 || sudo docker pull -q "$image" >/dev/null || true

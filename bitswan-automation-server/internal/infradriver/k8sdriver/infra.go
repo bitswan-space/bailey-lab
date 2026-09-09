@@ -123,6 +123,7 @@ func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
 		},
 		"volumeMounts": []interface{}{
 			map[string]interface{}{"name": "data", "mountPath": s.MountPath, "subPath": s.SubPath},
+			map[string]interface{}{"name": "tools", "mountPath": toolsDir},
 		},
 	}
 	if len(s.Command) > 0 {
@@ -156,7 +157,25 @@ func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
 				"metadata": map[string]interface{}{"labels": s.Labels},
 				"spec": map[string]interface{}{
 					"automountServiceAccountToken": false,
-					"containers":                   []interface{}{container},
+					// A snapshot has to read bytes out of these, and `docker cp` has
+					// no counterpart here: kubectl's copy is exec plus tar, and
+					// neither Garage's static binary nor a slim database image ships
+					// one. A static busybox is staged into a volume of its own, where
+					// it shadows nothing in the image.
+					"initContainers": []interface{}{
+						map[string]interface{}{
+							"name":    "stage-tools",
+							"image":   imageOr("BITSWAN_TOOLS_IMAGE", "busybox:1.36"),
+							"command": []interface{}{"cp", "/bin/busybox", toolsDir + "/busybox"},
+							"volumeMounts": []interface{}{
+								map[string]interface{}{"name": "tools", "mountPath": toolsDir},
+							},
+						},
+					},
+					"containers": []interface{}{container},
+					"volumes": []interface{}{
+						map[string]interface{}{"name": "tools", "emptyDir": map[string]interface{}{}},
+					},
 				},
 			},
 			// The claim belongs to the object, so replacing the workload keeps

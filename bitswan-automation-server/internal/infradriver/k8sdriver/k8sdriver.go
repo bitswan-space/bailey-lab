@@ -17,7 +17,6 @@ package k8sdriver
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -62,16 +61,4 @@ func (d *K8sDriver) Apply(ctx context.Context, req infradriver.ApplyRequest, pro
 		}
 	}
 	return d.apply(ctx, req, report)
-}
-
-func (d *K8sDriver) notYet(what string) error {
-	return fmt.Errorf("%s is not implemented by the kubernetes driver yet", what)
-}
-
-func (d *K8sDriver) ContainerCopyOut(ctx context.Context, req infradriver.WorkspaceContext, container, srcPath string) (io.ReadCloser, error) {
-	return nil, d.notYet("copying out of a container")
-}
-
-func (d *K8sDriver) ContainerCopyIn(ctx context.Context, req infradriver.WorkspaceContext, container, dstPath string, r io.Reader) error {
-	return d.notYet("copying into a container")
 }
