@@ -5,7 +5,8 @@
 # needed to nest quotes that deep has broken this three times, each time in a way
 # that looked like a product failure — a grep pattern that became a filename, a
 # verification that never ran, a launch that never happened.
-set -euo pipefail
+set -uo pipefail
+set -e
 export PATH="$PATH:/usr/local/go/bin"
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -100,5 +101,17 @@ bash e2e/k8s/bringup-k8s.sh
 
 cd e2e
 rm -rf test-results
+set +e
 npx playwright test --reporter=list
+suite=$?
+
+# The browser saw the product work. This sees whether the namespace it worked in
+# is one anybody should accept — a green walkthrough is necessary and not
+# sufficient, so both have to pass.
+cd ..
+bash e2e/k8s/assert-shape.sh
+shape=$?
+set -e
+
+exit $(( suite || shape ))
 
