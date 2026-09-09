@@ -30,7 +30,10 @@ IMAGES=(
 echo "=== the automation server as a self-contained image ==="
 # The runtime image ships without the binary (a Docker host bind-mounts it); a
 # pod has no host, so it is baked in and the tag names the version.
-( cd bitswan-automation-server && go build -o bitswan . \
+# `make console` first: the Server Console SPA is embedded into the binary with
+# go:embed, and without it the gate serves an empty console — which looks exactly
+# like a broken iframe rather than a missing build step.
+( cd bitswan-automation-server && make console && go build -o bitswan . \
   && sudo docker build -q -f Dockerfile.k8s -t bitswan/automation-server:dev . )
 mark "k8s: build the automation-server image"
 
