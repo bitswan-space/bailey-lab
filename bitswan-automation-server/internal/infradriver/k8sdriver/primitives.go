@@ -686,3 +686,23 @@ func (d *K8sDriver) secretValues(ctx context.Context, name string) map[string]st
 	}
 	return out
 }
+
+// workloadWanted reports whether something in this namespace is declared to run
+// under this container's name, whatever its pods are doing at the moment.
+func (d *K8sDriver) workloadWanted(ctx context.Context, container string) bool {
+	selector := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
+		"," + k8srender.ContainerNameLabel + "=" + k8srender.LabelValue(container)
+	for _, kind := range []string{"statefulset", "deployment"} {
+		out, err := d.kubectl(ctx, "get", kind, "-l", selector, "-o",
+			"jsonpath={range .items[*]}{.spec.replicas}{\"\\n\"}{end}")
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if n, err := strconv.Atoi(strings.TrimSpace(line)); err == nil && n > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}

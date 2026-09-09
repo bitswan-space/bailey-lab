@@ -39,9 +39,22 @@ func (e execer) Exec(ctx context.Context, container string, args ...string) (str
 	return stdout.String(), stderr.String(), rc
 }
 
+// Running reports whether the service is up or on its way.
+//
+// On Docker a container exists the instant compose returns, so "is it running"
+// and "was it asked for" are the same question. Here they are seconds apart,
+// and the provisioner uses this as a gate before a step that has its own
+// readiness wait inside it — so answering "no" for a workload the same apply
+// just created skips provisioning entirely and leaves a business process
+// without the bucket it was about to be given.
+//
+// So a declared workload with at least one desired replica counts, and the
+// waiting is left to the step that knows how long it is willing to wait.
 func (e execer) Running(ctx context.Context, container string) bool {
-	t, err := e.d.target(ctx, container)
-	return err == nil && t.state == "running"
+	if t, err := e.d.target(ctx, container); err == nil {
+		return t.state == "running"
+	}
+	return e.d.workloadWanted(ctx, container)
 }
 
 // WaitReady blocks until the container's own readiness probe passes.
