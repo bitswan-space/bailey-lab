@@ -103,9 +103,15 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			// namespace there is no host path to fall back to, and the driver
 			// renders volume mounts itself, so it is left unset.
 			"BITSWAN_GITOPS_AGENT_SECRET": cfg.CodingAgentSecret,
-			"BITSWAN_INFRA_DRIVER_URL":    "http://" + ws + "-infra-driver:9090",
-			"BITSWAN_INFRA_DRIVER_TOKEN":  cfg.InfraDriverToken,
-			"BITSWAN_DEPLOY_REMOTE_BASE":  "http://x:" + cfg.InfraDriverToken + "@" + ws + "-infra-driver:9090/deploy-repos",
+			// There is no socket to reach the daemon by from another pod, and
+			// gitops asks it who a person is before showing them anything an
+			// auditor may do. Without this it resolves the Docker-era hostname,
+			// fails, and every role comes back unprivileged.
+			"BITSWAN_INGRESS_URL":        cfg.IngressURL,
+			"BITSWAN_INGRESS_TOKEN":      os.Getenv(workspaceAPITokenEnv),
+			"BITSWAN_INFRA_DRIVER_URL":   "http://" + ws + "-infra-driver:9090",
+			"BITSWAN_INFRA_DRIVER_TOKEN": cfg.InfraDriverToken,
+			"BITSWAN_DEPLOY_REMOTE_BASE": "http://x:" + cfg.InfraDriverToken + "@" + ws + "-infra-driver:9090/deploy-repos",
 		},
 		Mounts: []k8srender.Mount{
 			{Path: "/gitops/gitops", SubPath: sub("gitops")},

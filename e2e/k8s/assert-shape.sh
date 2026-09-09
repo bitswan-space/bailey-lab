@@ -25,13 +25,27 @@ check() {
   if "$@" >/dev/null 2>&1; then pass "$what"; else fail "$what"; fi
 }
 
-echo "=== the host runs no container engine of its own ==="
-# Load-bearing: if docker is present, something may have quietly used it and the
-# run would prove nothing about a Kubernetes-only install.
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  fail "a working docker daemon is reachable from the test host"
+echo "=== nothing in the namespace can reach a container runtime ==="
+# The guest does run docker, and that is not the question: it is how the images
+# this cycle builds get into containerd, the way a CI runner builds them. The
+# question is whether anything the Bailey runs can reach a runtime — which is
+# what the Docker install's whole trust model rests on and what this one is
+# supposed to replace. A socket would arrive as a host path, so it is the mount
+# that is checked, not the binary.
+sockets=$($KUBECTL -n "$NS" get pods -o json |
+  python3 -c '
+import json,sys
+bad=[]
+for p in json.load(sys.stdin)["items"]:
+    for v in p["spec"].get("volumes") or []:
+        path=(v.get("hostPath") or {}).get("path","")
+        if "docker.sock" in path or "containerd" in path or "crio" in path:
+            bad.append(p["metadata"]["name"] + ": " + path)
+print("\n".join(bad))')
+if [ -n "$sockets" ]; then
+  fail "pods holding a container runtime socket:"$'\n'"$sockets"
 else
-  pass "no docker daemon"
+  pass "no pod mounts a container runtime socket"
 fi
 
 echo "=== what PodSecurity is actually enforcing ==="
