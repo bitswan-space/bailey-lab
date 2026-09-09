@@ -56,7 +56,13 @@ for image in \
   "${BASE_IMAGES[@]}"; do
   sudo docker image inspect "$image" >/dev/null 2>&1 && present+=("$image")
 done
-sudo docker save "${present[@]}" | sudo k3s ctr images import --digests=false - >/dev/null
+# Through a file rather than a pipe: a multi-image stream large enough to
+# matter has failed the import mid-way with "content digest not found", and a
+# half-imported set is worse than a slow one.
+TARBALL=$(mktemp /var/tmp/bitswan-images-XXXXXX.tar)
+trap 'rm -f "$TARBALL"' EXIT
+sudo docker save -o "$TARBALL" "${present[@]}"
+sudo k3s ctr images import --digests=false "$TARBALL" >/dev/null
 echo "IMPORTED ${#present[@]}"
 
 bash e2e/k8s/bringup-k8s.sh
