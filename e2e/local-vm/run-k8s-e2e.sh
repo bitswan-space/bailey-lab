@@ -27,8 +27,20 @@ IMAGES=(
   bitswan/egress-gateway-dev:latest
   bitswan/infra-driver-dev:latest
 )
-sudo docker save "${IMAGES[@]}" | sudo k3s ctr images import --digests=false -
+echo "=== the automation server as a self-contained image ==="
+# The runtime image ships without the binary (a Docker host bind-mounts it); a
+# pod has no host, so it is baked in and the tag names the version.
+( cd bitswan-automation-server && go build -o bitswan . \
+  && sudo docker build -q -f Dockerfile.k8s -t bitswan/automation-server:dev . )
+mark "k8s: build the automation-server image"
+
+sudo docker save "${IMAGES[@]}" bitswan/automation-server:dev \
+  | sudo k3s ctr images import --digests=false -
 mark "k8s: import images into containerd"
+
+echo "=== bring up a Bailey in a namespace ==="
+bash e2e/k8s/bringup-k8s.sh
+mark "k8s: bringup"
 
 sudo k3s ctr images ls -q | grep -c '^docker.io/bitswan/' || true
 kubectl get node -o wide

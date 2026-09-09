@@ -575,12 +575,19 @@ func (s *Server) Run() error {
 	// once now, then resync periodically. Backgrounded so startup never blocks
 	// on Docker; idempotent for anything already running (see
 	// service_reconcile.go).
-	go startServiceReconciler()
-
-	// Own the shared grype vulnerability DB: create its volume now, download it
-	// in the background, and refresh daily. Keeps the ~40s DB download off every
-	// workspace's first interactive CVE scan (see grype_db.go).
-	startGrypeDBRefresher()
+	// These three own Docker objects on the host: sidecar containers, a shared
+	// volume for the vulnerability database, and the read-through build proxies.
+	// A namespace has none of them — its equivalents are declared, not created —
+	// so running them there would only retry and log.
+	//
+	// The grype DB refresher and the build proxies are the same story, and the
+	// backup scheduler is not: its server-state paths are all inside the config
+	// directory, which is the volume this pod already carries, so it runs
+	// everywhere.
+	if !onKubernetes() {
+		go startServiceReconciler()
+		startGrypeDBRefresher()
+	}
 
 	// Nightly server-level backups (whole workspace trees incl. secrets +
 	// DB dumps + server state → one restic repo per server via AOC). Self-
@@ -591,7 +598,9 @@ func (s *Server) Run() error {
 	// Own the shared read-through build proxies (Go module + npm) so per-BP image
 	// builds pull common packages from a warm, persistent, cross-workspace cache
 	// instead of the internet (see build_proxy.go). No-op if externally managed.
-	startBuildProxies()
+	if !onKubernetes() {
+		startBuildProxies()
+	}
 
 	// Re-assert published public endpoints (issue #220): warm the gate's
 	// public-host cache and re-register each public host's traefik route so a

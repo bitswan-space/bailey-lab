@@ -394,6 +394,18 @@ providers:
     network: bitswan_network
 `
 
+	// A namespace has no Docker socket for Traefik to poll, and configuring the
+	// provider anyway means it retries and logs forever. Every route this daemon
+	// manages comes from the file provider in either case; the Docker provider
+	// only ever served the workspace label catch-all, which a namespace expresses
+	// as a Service.
+	if onKubernetes() {
+		cfg = strings.Replace(cfg, `  docker:
+    exposedByDefault: false
+    network: bitswan_network
+`, "", 1)
+	}
+
 	if !mode.usesACME() {
 		// Certificates come from the file-provider TLS store (see
 		// traefikapi.InstallTLSCerts); Traefik picks them by SNI.
@@ -610,6 +622,29 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	// and always succeeds — it can no longer tell whether Traefik is up. If the
 	// config has drifted (e.g. the DNS-01 resolver was just enabled), fall
 	// through and recreate the container.
+	// In a namespace Traefik is a container in this pod, started with the pod:
+	// there is nothing to create and nothing to restart from here. Only the two
+	// config files matter, and the static one is not watched — a change to it
+	// needs the pod replaced, which is reported to the caller rather than done
+	// behind its back.
+	if onKubernetes() {
+		if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0644); err != nil {
+			return false, fmt.Errorf("failed to write traefik.yml: %w", err)
+		}
+		if err := os.WriteFile(traefikConfig+"/dynamic.yml", []byte(traefikDynamicConfig), 0644); err != nil {
+			return false, fmt.Errorf("failed to write traefik dynamic.yml: %w", err)
+		}
+		if err := os.MkdirAll(traefikCertsDir, 0740); err != nil {
+			return false, fmt.Errorf("failed to create ingress certs directory: %w", err)
+		}
+		if err := traefikapi.InitTraefik(); err != nil {
+			return false, fmt.Errorf("failed to init ingress: %w", err)
+		}
+		reconcileTLSMode()
+		warnAboutInstalledCertExpiry()
+		return false, nil
+	}
+
 	if containerRunning("traefik") {
 		currentConfig, _ := os.ReadFile(traefikConfigFilePath)
 		currentCompose, _ := os.ReadFile(traefikDockerComposePath)
