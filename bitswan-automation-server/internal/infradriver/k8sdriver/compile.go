@@ -29,6 +29,14 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		return nil, fmt.Errorf("parse bitswan.yaml: %w", err)
 	}
 
+	// Garage mints its access keys server-side, so they are ensured before the
+	// compile that bakes them into a workload's environment. On the first apply
+	// Garage is not up yet; the compiler writes the placeholder and the
+	// post-apply pass mints for real, exactly as the Docker driver does.
+	x := execer{d: d}
+	report("provision", "Ensuring Garage access keys for scoped backends...")
+	core.EnsureGarageKeysPrecompile(x, ctx, req.Ctx, bs, report)
+
 	c := &compileState{
 		driver:    d,
 		ctx:       req.Ctx,
@@ -59,6 +67,20 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		if err := k8sctl.PruneRetired(ctx, selector, appliedNames(objs)); err != nil {
 			return nil, fmt.Errorf("prune retired workloads: %w", err)
 		}
+	}
+
+	// The database a backend connects to has to exist before the backend gives
+	// up retrying, and the bucket and the standby database have to exist before
+	// a snapshot or a promotion needs them. This is the same provisioning the
+	// Docker driver runs post-up, against the same declaration, differing only
+	// in how a command reaches a container.
+	if len(objs) > 0 {
+		report("provision", "Ensuring live databases for (re)created backends...")
+		if err := core.EnsureLivePostgresDBs(x, ctx, req.Ctx, bs, nil, runningInfos(ctx, d), report); err != nil {
+			return nil, fmt.Errorf("ensure live postgres dbs: %w", err)
+		}
+		report("provision", "Provisioning per-BP namespaces...")
+		core.ProvisionForDeployments(x, ctx, req.Ctx, bs, report)
 	}
 
 	report("ingress", fmt.Sprintf("converging %d route(s)", len(routes)))
@@ -432,4 +454,23 @@ func appliedNames(objs k8srender.ObjectSet) map[string]bool {
 		keep[strings.ToLower(kind)+"/"+name] = true
 	}
 	return keep
+}
+
+// runningInfos is what the provisioner needs to know about what is already up:
+// which deployments have a container, and which of those are running.
+//
+// Every one of them is reported as pre-existing — the nil set the caller passes
+// is the "nothing was just created" case — because on Kubernetes an apply does
+// not tell you which pods it replaced, and the provisioner's guard is
+// idempotent: it creates a database that is missing and leaves one that is not.
+func runningInfos(ctx context.Context, d *K8sDriver) []core.ContainerInfo {
+	pods, err := d.pods(ctx, infradriver.ContainerFilter{})
+	if err != nil {
+		return nil
+	}
+	out := make([]core.ContainerInfo, 0, len(pods))
+	for _, p := range pods {
+		out = append(out, core.ContainerInfo{ID: p.id, State: p.state, Labels: p.labels})
+	}
+	return out
 }

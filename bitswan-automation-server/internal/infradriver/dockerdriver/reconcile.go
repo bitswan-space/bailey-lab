@@ -59,7 +59,7 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	preInfos, _ := listWorkspaceContainers(ctx, wctx)
 	preExistingIDs := make(map[string]bool, len(preInfos))
 	for _, c := range preInfos {
-		preExistingIDs[c.id] = true
+		preExistingIDs[c.ID] = true
 	}
 
 	// 2. Stamp each egress (network_mode:service) worker with a stable
@@ -223,7 +223,7 @@ func retireOrphanedContainers(ctx context.Context, wctx infradriver.WorkspaceCon
 		return // couldn't parse the compose — don't remove anything
 	}
 	for _, c := range infos {
-		if c.labels["com.docker.compose.project"] != wctx.WorkspaceName {
+		if c.Labels["com.docker.compose.project"] != wctx.WorkspaceName {
 			continue // only the app deployment project, never site/dashboard
 		}
 		// Per-BP apply: only ever retire THIS BP's own containers. App services
@@ -232,15 +232,15 @@ func retireOrphanedContainers(ctx context.Context, wctx infradriver.WorkspaceCon
 		// infra singleton) is off-limits — a one-BP deploy must never reap another
 		// BP's or the shared infra's containers.
 		if wctx.BP != "" {
-			if c.labels["gitops.context"] != wctx.BP && c.labels["gitops.bp"] != wctx.BP {
+			if c.Labels["gitops.context"] != wctx.BP && c.Labels["gitops.bp"] != wctx.BP {
 				continue
 			}
 		}
-		svc := c.labels["com.docker.compose.service"]
+		svc := c.Labels["com.docker.compose.service"]
 		if svc == "" || desired[svc] {
 			continue
 		}
-		if out, err := exec.CommandContext(ctx, "docker", "rm", "-f", c.id).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(ctx, "docker", "rm", "-f", c.ID).CombinedOutput(); err != nil {
 			report("provision", fmt.Sprintf("retire orphan %s failed: %v: %s", svc, err, strings.TrimSpace(string(out))))
 		} else {
 			report("provision", fmt.Sprintf("retired orphaned container %s", svc))
@@ -343,13 +343,6 @@ func composeUpServices(ctx context.Context, wctx infradriver.WorkspaceContext, c
 	return nil
 }
 
-// containerInfo is the subset of `docker inspect` needed for the post-up steps.
-type containerInfo struct {
-	id     string
-	state  string
-	labels map[string]string
-}
-
 // listWorkspaceContainers returns the workspace's containers with their state
 // and labels (gitops get_container, but scoped to the whole workspace).
 func listWorkspaceContainers(ctx context.Context, wctx infradriver.WorkspaceContext) ([]containerInfo, error) {
@@ -370,7 +363,7 @@ func listWorkspaceContainers(ctx context.Context, wctx infradriver.WorkspaceCont
 	}
 	infos := make([]containerInfo, 0, len(listed))
 	for _, c := range listed {
-		infos = append(infos, containerInfo{id: c.ID, state: c.State, labels: c.Labels})
+		infos = append(infos, containerInfo{ID: c.ID, State: c.State, Labels: c.Labels})
 	}
 	return infos, nil
 }
@@ -399,18 +392,18 @@ func installCertificatesInContainers(ctx context.Context, wctx infradriver.Works
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for _, c := range infos {
-		if c.labels["gitops.certs.enabled"] != "true" || c.state != "running" {
+		if c.Labels["gitops.certs.enabled"] != "true" || c.State != "running" {
 			continue
 		}
-		if preExistingIDs[c.id] {
+		if preExistingIDs[c.ID] {
 			continue // unchanged since before this apply — certs already installed
 		}
 		wg.Add(1)
 		go func(c containerInfo) {
 			defer wg.Done()
-			if out, err := exec.CommandContext(ctx, "docker", "exec", c.id, "sh", "-c", certInstallScript).CombinedOutput(); err != nil {
+			if out, err := exec.CommandContext(ctx, "docker", "exec", c.ID, "sh", "-c", certInstallScript).CombinedOutput(); err != nil {
 				mu.Lock()
-				report("certs", fmt.Sprintf("cert install in %s failed: %v: %s", c.id[:12], err, strings.TrimSpace(string(out))))
+				report("certs", fmt.Sprintf("cert install in %s failed: %v: %s", c.ID[:12], err, strings.TrimSpace(string(out))))
 				mu.Unlock()
 			}
 		}(c)

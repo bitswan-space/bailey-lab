@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"sort"
 
 	yaml "gopkg.in/yaml.v3"
 )
@@ -185,4 +186,16 @@ func (bs *Bitswan) Hydrate() {
 			}
 		}
 	}
+}
+
+// SortedDepIDs is the deployment ids in a stable order. Everything that walks
+// the declaration walks it the same way, so two runs over one file produce the
+// same output in the same order.
+func SortedDepIDs(m map[string]*Deployment) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

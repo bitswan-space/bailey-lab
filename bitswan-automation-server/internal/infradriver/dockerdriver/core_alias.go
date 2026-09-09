@@ -1,6 +1,12 @@
 package dockerdriver
 
-import "github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
+import (
+	"context"
+	"time"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
+)
 
 type (
 	Bitswan          = core.Bitswan
@@ -14,6 +20,7 @@ type (
 	serviceDep       = core.ServiceDep
 	bpRegistry       = core.BPRegistry
 	bpRegEntry       = core.BPRegEntry
+	containerInfo    = core.ContainerInfo
 )
 
 const (
@@ -25,10 +32,12 @@ const (
 var (
 	appSlots = core.AppSlots
 
+	ownForGitops    = core.OwnForGitops
 	containedJoin   = core.ContainedJoin
 	assertRealUnder = core.AssertRealUnder
 
 	parseBitswanYAML = core.ParseBitswanYAML
+	sortedDepIDs     = core.SortedDepIDs
 
 	shortHash               = core.ShortHash
 	sanitizeAutomationName  = core.SanitizeAutomationName
@@ -52,3 +61,62 @@ var (
 	loadRegistry            = core.LoadRegistry
 	reconcileIngress        = core.ReconcileIngress
 )
+
+// The provisioning half of the driver moved to core when the Kubernetes driver
+// needed it: the SQL that gives a business process its own role, the blue/green
+// database clone, the bucket grants. None of it cares which backend runs the
+// container, so it takes a core.Execer and this is the Docker one.
+//
+// The names below keep their old spelling so the call sites — and the tests
+// that stub dockerExec — did not have to move with them.
+type dockerExecer struct{}
+
+func (dockerExecer) Exec(ctx context.Context, container string, args ...string) (string, string, int) {
+	return dockerExec(ctx, container, args...)
+}
+
+func (dockerExecer) Running(ctx context.Context, container string) bool {
+	return containerRunning(ctx, container)
+}
+
+func (dockerExecer) WaitReady(ctx context.Context, container string, timeout time.Duration) error {
+	return waitForHealthy(ctx, container, timeout)
+}
+
+var dockerX core.Execer = dockerExecer{}
+
+var (
+	serviceContainerName  = core.ServiceContainerName
+	serviceSecrets        = core.ServiceSecrets
+	getOrCreateDBCreds    = core.GetOrCreateDBCreds
+	dbCredsPath           = core.DbCredsPath
+	bucketCredsPath       = core.BucketCredsPath
+	ensureBucketCredsFile = core.EnsureBucketCredsFile
+	systemKeyName         = core.SystemKeyName
+	productionDBNumbers   = core.ProductionDBNumbers
+	scopedPGRole          = core.ScopedPGRole
+	scopedROPGRole        = core.ScopedROPGRole
+	readEnvFile           = core.ReadEnvFile
+	readBucketCreds       = core.ReadBucketCreds
+	writeBucketCreds      = core.WriteBucketCreds
+)
+
+func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, dbName string) error {
+	return core.EnsureBPRole(dockerX, ctx, container, adminUser, secretsDir, realm, dbName)
+}
+
+func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, preExistingIDs map[string]bool, infos []core.ContainerInfo, report func(step, msg string)) error {
+	return core.EnsureLivePostgresDBs(dockerX, ctx, wctx, bs, preExistingIDs, infos, report)
+}
+
+func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) {
+	core.EnsureGarageKeysPrecompile(dockerX, ctx, wctx, bs, report)
+}
+
+func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) []string {
+	return core.ProvisionForDeployments(dockerX, ctx, wctx, bs, report)
+}
+
+func reconcileGarageBuckets(ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) []string {
+	return core.ReconcileGarageBuckets(dockerX, ctx, wctx, realm, want, report)
+}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -328,15 +327,6 @@ func (c *compileState) drSlotFor(conf *Deployment) string {
 		}
 	}
 	return ""
-}
-
-func sortedDepIDs(m map[string]*Deployment) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func (c *compileState) routesKeptWhileAsleep(depID string, conf *Deployment, deployments map[string]*Deployment) []infradriver.Route {

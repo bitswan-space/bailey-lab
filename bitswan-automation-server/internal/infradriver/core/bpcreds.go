@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"bufio"
@@ -28,26 +28,26 @@ import (
 // keys can only be minted server-side (CreateKey; ImportKey with custom ids
 // is forbidden upstream), so the compiler only guarantees the env_file EXISTS
 // (empty placeholder on first-ever apply) and the key material is written by
-// ensureGarageKeysPrecompile / the post-up provisioner, which then re-ups any
+// EnsureGarageKeysPrecompile / the post-up provisioner, which then re-ups any
 // backend that was compiled against a placeholder.
 
-// scopedPGRole is the Postgres LOGIN role name for a database: u_<db>, capped at
+// ScopedPGRole is the Postgres LOGIN role name for a database: u_<db>, capped at
 // the 63-byte identifier limit (Postgres silently truncates longer names, which
 // would desync the CREATE from the name the backend authenticates as — so cap
 // here, consistently, for both).
-func scopedPGRole(dbName string) string {
-	return truncate("u_"+dbName, maxLabelLen)
+func ScopedPGRole(dbName string) string {
+	return Truncate("u_"+dbName, MaxLabelLen)
 }
 
-// scopedROPGRole is the read-only explorer role for a database: ro_<db>, capped
-// like scopedPGRole. It has NO password and NO creds file: it is only ever used
+// ScopedROPGRole is the read-only explorer role for a database: ro_<db>, capped
+// like ScopedPGRole. It has NO password and NO creds file: it is only ever used
 // via `docker exec psql -U ro_<db>` over the container's trust-authenticated
 // local socket, so a password would only add a network-usable credential that
 // shouldn't exist. Pathological case: for db names ≥61 bytes the blue-green
 // `_1`/`_2` suffix falls past the 63-byte cap and both slots truncate to the
 // same ro_ role — harmless (same BP, both its own DBs, SELECT-only).
-func scopedROPGRole(dbName string) string {
-	return truncate("ro_"+dbName, maxLabelLen)
+func ScopedROPGRole(dbName string) string {
+	return Truncate("ro_"+dbName, MaxLabelLen)
 }
 
 // generatePassword returns a URL-safe random secret with no '=' padding (so it's
@@ -60,30 +60,30 @@ func generatePassword() (string, error) {
 	return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "="), nil
 }
 
-// dbCredsPath / bucketCredsPath are the per-resource KEY=VALUE env files on the
+// DbCredsPath / BucketCredsPath are the per-resource KEY=VALUE env files on the
 // secrets volume. They double as the compose env_file (the compiler appends the
 // path; only the path lands in the generated YAML, values stay on disk).
-func dbCredsPath(secretsDir, realm, dbName string) string {
+func DbCredsPath(secretsDir, realm, dbName string) string {
 	return filepath.Join(secretsDir, "dbcreds", realm, dbName)
 }
 
-func bucketCredsPath(secretsDir, realm, bucket string) string {
+func BucketCredsPath(secretsDir, realm, bucket string) string {
 	return filepath.Join(secretsDir, "garagecreds", realm, bucket)
 }
 
-// systemKeyName is the pseudo-bucket the per-realm full-access Garage key is
+// SystemKeyName is the pseudo-bucket the per-realm full-access Garage key is
 // stored under (backups/snapshots/explorer fallback; granted on every bucket
 // the provisioner ensures). Real bucket names start "bp-"/"copy-", never "_".
-const systemKeyName = "_system"
+const SystemKeyName = "_system"
 
-// getOrCreateDBCreds returns the scoped Postgres role + password for a database,
+// GetOrCreateDBCreds returns the scoped Postgres role + password for a database,
 // generating and persisting them on first use and reusing them thereafter. The
 // role name is derived (u_<db>); only the password is random. Idempotent and
 // stable across deploys.
-func getOrCreateDBCreds(secretsDir, realm, dbName string) (user, password string, err error) {
-	user = scopedPGRole(dbName)
-	path := dbCredsPath(secretsDir, realm, dbName)
-	if vals := readEnvFile(path); vals != nil && vals["POSTGRES_PASSWORD"] != "" {
+func GetOrCreateDBCreds(secretsDir, realm, dbName string) (user, password string, err error) {
+	user = ScopedPGRole(dbName)
+	path := DbCredsPath(secretsDir, realm, dbName)
+	if vals := ReadEnvFile(path); vals != nil && vals["POSTGRES_PASSWORD"] != "" {
 		return user, vals["POSTGRES_PASSWORD"], nil
 	}
 	password, err = generatePassword()
@@ -97,23 +97,23 @@ func getOrCreateDBCreds(secretsDir, realm, dbName string) (user, password string
 		return "", "", err
 	}
 	// gitops (uid 1000) reads and rewrites these creds too — see ownForGitops.
-	ownForGitops(filepath.Join(secretsDir, "dbcreds"), filepath.Dir(path), path)
+	OwnForGitops(filepath.Join(secretsDir, "dbcreds"), filepath.Dir(path), path)
 	return user, password, nil
 }
 
-// readBucketCreds returns the Garage-issued (accessKey, secretKey) for a
+// ReadBucketCreds returns the Garage-issued (accessKey, secretKey) for a
 // bucket, or ("", "") when the file is absent or still a placeholder.
-func readBucketCreds(secretsDir, realm, bucket string) (accessKey, secretKey string) {
-	vals := readEnvFile(bucketCredsPath(secretsDir, realm, bucket))
+func ReadBucketCreds(secretsDir, realm, bucket string) (accessKey, secretKey string) {
+	vals := ReadEnvFile(BucketCredsPath(secretsDir, realm, bucket))
 	if vals == nil || vals["S3_SECRET_KEY"] == "" {
 		return "", ""
 	}
 	return vals["S3_ACCESS_KEY"], vals["S3_SECRET_KEY"]
 }
 
-// writeBucketCreds persists key material Garage just minted (CreateKey).
-func writeBucketCreds(secretsDir, realm, bucket, accessKey, secretKey string) error {
-	path := bucketCredsPath(secretsDir, realm, bucket)
+// WriteBucketCreds persists key material Garage just minted (CreateKey).
+func WriteBucketCreds(secretsDir, realm, bucket, accessKey, secretKey string) error {
+	path := BucketCredsPath(secretsDir, realm, bucket)
 	if err := writeEnvFile(path, map[string]string{
 		"S3_ACCESS_KEY": accessKey,
 		"S3_SECRET_KEY": secretKey,
@@ -121,31 +121,31 @@ func writeBucketCreds(secretsDir, realm, bucket, accessKey, secretKey string) er
 		return err
 	}
 	// gitops (uid 1000) reads these creds too — see ownForGitops.
-	ownForGitops(filepath.Join(secretsDir, "garagecreds"), filepath.Dir(path), path)
+	OwnForGitops(filepath.Join(secretsDir, "garagecreds"), filepath.Dir(path), path)
 	return nil
 }
 
-// ensureBucketCredsFile guarantees the creds env_file EXISTS at compile time:
+// EnsureBucketCredsFile guarantees the creds env_file EXISTS at compile time:
 // on the first-ever apply the garage container isn't up yet, so no key can be
 // minted — an empty 0600 placeholder keeps `compose up` happy and the post-up
 // provisioner mints the real key, rewrites the file and re-ups the backend
 // (writeEnvFile drops empty values, so a placeholder is just an empty file;
-// readEnvFile returns nil for it, which is the placeholder test).
-func ensureBucketCredsFile(secretsDir, realm, bucket string) error {
-	path := bucketCredsPath(secretsDir, realm, bucket)
+// ReadEnvFile returns nil for it, which is the placeholder test).
+func EnsureBucketCredsFile(secretsDir, realm, bucket string) error {
+	path := BucketCredsPath(secretsDir, realm, bucket)
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
 	if err := writeEnvFile(path, nil); err != nil {
 		return err
 	}
-	ownForGitops(filepath.Join(secretsDir, "garagecreds"), filepath.Dir(path), path)
+	OwnForGitops(filepath.Join(secretsDir, "garagecreds"), filepath.Dir(path), path)
 	return nil
 }
 
-// readEnvFile parses a KEY=VALUE file into a map, or returns nil if absent.
-// (serviceSecrets reads by service-type+realm; this reads an arbitrary path.)
-func readEnvFile(path string) map[string]string {
+// ReadEnvFile parses a KEY=VALUE file into a map, or returns nil if absent.
+// (ServiceSecrets reads by service-type+realm; this reads an arbitrary path.)
+func ReadEnvFile(path string) map[string]string {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil

@@ -90,12 +90,12 @@ func TestRedeployCreatesTheLiveDatabaseAFullDiskPreventedTheFirstDeployFromCreat
 			bs := &Bitswan{Deployments: map[string]*Deployment{"gradesta-backend": c.dep}}
 			quiet := func(string, string) {}
 
-			postgres := containerInfo{id: "pg-1", state: "running"}
-			backendBroughtUpByThisApply := containerInfo{id: "backend-1", state: "running",
-				labels: map[string]string{"gitops.deployment_id": "gradesta-backend"}}
+			postgres := containerInfo{ID: "pg-1", State: "running"}
+			backendBroughtUpByThisApply := containerInfo{ID: "backend-1", State: "running",
+				Labels: map[string]string{"gitops.deployment_id": "gradesta-backend"}}
 
 			err := ensureLivePostgresDBs(context.Background(), wctx, bs,
-				map[string]bool{postgres.id: true},
+				map[string]bool{postgres.ID: true},
 				[]containerInfo{postgres, backendBroughtUpByThisApply}, quiet)
 			if err == nil || !strings.Contains(err.Error(), "No space left on device") {
 				t.Fatalf("first deploy on a full disk: err = %v, want a CREATE DATABASE out-of-disk failure", err)
@@ -106,10 +106,10 @@ func TestRedeployCreatesTheLiveDatabaseAFullDiskPreventedTheFirstDeployFromCreat
 
 			diskFull = false
 			backendKeptByCompose := backendBroughtUpByThisApply
-			backendKeptByCompose.state = "restarting"
+			backendKeptByCompose.State = "restarting"
 
 			if err := ensureLivePostgresDBs(context.Background(), wctx, bs,
-				map[string]bool{postgres.id: true, backendKeptByCompose.id: true},
+				map[string]bool{postgres.ID: true, backendKeptByCompose.ID: true},
 				[]containerInfo{postgres, backendKeptByCompose}, quiet); err != nil {
 				t.Fatalf("redeploy after freeing disk space: unexpected error %v", err)
 			}
@@ -151,9 +151,9 @@ func TestSteadyStateReconcileListsDatabasesOncePerRealmAndReprovisionsNothing(t 
 
 	preExisting := map[string]bool{"pg-1": true, "b1": true, "b2": true}
 	infos := []containerInfo{
-		{id: "pg-1", state: "running"},
-		{id: "b1", state: "running", labels: map[string]string{"gitops.deployment_id": "gradesta-backend"}},
-		{id: "b2", state: "running", labels: map[string]string{"gitops.deployment_id": "ledger-backend"}},
+		{ID: "pg-1", State: "running"},
+		{ID: "b1", State: "running", Labels: map[string]string{"gitops.deployment_id": "gradesta-backend"}},
+		{ID: "b2", State: "running", Labels: map[string]string{"gitops.deployment_id": "ledger-backend"}},
 	}
 	if err := ensureLivePostgresDBs(context.Background(), wctx, bs, preExisting, infos, func(string, string) {}); err != nil {
 		t.Fatalf("steady-state reconcile: %v", err)

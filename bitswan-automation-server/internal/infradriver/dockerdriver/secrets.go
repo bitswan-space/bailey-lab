@@ -30,16 +30,6 @@ const (
 // "Apply" 502s), and a root-owned 0600 file (.aes-key, db/bucket creds) is
 // silently unreadable to gitops. Hand everything the driver creates here to
 // the gitops user.
-const gitopsUID = 1000
-
-// ownForGitops best-effort chowns driver-created secrets paths to the gitops
-// user. Chown is a no-op failure where the driver runs unprivileged (unit
-// tests) — there the paths already belong to the writing uid.
-func ownForGitops(paths ...string) {
-	for _, p := range paths {
-		_ = os.Chown(p, gitopsUID, gitopsUID)
-	}
-}
 
 // bpSecretEnvFilePath is <secrets>/bp/<slug>/<realm> (bp_secrets.env_file_path).
 func bpSecretEnvFilePath(secretsDir, bp, stage string) string {

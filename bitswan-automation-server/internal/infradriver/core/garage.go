@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"context"
@@ -22,12 +22,12 @@ import (
 // (out == nil discards the result). body == "" sends no payload argument.
 // Bodies never contain secrets (key material only ever comes BACK on stdout),
 // so passing them as an argv element is safe.
-func garageJSONAPI(ctx context.Context, container, endpoint, body string, out interface{}) error {
+func garageJSONAPI(x Execer, ctx context.Context, container, endpoint, body string, out interface{}) error {
 	args := []string{"/garage", "json-api", endpoint}
 	if body != "" {
 		args = append(args, body)
 	}
-	stdout, stderr, rc := dockerExec(ctx, container, args...)
+	stdout, stderr, rc := x.Exec(ctx, container, args...)
 	if rc != 0 {
 		return fmt.Errorf("garage %s: %s", endpoint, strings.TrimSpace(stderr))
 	}
@@ -54,13 +54,13 @@ func garageIsNotFound(err error) bool {
 
 // garageCreateKey mints a new access key (Garage generates both the GK… id
 // and the secret) and returns them. `name` is a human label only.
-func garageCreateKey(ctx context.Context, container, name string) (accessKeyID, secretAccessKey string, err error) {
+func garageCreateKey(x Execer, ctx context.Context, container, name string) (accessKeyID, secretAccessKey string, err error) {
 	var resp struct {
 		AccessKeyID     string `json:"accessKeyId"`
 		SecretAccessKey string `json:"secretAccessKey"`
 	}
 	body := fmt.Sprintf(`{"name":%q}`, name)
-	if err := garageJSONAPI(ctx, container, "CreateKey", body, &resp); err != nil {
+	if err := garageJSONAPI(x, ctx, container, "CreateKey", body, &resp); err != nil {
 		return "", "", err
 	}
 	if resp.AccessKeyID == "" || resp.SecretAccessKey == "" {
@@ -71,14 +71,14 @@ func garageCreateKey(ctx context.Context, container, name string) (accessKeyID, 
 
 // garageCreateBucket creates a bucket under a global alias and returns its id.
 // Tolerates a concurrent/pre-existing bucket by resolving the alias instead.
-func garageCreateBucket(ctx context.Context, container, alias string) (bucketID string, err error) {
+func garageCreateBucket(x Execer, ctx context.Context, container, alias string) (bucketID string, err error) {
 	var resp struct {
 		ID string `json:"id"`
 	}
 	body := fmt.Sprintf(`{"globalAlias":%q}`, alias)
-	err = garageJSONAPI(ctx, container, "CreateBucket", body, &resp)
+	err = garageJSONAPI(x, ctx, container, "CreateBucket", body, &resp)
 	if garageIsAlreadyExists(err) {
-		return garageGetBucketID(ctx, container, alias)
+		return garageGetBucketID(x, ctx, container, alias)
 	}
 	if err != nil {
 		return "", err
@@ -87,12 +87,12 @@ func garageCreateBucket(ctx context.Context, container, alias string) (bucketID 
 }
 
 // garageGetBucketID resolves a global alias to the bucket id.
-func garageGetBucketID(ctx context.Context, container, alias string) (string, error) {
+func garageGetBucketID(x Execer, ctx context.Context, container, alias string) (string, error) {
 	var resp struct {
 		ID string `json:"id"`
 	}
 	body := fmt.Sprintf(`{"globalAlias":%q}`, alias)
-	if err := garageJSONAPI(ctx, container, "GetBucketInfo", body, &resp); err != nil {
+	if err := garageJSONAPI(x, ctx, container, "GetBucketInfo", body, &resp); err != nil {
 		return "", err
 	}
 	return resp.ID, nil
@@ -100,21 +100,21 @@ func garageGetBucketID(ctx context.Context, container, alias string) (string, er
 
 // garageAllowBucketKey grants a key full access (read+write+owner) to one
 // bucket. Idempotent — permissions OR together server-side.
-func garageAllowBucketKey(ctx context.Context, container, bucketID, accessKeyID string) error {
+func garageAllowBucketKey(x Execer, ctx context.Context, container, bucketID, accessKeyID string) error {
 	body := fmt.Sprintf(
 		`{"bucketId":%q,"accessKeyId":%q,"permissions":{"read":true,"write":true,"owner":true}}`,
 		bucketID, accessKeyID)
-	return garageJSONAPI(ctx, container, "AllowBucketKey", body, nil)
+	return garageJSONAPI(x, ctx, container, "AllowBucketKey", body, nil)
 }
 
 // garageListBuckets returns globalAlias → bucketID for every bucket.
 // Doubles as the provisioner's readiness probe (fails while the node boots).
-func garageListBuckets(ctx context.Context, container string) (map[string]string, error) {
+func garageListBuckets(x Execer, ctx context.Context, container string) (map[string]string, error) {
 	var resp []struct {
 		ID            string   `json:"id"`
 		GlobalAliases []string `json:"globalAliases"`
 	}
-	if err := garageJSONAPI(ctx, container, "ListBuckets", "", &resp); err != nil {
+	if err := garageJSONAPI(x, ctx, container, "ListBuckets", "", &resp); err != nil {
 		return nil, err
 	}
 	out := make(map[string]string, len(resp))
@@ -127,11 +127,11 @@ func garageListBuckets(ctx context.Context, container string) (map[string]string
 }
 
 // garageListKeys returns the set of existing access-key ids.
-func garageListKeys(ctx context.Context, container string) (map[string]bool, error) {
+func garageListKeys(x Execer, ctx context.Context, container string) (map[string]bool, error) {
 	var resp []struct {
 		ID string `json:"id"`
 	}
-	if err := garageJSONAPI(ctx, container, "ListKeys", "", &resp); err != nil {
+	if err := garageJSONAPI(x, ctx, container, "ListKeys", "", &resp); err != nil {
 		return nil, err
 	}
 	out := make(map[string]bool, len(resp))
