@@ -468,3 +468,146 @@ func TestCredentialsRollTheWorkloadExceptInProduction(t *testing.T) {
 		t.Errorf("a production slot got fingerprint %q; a live slot must not be recreated in place", got)
 	}
 }
+
+// TestEveryMountHasAVolume is the invariant a hand-written pod spec breaks
+// silently: a volumeMount naming a volume the pod does not declare is accepted
+// by the apply and rejected by the pod, so the object exists, looks right in a
+// listing, and never produces a running container. Nothing in the compile can
+// see it; only the StatefulSet's events say so.
+func TestEveryMountHasAVolume(t *testing.T) {
+	for _, name := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			objs, _, _ := compileScenario(t, name)
+			for _, o := range objs {
+				spec := podSpecOf(o)
+				if spec == nil {
+					continue
+				}
+				declared := map[string]bool{}
+				for _, v := range asSlice(spec["volumes"]) {
+					vm, _ := v.(map[string]interface{})
+					if n, _ := vm["name"].(string); n != "" {
+						declared[n] = true
+					}
+				}
+				// A StatefulSet's claim templates are volumes too.
+				sp, _ := o["spec"].(map[string]interface{})
+				for _, ct := range asSlice(sp["volumeClaimTemplates"]) {
+					cm, _ := ct.(map[string]interface{})
+					meta, _ := cm["metadata"].(map[string]interface{})
+					if n, _ := meta["name"].(string); n != "" {
+						declared[n] = true
+					}
+				}
+				for _, key := range []string{"containers", "initContainers"} {
+					for _, c := range asSlice(spec[key]) {
+						cm, _ := c.(map[string]interface{})
+						for _, m := range asSlice(cm["volumeMounts"]) {
+							mm, _ := m.(map[string]interface{})
+							n, _ := mm["name"].(string)
+							if !declared[n] {
+								t.Errorf("%s %q container %v mounts volume %q, which the pod does not declare",
+									kindOf(o), nameOf(o), cm["name"], n)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestGarageCarriesItsTooling guards the other half of the same hand-written
+// spec: the sidecar snapshots exec into, the config file without which the
+// process exits on its first line, and a volume for every mount.
+//
+// The renderer is called directly rather than through a fixture, because none
+// of the four declares an object store — a test that only runs when a fixture
+// happens to want one is a test that silently does not run.
+func TestGarageCarriesItsTooling(t *testing.T) {
+	t.Setenv("BITSWAN_K8S_VOLUME_CLAIM", "bailey-config")
+	c := &compileState{workspace: "ws", claim: "bailey-config"}
+	objs, err := c.infraService("garage", "dev")
+	if err != nil {
+		t.Fatalf("render garage: %v", err)
+	}
+
+	var sts k8srender.Object
+	for _, o := range objs {
+		if kindOf(o) == "StatefulSet" {
+			sts = o
+		}
+	}
+	if sts == nil {
+		t.Fatal("garage rendered no StatefulSet")
+	}
+	spec := podSpecOf(sts)
+
+	names := map[string]bool{}
+	for _, con := range asSlice(spec["containers"]) {
+		cm, _ := con.(map[string]interface{})
+		n, _ := cm["name"].(string)
+		names[n] = true
+	}
+	if !names["toolbox"] {
+		t.Errorf("garage has containers %v and no toolbox; snapshots have nowhere to run rclone", names)
+	}
+
+	declared := map[string]bool{}
+	for _, v := range asSlice(spec["volumes"]) {
+		vm, _ := v.(map[string]interface{})
+		if n, _ := vm["name"].(string); n != "" {
+			declared[n] = true
+		}
+	}
+	sp, _ := sts["spec"].(map[string]interface{})
+	for _, ct := range asSlice(sp["volumeClaimTemplates"]) {
+		cm, _ := ct.(map[string]interface{})
+		meta, _ := cm["metadata"].(map[string]interface{})
+		if n, _ := meta["name"].(string); n != "" {
+			declared[n] = true
+		}
+	}
+
+	var config bool
+	for _, key := range []string{"containers", "initContainers"} {
+		for _, con := range asSlice(spec[key]) {
+			cm, _ := con.(map[string]interface{})
+			for _, m := range asSlice(cm["volumeMounts"]) {
+				mm, _ := m.(map[string]interface{})
+				path, _ := mm["mountPath"].(string)
+				n, _ := mm["name"].(string)
+				if path == "/etc/garage.toml" {
+					config = true
+				}
+				if !declared[n] {
+					t.Errorf("container %v mounts volume %q, which the pod does not declare — "+
+						"the apply is accepted and no pod is ever created", cm["name"], n)
+				}
+			}
+		}
+	}
+	if !config {
+		t.Error("garage has no configuration mounted; it exits on its first line")
+	}
+
+	// The Service has to publish what the config binds, or a client handed
+	// S3_PORT dials a port nothing is listening on.
+	var published []interface{}
+	for _, o := range objs {
+		if kindOf(o) == "Service" {
+			svcSpec, _ := o["spec"].(map[string]interface{})
+			published = asSlice(svcSpec["ports"])
+		}
+	}
+	var hasS3 bool
+	for _, p := range published {
+		pm, _ := p.(map[string]interface{})
+		if n, _ := pm["port"].(int); n == garageS3Port {
+			hasS3 = true
+		}
+	}
+	if !hasS3 {
+		t.Errorf("the object store's Service publishes %v, not the S3 port %d it binds", published, garageS3Port)
+	}
+}

@@ -230,10 +230,8 @@ func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
 							},
 						},
 					},
-					"containers": []interface{}{container},
-					"volumes": []interface{}{
-						map[string]interface{}{"name": "tools", "emptyDir": map[string]interface{}{}},
-					},
+					"containers": statefulSetContainers(s, container),
+					"volumes":    podVolumes(s),
 				},
 			},
 			// The claim belongs to the object, so replacing the workload keeps
