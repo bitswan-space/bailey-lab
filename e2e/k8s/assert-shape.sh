@@ -199,6 +199,36 @@ else
   fi
 fi
 
+echo "=== the coding agent can reach gitops and nothing else ==="
+# Behaviour, because a NetworkPolicy the CNI accepts and does not enforce fails
+# OPEN, and an object check calls that a pass. The agent runs code its users and
+# an AI wrote; its whole reachable surface is meant to be the authenticated
+# gitops API. So it is asked to reach two things — one it must and one it must
+# not — and a probe that cannot be run at all is a failure, not a silent pass.
+agent=$($KUBECTL -n "$NS" get pods -l bitswan.io/role=coding-agent -o name 2>/dev/null | head -1)
+if [ -z "$agent" ]; then
+  fail "no coding-agent pod to test isolation against"
+else
+  reach() {
+    # 0 reached, 1 refused or timed out, 2 could not be asked.
+    $KUBECTL -n "$NS" exec "$agent" -- sh -c \
+      "command -v nc >/dev/null || exit 2; nc -z -w 3 $1 $2" >/dev/null 2>&1
+    case $? in 0) echo reached ;; 2) echo unknown ;; *) echo blocked ;; esac
+  }
+  gitops_host=$($KUBECTL -n "$NS" get svc -o name 2>/dev/null | grep -- '-gitops$' | head -1 | cut -d/ -f2)
+  dash_host=$($KUBECTL -n "$NS" get svc -o name 2>/dev/null | grep -- '-dashboard$' | head -1 | cut -d/ -f2)
+  case "$(reach "$gitops_host" 8079)" in
+    reached) pass "the agent reaches gitops" ;;
+    blocked) fail "the agent cannot reach gitops — the policy is too tight to work" ;;
+    *)       fail "could not test whether the agent reaches gitops" ;;
+  esac
+  case "$(reach "$dash_host" 8080)" in
+    blocked) pass "the agent cannot reach the dashboard" ;;
+    reached) fail "the agent REACHES the dashboard — the isolation policy is not enforced" ;;
+    *)       fail "could not test whether the agent reaches the dashboard" ;;
+  esac
+fi
+
 echo "=== nothing crash-looped ==="
 restarts=$($KUBECTL -n "$NS" get pods \
   -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.containerStatuses[*]}{.restartCount}{" "}{end}{"\n"}{end}' |
