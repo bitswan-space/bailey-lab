@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -501,6 +503,11 @@ func (d *K8sDriver) ContainerInspect(ctx context.Context, req infradriver.Worksp
 					Name  string `json:"name"`
 					Value string `json:"value"`
 				} `json:"env"`
+				EnvFrom []struct {
+					SecretRef struct {
+						Name string `json:"name"`
+					} `json:"secretRef"`
+				} `json:"envFrom"`
 			} `json:"containers"`
 		} `json:"spec"`
 		Status struct {
@@ -517,14 +524,40 @@ func (d *K8sDriver) ContainerInspect(ctx context.Context, req infradriver.Worksp
 		return nil, err
 	}
 
-	env := []string{}
+	// The environment as the process sees it, not as the pod spec writes it.
+	// Most of what a business process runs on arrives through envFrom, so a
+	// listing built from the inline entries alone would show a backend with no
+	// database and no credentials — and the env view a person reads is the one
+	// place that would be believed.
+	resolved := map[string]string{}
+	var order []string
+	put := func(k, v string) {
+		if _, seen := resolved[k]; !seen {
+			order = append(order, k)
+		}
+		resolved[k] = v
+	}
 	for _, c := range pod.Spec.Containers {
 		if c.Name != t.container {
 			continue
 		}
-		for _, e := range c.Env {
-			env = append(env, e.Name+"="+e.Value)
+		for _, ref := range c.EnvFrom {
+			if ref.SecretRef.Name == "" {
+				continue
+			}
+			for k, v := range d.secretValues(ctx, ref.SecretRef.Name) {
+				put(k, v)
+			}
 		}
+		// Inline last: it wins, which is what it does in Kubernetes.
+		for _, e := range c.Env {
+			put(e.Name, e.Value)
+		}
+	}
+	sort.Strings(order)
+	env := make([]string, 0, len(order))
+	for _, k := range order {
+		env = append(env, k+"="+resolved[k])
 	}
 	restarts := 0
 	for _, cs := range pod.Status.ContainerStatuses {
@@ -623,4 +656,33 @@ func (d *K8sDriver) ContainerExec(ctx context.Context, req infradriver.Workspace
 		return ee.ExitCode(), nil
 	}
 	return -1, err
+}
+
+// secretValues reads a Secret's contents. A Secret that cannot be read gives
+// nothing rather than an error: an inspect is a read, and failing the whole
+// record over one unreadable reference would hide everything else in it.
+func (d *K8sDriver) secretValues(ctx context.Context, name string) map[string]string {
+	raw, err := d.kubectl(ctx, "get", "secret", name, "-o", "json")
+	if err != nil {
+		return nil
+	}
+	var sec struct {
+		Data       map[string]string `json:"data"`
+		StringData map[string]string `json:"stringData"`
+	}
+	if err := json.Unmarshal(raw, &sec); err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range sec.StringData {
+		out[k] = v
+	}
+	for k, v := range sec.Data {
+		decoded, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			continue
+		}
+		out[k] = string(decoded)
+	}
+	return out
 }
