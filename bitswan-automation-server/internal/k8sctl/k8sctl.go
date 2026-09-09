@@ -128,3 +128,34 @@ func describe(ctx context.Context, ns, deployment string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// PruneRetired deletes the workloads carrying `selector` that the caller did not
+// just apply.
+//
+// This is what `compose up --remove-orphans` does for the Docker driver, scoped
+// the same way: to one business process, so a deploy of one cannot reap a
+// sibling's. Only Deployments and their Services are considered — a StatefulSet
+// owns a volume, and nothing that owns data is removed by a deploy.
+func PruneRetired(ctx context.Context, selector string, keep map[string]bool) error {
+	ns, err := Namespace()
+	if err != nil {
+		return err
+	}
+	for _, kind := range []string{"deployment", "service"} {
+		out, err := exec.CommandContext(ctx, "kubectl", "-n", ns, "get", kind,
+			"-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}").Output()
+		if err != nil {
+			return fmt.Errorf("list %s to prune: %w", kind, err)
+		}
+		for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			name = strings.TrimSpace(name)
+			if name == "" || keep[kind+"/"+name] {
+				continue
+			}
+			if err := Delete(ctx, kind, name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

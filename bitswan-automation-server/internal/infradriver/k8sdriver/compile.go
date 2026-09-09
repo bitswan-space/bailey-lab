@@ -48,6 +48,18 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		}
 	}
 
+	// What a promotion retires has to actually go away, or the old slot keeps
+	// serving beside the new one. The Docker driver gets this from
+	// --remove-orphans; here it is an explicit sweep, scoped to this business
+	// process so a deploy of one cannot reap a sibling's.
+	if req.Ctx.BP != "" {
+		selector := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
+			",gitops.bp=" + k8srender.LabelValue(req.Ctx.BP)
+		if err := k8sctl.PruneRetired(ctx, selector, appliedNames(objs)); err != nil {
+			return nil, fmt.Errorf("prune retired workloads: %w", err)
+		}
+	}
+
 	report("ingress", fmt.Sprintf("converging %d route(s)", len(routes)))
 	if err := core.ReconcileIngress(ctx, d.workspace, req.Ctx.BP, routes); err != nil {
 		return nil, fmt.Errorf("ingress reconcile: %w", err)
@@ -305,4 +317,20 @@ func sortedBoolKeys(m map[string]bool) []string {
 // run anything it builds.
 func builtImagePullPolicy() string {
 	return "IfNotPresent"
+}
+
+// appliedNames keys the objects just applied as "<lowercase kind>/<name>", the
+// shape PruneRetired asks "did the caller mean to keep this?" with.
+func appliedNames(objs k8srender.ObjectSet) map[string]bool {
+	keep := map[string]bool{}
+	for _, obj := range objs {
+		kind, _ := obj["kind"].(string)
+		meta, _ := obj["metadata"].(map[string]interface{})
+		name, _ := meta["name"].(string)
+		if kind == "" || name == "" {
+			continue
+		}
+		keep[strings.ToLower(kind)+"/"+name] = true
+	}
+	return keep
 }
