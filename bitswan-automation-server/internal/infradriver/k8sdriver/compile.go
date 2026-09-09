@@ -61,11 +61,20 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 	// serving beside the new one. The Docker driver gets this from
 	// --remove-orphans; here it is an explicit sweep, scoped to this business
 	// process so a deploy of one cannot reap a sibling's.
+	// Scoped twice over: to this business process, and to the stages this
+	// declaration actually describes. A push that carries only production must
+	// not reap a live-dev session the author is in the middle of — "absent from
+	// this file" and "retired" are different things, and only the second is a
+	// reason to delete something.
 	if req.Ctx.BP != "" {
-		selector := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
+		base := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
 			",gitops.bp=" + k8srender.LabelValue(req.Ctx.BP)
-		if err := k8sctl.PruneRetired(ctx, selector, appliedNames(objs)); err != nil {
-			return nil, fmt.Errorf("prune retired workloads: %w", err)
+		keep := appliedNames(objs)
+		for _, stage := range stagesIn(objs) {
+			selector := base + ",gitops.stage=" + k8srender.LabelValue(stage)
+			if err := k8sctl.PruneRetired(ctx, selector, keep); err != nil {
+				return nil, fmt.Errorf("prune retired workloads: %w", err)
+			}
 		}
 	}
 
@@ -515,4 +524,18 @@ func runningInfos(ctx context.Context, d *K8sDriver) []core.ContainerInfo {
 		out = append(out, core.ContainerInfo{ID: p.id, State: p.state, Labels: p.labels})
 	}
 	return out
+}
+
+// stagesIn is the stages this compile describes, which bounds what a prune may
+// consider retired.
+func stagesIn(objs k8srender.ObjectSet) []string {
+	seen := map[string]bool{}
+	for _, obj := range objs {
+		meta, _ := obj["metadata"].(map[string]interface{})
+		labels, _ := meta["labels"].(map[string]interface{})
+		if stage, _ := labels["gitops.stage"].(string); stage != "" {
+			seen[stage] = true
+		}
+	}
+	return sortedBoolKeys(seen)
 }
