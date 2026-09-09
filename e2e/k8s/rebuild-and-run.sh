@@ -60,7 +60,8 @@ for image in \
   bitswan/infra-driver-k8s:dev \
   bitswan/gitops-dev:latest \
   bitswan/workspace-dashboard-dev:latest \
-  bitswan/coding-agent-dev:latest; do
+  bitswan/coding-agent-dev:latest \
+  bitswan/egress-gateway-dev:latest; do
   sudo docker image inspect "$image" >/dev/null 2>&1 && present+=("$image")
 done
 # One image per archive. A single save of the whole set has failed the import

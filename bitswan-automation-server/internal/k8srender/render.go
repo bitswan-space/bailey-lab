@@ -197,6 +197,26 @@ type Workload struct {
 	// server, which is everything a workspace runs.
 	ServiceAccount string
 	VolumeClaim    string
+	// InitContainers run to completion before the workload starts. This is
+	// where anything privileged belongs: it does its work and exits, so the
+	// container that runs tenant code never holds the capability.
+	InitContainers []InitContainer
+}
+
+// InitContainer is a step that must finish before the workload starts.
+type InitContainer struct {
+	Name string
+	// Image is the tool, PullPolicy how hard to look for it.
+	Image      string
+	PullPolicy string
+	Command    []string
+	Env        map[string]string
+	Mounts     []Mount
+	// Capabilities are added to an otherwise capability-less container. The
+	// egress firewall needs NET_ADMIN to write rules into the pod's network
+	// namespace — and because this exits before the app container starts, the
+	// app cannot undo them.
+	Capabilities []string
 }
 
 // Deployment renders a workload as a Deployment plus, when it listens on
@@ -294,6 +314,13 @@ func Deployment(w Workload) ObjectSet {
 	podSpec := map[string]interface{}{
 		"containers": []interface{}{container},
 	}
+	if len(w.InitContainers) > 0 {
+		inits := make([]interface{}, 0, len(w.InitContainers))
+		for _, ic := range w.InitContainers {
+			inits = append(inits, initContainer(ic))
+		}
+		podSpec["initContainers"] = inits
+	}
 	if w.ServiceAccount != "" {
 		podSpec["serviceAccountName"] = w.ServiceAccount
 	} else {
@@ -301,7 +328,11 @@ func Deployment(w Workload) ObjectSet {
 		// a token it never asked for is a token that can leak.
 		podSpec["automountServiceAccountToken"] = false
 	}
-	if w.VolumeClaim != "" && len(w.Mounts) > 0 {
+	initMounts := 0
+	for _, ic := range w.InitContainers {
+		initMounts += len(ic.Mounts)
+	}
+	if w.VolumeClaim != "" && (len(w.Mounts) > 0 || initMounts > 0) {
 		podSpec["volumes"] = []interface{}{
 			map[string]interface{}{
 				"name": "workspace",
@@ -456,4 +487,49 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// initContainer renders one pre-start step.
+//
+// Capabilities are added to a container that has none, and nothing else about
+// it is privileged: writing egress rules needs NET_ADMIN and no more, and it
+// needs it only until the rules are written.
+func initContainer(ic InitContainer) map[string]interface{} {
+	out := map[string]interface{}{
+		"name":  Name(ic.Name, ServiceNameMax),
+		"image": ic.Image,
+	}
+	if ic.PullPolicy != "" {
+		out["imagePullPolicy"] = ic.PullPolicy
+	}
+	if len(ic.Command) > 0 {
+		out["command"] = ic.Command
+	}
+	if len(ic.Env) > 0 {
+		out["env"] = envList(ic.Env)
+	}
+	if len(ic.Mounts) > 0 {
+		mounts := make([]interface{}, 0, len(ic.Mounts))
+		for _, m := range ic.Mounts {
+			vm := map[string]interface{}{"name": "workspace", "mountPath": m.Path}
+			if m.SubPath != "" {
+				vm["subPath"] = m.SubPath
+			}
+			if m.ReadOnly {
+				vm["readOnly"] = true
+			}
+			mounts = append(mounts, vm)
+		}
+		out["volumeMounts"] = mounts
+	}
+	if len(ic.Capabilities) > 0 {
+		caps := make([]interface{}, 0, len(ic.Capabilities))
+		for _, c := range ic.Capabilities {
+			caps = append(caps, c)
+		}
+		out["securityContext"] = map[string]interface{}{
+			"capabilities": map[string]interface{}{"add": caps},
+		}
+	}
+	return out
 }

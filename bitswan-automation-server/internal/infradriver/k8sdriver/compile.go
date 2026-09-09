@@ -96,12 +96,17 @@ type compileState struct {
 	bs        *core.Bitswan
 	workspace string
 	domain    string
+	fw        map[fwKey]*fwGroup
 }
 
 // compile turns the declaration into the objects that realize it.
 func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, error) {
 	var objs k8srender.ObjectSet
 	var routes []infradriver.Route
+
+	// Decided before any workload is rendered, because a workload in a
+	// firewalled group carries the rule installer that points at its proxy.
+	c.fw = c.firewallScope()
 
 	// Infra a business process asks for, once per stage rather than once per
 	// process: two processes on the same stage share one Postgres and one
@@ -158,7 +163,7 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 			infra = append(infra, c.infraService(svc, realm)...)
 		}
 	}
-	return append(infra, objs...), routes, nil
+	return append(append(infra, c.firewallObjects()...), objs...), routes, nil
 }
 
 // workload renders one automation. The bool reports whether it should be
@@ -290,6 +295,12 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 		// workload counts as ready the moment it starts and the ingress can be
 		// pointed at something still booting.
 		Readiness: &k8srender.Probe{TCPPort: port, PeriodSeconds: 3, Failures: 100},
+	}
+	// Tenant code runs behind the group's egress rules, written by an init
+	// container that has NET_ADMIN and is gone by the time this container
+	// starts — so the workload itself cannot undo them.
+	if g := c.fwGroupFor(conf); g != nil {
+		w.InitContainers = append(w.InitContainers, ruleInstaller(g))
 	}
 	if conf.MemoryReservation != nil && *conf.MemoryReservation > 0 {
 		// A request, never a limit: on Docker a workload over its reservation is

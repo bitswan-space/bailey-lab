@@ -33,6 +33,7 @@ export GITOPS_IMAGE="bitswan/gitops-dev:latest"
 export DASHBOARD_IMAGE="bitswan/workspace-dashboard-dev:latest"
 export CODING_AGENT_IMAGE="bitswan/coding-agent-dev:latest"
 export INFRA_DRIVER_IMAGE="bitswan/infra-driver-k8s:dev"
+export EGRESS_GATEWAY_IMAGE="bitswan/egress-gateway-dev:latest"
 export WORKSPACE_API_TOKEN="${E2E_WORKSPACE_API_TOKEN:-workspace-api-e2e-token}"
 export REGISTRY_IMAGE="registry:2"
 export BUILDKIT_IMAGE="moby/buildkit:v0.19.0-rootless"
@@ -61,7 +62,8 @@ ${TRAEFIK_IMAGE} ${PROXY_IMAGE} ${REDIS_IMAGE} ${KEYCLOAK_IMAGE} ${OTEL_IMAGE}
 ${KC_HOST} ${KC_PORT} ${OIDC_ISSUER} ${OIDC_HOST} ${OIDC_CLIENT_ID}
 ${OIDC_CLIENT_SECRET} ${OIDC_COOKIE_SECRET} ${REALM_JSON_INDENTED}
 ${OTEL_CONFIG_INDENTED} ${GITOPS_IMAGE} ${DASHBOARD_IMAGE}
-${CODING_AGENT_IMAGE} ${INFRA_DRIVER_IMAGE} ${WORKSPACE_API_TOKEN} ${REGISTRY_IMAGE}
+${CODING_AGENT_IMAGE} ${INFRA_DRIVER_IMAGE} ${EGRESS_GATEWAY_IMAGE}
+${WORKSPACE_API_TOKEN} ${REGISTRY_IMAGE}
 ${BUILDKIT_IMAGE} ${REGISTRY_STORAGE} ${REGISTRY_NODE_PORT}'
 
 # The walkthrough starts from an UNCLAIMED server: it signs in as the first user

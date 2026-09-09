@@ -1,9 +1,13 @@
 #!/bin/sh
 # Egress-gateway entrypoint. Two roles, selected by $BITSWAN_FW_ROLE:
 #
-#   owner  — installs the egress rules in this network namespace and HOLDS it.
-#            The BP worker joins this netns (network_mode: service:<owner>) with
-#            NET_ADMIN dropped, so it cannot alter the rules. Critically, NO
+#   owner  — installs the egress rules in this network namespace. On Docker it
+#            then HOLDS the namespace, because the BP worker joins it
+#            (network_mode: service:<owner>) with NET_ADMIN dropped and so
+#            cannot alter the rules. In a pod the sandbox owns the namespace, so
+#            this runs as an init container and exits (BITSWAN_FW_HOLD=0) —
+#            the rules outlive it and the app container has no NET_ADMIN.
+#            Critically, on either platform NO
 #            proxy runs here: the worker's :443/:80 is DNAT'd to the proxy
 #            container (a separate namespace), so there is no privileged uid in
 #            the worker's namespace to impersonate. A root worker that setuid()s
@@ -27,6 +31,12 @@ if [ "$ROLE" = "owner" ]; then
   # Used to scope the infra-peer allowance instead of all of RFC1918.
   STAGE_SUBNET=$(ip -o -f inet addr show scope global 2>/dev/null | awk '{print $4; exit}')
 
+  # The resolvers this namespace actually uses. On Docker that is the embedded
+  # one at 127.0.0.11; in a pod it is the cluster's DNS service, whose address
+  # is only knowable from resolv.conf. Allowing exactly these — rather than :53
+  # to anywhere — is what stops DNS tunnelling on either platform.
+  RESOLVERS=$(awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')
+
   # nat OUTPUT: keep Docker's embedded-DNS DNAT (flushing OUTPUT drops the jump
   # to DOCKER_OUTPUT), then DNAT all :443/:80 to the external proxy. NO uid
   # exemption — nothing in this netns is exempt.
@@ -38,15 +48,18 @@ if [ "$ROLE" = "owner" ]; then
   iptables -t nat -A OUTPUT -p tcp --dport 80  -j DNAT --to-destination "$PROXY_IP:18080"
 
   if [ "$BITSWAN_FW_MODE" = "enforce" ]; then
-    # Default-deny egress. Allow: loopback, established, DNS to Docker's embedded
-    # resolver ONLY (direct :53 to arbitrary resolvers is dropped — no DNS
+    # Default-deny egress. Allow: loopback, established, DNS to THIS namespace's
+    # own resolvers only (direct :53 to anywhere else is dropped — no DNS
     # tunnelling), the worker's own stage subnet (infra peers — not all RFC1918),
     # the proxy, and the :80/:443 the proxy enforces.
     iptables -F OUTPUT
     iptables -A OUTPUT -o lo -j ACCEPT
     iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    iptables -A OUTPUT -d 127.0.0.11/32 -p udp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -d 127.0.0.11/32 -p tcp --dport 53 -j ACCEPT
+    for r in $RESOLVERS 127.0.0.11; do
+      case "$r" in *:*) continue ;; esac
+      iptables -A OUTPUT -d "$r" -p udp --dport 53 -j ACCEPT
+      iptables -A OUTPUT -d "$r" -p tcp --dport 53 -j ACCEPT
+    done
     iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
     [ -n "$STAGE_SUBNET" ] && iptables -A OUTPUT -d "$STAGE_SUBNET" -j ACCEPT
     iptables -A OUTPUT -d "$PROXY_IP/32" -j ACCEPT
@@ -96,9 +109,17 @@ if [ "$ROLE" = "owner" ]; then
     echo "egress-gateway[owner]: no IPv6 stack (ip6tables OUTPUT unavailable); no v6 egress to filter"
   fi
 
-  # Signal readiness (the worker gates its start on this via the healthcheck) and
-  # hold the namespace open for the worker that shares it.
   touch /tmp/fw-ready
+
+  # Whether to stay. On Docker the owner IS the network namespace — the worker
+  # joins it — so it must hold. In a pod the sandbox owns the namespace and this
+  # runs as an init container, which has to exit for the workload to start; the
+  # rules it wrote outlive it, and the app container has no NET_ADMIN to undo
+  # them, which is a stronger arrangement than an idling privileged sibling.
+  if [ "${BITSWAN_FW_HOLD:-1}" = "0" ]; then
+    echo "egress-gateway[owner]: rules installed (mode=${BITSWAN_FW_MODE:-monitor}, proxy=$PROXY_IP); exiting"
+    exit 0
+  fi
   echo "egress-gateway[owner]: rules installed (mode=${BITSWAN_FW_MODE:-monitor}, proxy=$PROXY_IP); holding netns"
   exec tail -f /dev/null
 fi

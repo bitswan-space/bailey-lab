@@ -362,6 +362,8 @@ spec:
               value: ${CODING_AGENT_IMAGE}
             - name: BITSWAN_INFRA_DRIVER_IMAGE
               value: ${INFRA_DRIVER_IMAGE}
+            - name: BITSWAN_EGRESS_GATEWAY_IMAGE
+              value: ${EGRESS_GATEWAY_IMAGE}
             - name: BITSWAN_WORKSPACE_API_TOKEN
               valueFrom:
                 secretKeyRef:
