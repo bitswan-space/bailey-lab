@@ -155,6 +155,15 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 		stage := conf.StageOrProduction()
 		realm := core.RealmForStage(stage)
 
+		// A slept automation keeps its route and loses its workload. The route
+		// is what the gate needs in order to notice a request for something
+		// that is not running and wake it; without it the hostname is simply
+		// not served, and waking on demand stops working.
+		if conf.Active != nil && !*conf.Active {
+			routes = append(routes, c.routesKeptWhileAsleep(id, conf)...)
+			continue
+		}
+
 		// Production is blue/green: one workload per slot, both running, only
 		// one routed. A promote pins the new version onto the idle slot and the
 		// ingress flip is what cuts over — so both have to exist at once.
@@ -649,3 +658,35 @@ func resolveImage(image string) string {
 // builtImagePrefix is the repository namespace every image this driver builds
 // is tagged under.
 const builtImagePrefix = "internal/"
+
+// routesKeptWhileAsleep is the routes a slept automation still answers on.
+func (c *compileState) routesKeptWhileAsleep(depID string, conf *core.Deployment) []infradriver.Route {
+	automation := conf.AutomationNameOr(depID)
+	stage := conf.StageOrProduction()
+	var out []infradriver.Route
+	for _, sd := range core.SlotDBPairs(c.bs, conf) {
+		slotConf := core.EffectiveSlotConf(depID, conf, sd.Slot, c.bs.Deployments)
+		cfg := c.resolveAutomationConfig(slotConf)
+		if !cfg.Expose || cfg.Port == 0 {
+			continue
+		}
+		isLive := sd.Slot == "" || sd.Slot == core.LiveSlotFor(c.bs, slotConf)
+		isDR := sd.Slot != "" && sd.Slot == core.DRSlotFor(c.bs, slotConf)
+		if !isLive && !isDR {
+			continue
+		}
+		hostStage := stage
+		if isDR {
+			hostStage = "dr"
+		}
+		out = append(out, infradriver.Route{
+			Hostname: core.MakeHostnameLabel(c.workspace, automation, slotConf.Context, hostStage, "") + "." + c.domain,
+			Upstream: fmt.Sprintf("%s:%d",
+				core.MakeHostnameLabel(c.workspace, automation, slotConf.Context, stage, sd.Slot), cfg.Port),
+			Stage:          stage,
+			ParentEndpoint: c.workspace + "-dashboard." + c.domain,
+			Kind:           "frontend",
+		})
+	}
+	return out
+}
