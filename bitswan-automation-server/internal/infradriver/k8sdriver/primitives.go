@@ -267,10 +267,17 @@ func (d *K8sDriver) ContainerStats(ctx context.Context, req infradriver.Workspac
 	}
 	var out []infradriver.ContainerStat
 	for _, p := range pods {
+		// Only what was actually measured. A pod the metrics API has not
+		// scraped yet is absent from the listing, not present with zero — the
+		// same reason the whole call returns nothing when the API is missing.
+		mem, measured := usage[p.id]
+		if !measured {
+			continue
+		}
 		out = append(out, infradriver.ContainerStat{
 			ID:            p.id,
 			Name:          p.name,
-			MemUsageBytes: usage[p.id],
+			MemUsageBytes: mem,
 			Labels:        p.labels,
 		})
 	}
