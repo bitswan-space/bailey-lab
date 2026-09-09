@@ -535,11 +535,12 @@ func (d *K8sDriver) ContainerExec(ctx context.Context, req infradriver.Workspace
 	if err != nil {
 		return -1, err
 	}
-	if spec.User != "" {
-		// Exec always runs as the container's own user here. Saying so is better
-		// than running as the wrong one and letting the caller believe otherwise.
-		return -1, fmt.Errorf("refused: exec as a chosen user is not supported on kubernetes (asked for %q)", spec.User)
-	}
+	// A requested user is not honoured: an exec here joins a running container
+	// and runs as whoever that container runs as, and there is no per-exec
+	// override. The command is still run, because the one caller that asks for
+	// root asks in order to remove a directory the container already owns, and
+	// refusing outright would fail work that succeeds. What must not happen is
+	// a failure that looks like something else, so the exit is annotated below.
 	args := []string{"-n", d.namespace, "exec", t.pod, "-c", t.container}
 	if in != nil {
 		args = append(args, "-i")
@@ -586,6 +587,11 @@ func (d *K8sDriver) ContainerExec(ctx context.Context, req infradriver.Workspace
 	if ee, ok := err.(*exec.ExitError); ok {
 		// A command that ran and failed is a result, not an error: the caller
 		// wants the code.
+		if spec.User != "" && ee.ExitCode() != 0 {
+			out(true, []byte(fmt.Sprintf(
+				"\n[bitswan] this ran as the container's own user; %q was asked for and kubernetes has no per-exec user\n",
+				spec.User)))
+		}
 		return ee.ExitCode(), nil
 	}
 	return -1, err
