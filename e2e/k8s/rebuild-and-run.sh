@@ -28,6 +28,12 @@ sudo docker build -q -f Dockerfile.infra-driver.k8s -t bitswan/infra-driver-k8s:
 sudo docker build -q -f cmd/egress-gateway/Dockerfile -t bitswan/egress-gateway-dev:latest . >/dev/null
 cd ..
 
+# gitops too. It is not a Go binary this script compiles, which is exactly why
+# it was missed: a change to its Python reached the guest's checkout and never
+# reached the image the guest runs, so the cluster kept serving the old code
+# while every file on disk said otherwise.
+sudo docker build -q -f bitswan-gitops/Dockerfile -t bitswan/gitops-dev:latest . >/dev/null
+
 echo "=== verify the images carry what this checkout added ==="
 # `docker build` leaves the PREVIOUS tag in place when it fails, so "the build
 # ran" and "the image is current" are different claims. This asserts the second.
@@ -39,6 +45,8 @@ sudo docker run --rm --entrypoint sh bitswan/automation-server:dev \
   -c 'command -v kubectl >/dev/null'
 sudo docker run --rm --entrypoint sh bitswan/egress-gateway-dev:latest \
   -c 'grep -q BITSWAN_FW_HOLD /entrypoint.sh'
+sudo docker run --rm --entrypoint sh bitswan/gitops-dev:latest \
+  -c 'grep -q BITSWAN_INGRESS_TOKEN /src/app/utils.py'
 echo IMAGES_VERIFIED
 
 echo "=== hand them to containerd ==="
