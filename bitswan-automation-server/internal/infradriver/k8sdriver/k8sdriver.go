@@ -68,10 +68,6 @@ func (d *K8sDriver) notYet(what string) error {
 	return fmt.Errorf("%s is not implemented by the kubernetes driver yet", what)
 }
 
-func (d *K8sDriver) BuildImage(ctx context.Context, req infradriver.BuildRequest, prog func(string)) (infradriver.ImageRef, error) {
-	return infradriver.ImageRef{}, d.notYet("building images")
-}
-
 func (d *K8sDriver) ImageList(ctx context.Context, req infradriver.WorkspaceContext) ([]infradriver.Image, error) {
 	return nil, d.notYet("listing images")
 }

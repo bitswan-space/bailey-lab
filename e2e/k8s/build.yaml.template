@@ -1,0 +1,164 @@
+# The builder and the registry: how a source tree becomes an image the kubelet
+# can pull.
+#
+# On a Docker host the driver builds into the daemon's own image store, and the
+# store a workload is started from is the same one. Here they are two different
+# things, so a build is a push and a workload names a registry reference.
+#
+# The registry is published on a NodePort and the cluster is configured to mirror
+# its Service name to that port (see e2e/local-vm/provision-k8s.sh), because the
+# kubelet resolves image names through the NODE's resolver, where a Service name
+# means nothing. One reference for both push and pull; the alternative bakes a
+# node-local address into a tag recorded in bitswan.yaml.
+#
+# A CONSTRAINT worth stating: a builder in the namespace needs a PodSecurity
+# profile above baseline. Rootless buildkit needs an unconfined seccomp profile,
+# which baseline forbids, and a non-rootless one needs privileged, which baseline
+# also forbids. A cluster that enforces baseline has to build somewhere else —
+# which is the argument for the driver pushing to a registry the customer already
+# has, rather than for weakening the namespace.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bitswan-registry
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: ${REGISTRY_STORAGE}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bitswan-registry
+  labels:
+    app.kubernetes.io/name: bitswan-registry
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bitswan-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bitswan-registry
+        app.kubernetes.io/managed-by: bitswan
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: registry
+          image: ${REGISTRY_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            # Deleting a tag has to be possible, or the store only ever grows.
+            - name: REGISTRY_STORAGE_DELETE_ENABLED
+              value: "true"
+          ports:
+            - name: registry
+              containerPort: 5000
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            periodSeconds: 3
+            failureThreshold: 60
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: bitswan-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bitswan-registry
+  labels:
+    app.kubernetes.io/name: bitswan-registry
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: bitswan-registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: 5000
+      nodePort: ${REGISTRY_NODE_PORT}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bitswan-buildkit
+  labels:
+    app.kubernetes.io/name: bitswan-buildkit
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bitswan-buildkit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bitswan-buildkit
+        app.kubernetes.io/managed-by: bitswan
+      annotations:
+        container.apparmor.security.beta.kubernetes.io/buildkitd: unconfined
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: buildkitd
+          image: ${BUILDKIT_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --addr
+            - tcp://0.0.0.0:1234
+            - --addr
+            - unix:///run/user/1000/buildkit/buildkitd.sock
+            # Rootless without a process sandbox: the sandbox is what needs
+            # privileges this pod does not have.
+            - --oci-worker-no-process-sandbox
+          securityContext:
+            seccompProfile:
+              type: Unconfined
+            runAsUser: 1000
+            runAsGroup: 1000
+          ports:
+            - name: grpc
+              containerPort: 1234
+          volumeMounts:
+            - name: cache
+              mountPath: /home/user/.local/share/buildkit
+          readinessProbe:
+            exec:
+              command: ["buildctl", "debug", "workers"]
+            periodSeconds: 5
+            failureThreshold: 60
+      volumes:
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bitswan-buildkit
+  labels:
+    app.kubernetes.io/name: bitswan-buildkit
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  selector:
+    app.kubernetes.io/name: bitswan-buildkit
+  ports:
+    - name: grpc
+      port: 1234
+      targetPort: 1234

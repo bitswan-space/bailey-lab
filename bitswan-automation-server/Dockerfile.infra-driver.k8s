@@ -11,4 +11,11 @@ RUN curl -fsSL -o /usr/local/bin/kubectl \
         "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl" && \
     chmod 0755 /usr/local/bin/kubectl && kubectl version --client=true
 
+# buildctl: a build here is a push to the registry the kubelet pulls from, and
+# this is what talks to the builder.
+ARG BUILDKIT_VERSION=0.19.0
+RUN curl -fsSL "https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VERSION}/buildkit-v${BUILDKIT_VERSION}.linux-$(dpkg --print-architecture).tar.gz" \
+        | tar -xz -C /usr/local --strip-components=1 bin/buildctl && \
+    buildctl --version
+
 CMD ["/usr/local/bin/infra-driver", "--help"]

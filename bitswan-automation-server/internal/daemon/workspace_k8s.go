@@ -173,6 +173,8 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			// driver converges ingress over the daemon's workspace listener.
 			"BITSWAN_INGRESS_URL":   cfg.IngressURL,
 			"BITSWAN_INGRESS_TOKEN": os.Getenv(workspaceAPITokenEnv),
+			"BITSWAN_K8S_REGISTRY":  envOrDefault("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000"),
+			"BITSWAN_BUILDKIT_ADDR": envOrDefault("BITSWAN_BUILDKIT_ADDR", "tcp://bitswan-buildkit:1234"),
 		},
 		Mounts: []k8srender.Mount{
 			{Path: "/git/deploy-repos", SubPath: sub("deploy-repos")},

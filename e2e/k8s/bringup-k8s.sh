@@ -34,6 +34,10 @@ export DASHBOARD_IMAGE="bitswan/workspace-dashboard-dev:latest"
 export CODING_AGENT_IMAGE="bitswan/coding-agent-dev:latest"
 export INFRA_DRIVER_IMAGE="bitswan/infra-driver-k8s:dev"
 export WORKSPACE_API_TOKEN="${E2E_WORKSPACE_API_TOKEN:-workspace-api-e2e-token}"
+export REGISTRY_IMAGE="registry:2"
+export BUILDKIT_IMAGE="moby/buildkit:v0.19.0-rootless"
+export REGISTRY_STORAGE="${E2E_K8S_REGISTRY_STORAGE:-10Gi}"
+export REGISTRY_NODE_PORT="${E2E_K8S_REGISTRY_NODE_PORT:-30500}"
 
 export OIDC_ISSUER="http://${KC_HOST}:${KC_PORT}/realms/bitswan"
 export OIDC_HOST="${KC_HOST}:${KC_PORT}"
@@ -57,7 +61,8 @@ ${TRAEFIK_IMAGE} ${PROXY_IMAGE} ${REDIS_IMAGE} ${KEYCLOAK_IMAGE} ${OTEL_IMAGE}
 ${KC_HOST} ${KC_PORT} ${OIDC_ISSUER} ${OIDC_HOST} ${OIDC_CLIENT_ID}
 ${OIDC_CLIENT_SECRET} ${OIDC_COOKIE_SECRET} ${REALM_JSON_INDENTED}
 ${OTEL_CONFIG_INDENTED} ${GITOPS_IMAGE} ${DASHBOARD_IMAGE}
-${CODING_AGENT_IMAGE} ${INFRA_DRIVER_IMAGE} ${WORKSPACE_API_TOKEN}'
+${CODING_AGENT_IMAGE} ${INFRA_DRIVER_IMAGE} ${WORKSPACE_API_TOKEN} ${REGISTRY_IMAGE}
+${BUILDKIT_IMAGE} ${REGISTRY_STORAGE} ${REGISTRY_NODE_PORT}'
 
 # The walkthrough starts from an UNCLAIMED server: it signs in as the first user
 # and claims it, which is only possible once. A second run against a claimed
@@ -95,6 +100,17 @@ envsubst "$SUBST" < "$HERE/otel.yaml.template" | $KUBECTL -n "$NAMESPACE" apply 
 $KUBECTL -n "$HARNESS_NAMESPACE" rollout status deploy/keycloak --timeout=300s
 $KUBECTL -n "$NAMESPACE" rollout status deploy/bitswan-e2e-otel --timeout=180s
 mark "k8s: harness (keycloak + otel)"
+
+echo "=== [2b/5] the builder and the registry ==="
+# PodSecurity has to allow more than baseline here: a builder in the namespace
+# needs an unconfined seccomp profile (rootless) or privileged (not), and
+# baseline permits neither. A cluster that enforces baseline has to build
+# elsewhere — recorded rather than worked around.
+$KUBECTL label --overwrite namespace "$NAMESPACE" pod-security.kubernetes.io/enforce=privileged
+envsubst "$SUBST" < "$HERE/build.yaml.template" | $KUBECTL -n "$NAMESPACE" apply -f -
+$KUBECTL -n "$NAMESPACE" rollout status deploy/bitswan-registry --timeout=300s
+$KUBECTL -n "$NAMESPACE" rollout status deploy/bitswan-buildkit --timeout=300s
+mark "k8s: builder + registry"
 
 echo "=== [3/5] the Bailey ==="
 envsubst "$SUBST" < "$HERE/bailey.yaml.template" > /tmp/bailey-seed.yaml
