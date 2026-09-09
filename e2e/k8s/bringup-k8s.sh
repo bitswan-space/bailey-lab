@@ -145,6 +145,25 @@ for i in $(seq 1 60); do
 done
 mark "k8s: onboarding chain ready"
 
+echo "=== [5b/5] every pod is Ready ==="
+# A crash-looping pod is not always a failing chapter: several of them tolerate
+# the thing they exercise never appearing, so the suite went green with the infra
+# driver dead on "unknown flag". This is the cheap assertion that would have
+# caught it, and it belongs in the bring-up rather than in a chapter.
+notready="$($KUBECTL -n "$NAMESPACE" get pods --no-headers 2>/dev/null \
+  | awk '$2 != "1/1" && $2 != "4/4" && $2 != "2/2" && $2 != "3/3" { print }')"
+if [ -n "$notready" ]; then
+  echo "ERROR: not every pod is Ready after bring-up:" >&2
+  echo "$notready" >&2
+  for p in $(echo "$notready" | awk '{print $1}'); do
+    echo "--- $p ---" >&2
+    $KUBECTL -n "$NAMESPACE" logs "$p" --all-containers --tail=20 >&2 2>&1 || true
+  done
+  exit 1
+fi
+$KUBECTL -n "$NAMESPACE" get pods
+mark "k8s: every pod ready"
+
 cat > "$REPO_ROOT/e2e/.env" <<ENV
 E2E_DOMAIN=${DOMAIN}
 E2E_BAILEY_URL=${BAILEY_URL}
