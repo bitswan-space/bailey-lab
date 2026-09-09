@@ -172,8 +172,11 @@ func (c *compileState) workload(depID string, conf *core.Deployment) (k8srender.
 		Name:          svcName,
 		ContainerName: svcName,
 		Workspace:     c.workspace,
-		Image:         image,
-		PullPolicy:    pullPolicy(),
+		// The registry reference, not the bare tag. A build here is a push, so
+		// the tag bitswan.yaml records is a name in the namespace's registry —
+		// the kubelet asked for the bare tag would go looking on Docker Hub.
+		Image:      registryRef(image),
+		PullPolicy: builtImagePullPolicy(),
 		Replicas:      conf.ReplicasOrOne(),
 		Env:           env,
 		Ports:         []k8srender.Port{{Name: "app", Port: port}},
@@ -295,6 +298,11 @@ func sortedBoolKeys(m map[string]bool) []string {
 	return out
 }
 
-func pullPolicy() string {
-	return envOr("BITSWAN_K8S_PULL_POLICY", "IfNotPresent")
+// builtImagePullPolicy is always IfNotPresent, whatever the platform images
+// use. The suite pins those to Never so a mistyped tag fails loudly instead of
+// quietly pulling a published image — but an image this driver just built lives
+// in the registry and nowhere else, so refusing to pull would mean refusing to
+// run anything it builds.
+func builtImagePullPolicy() string {
+	return "IfNotPresent"
 }
