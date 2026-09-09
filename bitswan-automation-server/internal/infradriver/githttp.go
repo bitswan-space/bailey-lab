@@ -61,6 +61,15 @@ func gitCGIHandler(projectRoot string) http.Handler {
 			"BITSWAN_INGRESS_SOCKET",
 			"BITSWAN_INFRA_DRIVER_TOKEN",
 			"KEYCLOAK_URL",
+			// The hook is a CGI grandchild, so an in-cluster client can only be
+			// built from what is listed here: the service-account token and CA
+			// are files it inherits, but these two are environment-only, and
+			// without them the Kubernetes backend fails to find its API server
+			// on the push path while working perfectly under `serve`.
+			"KUBERNETES_SERVICE_HOST",
+			"KUBERNETES_SERVICE_PORT",
+			"BITSWAN_INFRA_DRIVER_KIND",
+			"BITSWAN_K8S_NAMESPACE",
 		},
 	}
 }

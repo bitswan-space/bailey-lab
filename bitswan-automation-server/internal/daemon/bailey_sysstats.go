@@ -40,6 +40,18 @@ func sysStatsDiskPath() string {
 	if _, err := os.Stat("/host"); err == nil {
 		return "/host"
 	}
+	// In a namespace there is no host filesystem to report, and the container
+	// root is a node detail nobody here can act on. The volume holding this
+	// Bailey's state is the number that means something: it is what fills up,
+	// and it is what an operator can resize.
+	if onKubernetes() {
+		if home := os.Getenv("HOME"); home != "" {
+			cfg := home + "/.config/bitswan"
+			if _, err := os.Stat(cfg); err == nil {
+				return cfg
+			}
+		}
+	}
 	return "/"
 }
 
