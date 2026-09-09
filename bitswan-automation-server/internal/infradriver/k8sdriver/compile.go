@@ -44,7 +44,9 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		bs:        bs,
 		workspace: d.workspace,
 		domain:    req.Ctx.Domain,
+		claim:     os.Getenv("BITSWAN_K8S_VOLUME_CLAIM"),
 	}
+	report("compile", "workspace volume: "+describeClaim(c.claim))
 	objs, routes, err := c.compile()
 	if err != nil {
 		return nil, err
@@ -118,6 +120,11 @@ type compileState struct {
 	workspace string
 	domain    string
 	fw        map[fwKey]*fwGroup
+	// claim is read once, at construction. Reading an environment variable at
+	// each use invites two reads of the same setting disagreeing, and the shape
+	// that takes is a pod with a mount and no volume — which the API server
+	// rejects with a message about a volume name, several steps from the cause.
+	claim string
 }
 
 // compile turns the declaration into the objects that realize it.
@@ -426,7 +433,14 @@ func (c *compileState) workspaceRepo() string {
 // volumeClaim is the workspace's volume, the namespace's answer to the named
 // volume the Docker compiler mounts subpaths of.
 func (c *compileState) volumeClaim() string {
-	return os.Getenv("BITSWAN_K8S_VOLUME_CLAIM")
+	return c.claim
+}
+
+func describeClaim(claim string) string {
+	if claim == "" {
+		return "none configured (BITSWAN_K8S_VOLUME_CLAIM is unset)"
+	}
+	return claim
 }
 
 // volumeSubPath is where inside that volume a workspace's directory lives. The

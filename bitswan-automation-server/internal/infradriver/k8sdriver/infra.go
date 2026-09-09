@@ -17,6 +17,12 @@ import (
 // is always <name>-0 — which is what makes an exec-based backup or a psql
 // provisioning step able to find it without a lookup.
 func (c *compileState) infraService(service, realm string) k8srender.ObjectSet {
+	if c.volumeClaim() == "" {
+		// Every infra service reads a config file off the workspace volume.
+		// Rendering the mount without the volume produces a pod the API server
+		// rejects for a reason that names neither the setting nor the service.
+		return nil
+	}
 	name := c.workspace + "__" + service + core.ServiceSuffix(realm)
 	switch service {
 	case "postgres":
@@ -78,21 +84,33 @@ func (c *compileState) garage(container, realm string) k8srender.ObjectSet {
 	labels := c.infraLabels(svcName, container, realm)
 
 	return statefulSet(statefulSetSpec{
-		Name:      objName,
-		Service:   svcName,
-		Labels:    labels,
-		Image:     imageOr("BITSWAN_GARAGE_IMAGE", "dxflrs/garage:v2.3.0"),
-		Command:   []string{"/garage", "server"},
-		Port:      3900,
-		PortName:  "s3",
+		Name:    objName,
+		Service: svcName,
+		Labels:  labels,
+		Image:   imageOr("BITSWAN_GARAGE_IMAGE", "dxflrs/garage:v2.3.0"),
+		Command: []string{"/garage", "server"},
+		// The ports the config file actually binds, not the defaults: a client
+		// is handed S3_PORT out of the same secrets gitops wrote that config
+		// from, so a Service publishing anything else is a coordinate pointing
+		// at nothing.
+		Port:     garageS3Port,
+		PortName: "s3",
+		ExtraPorts: []k8srender.Port{
+			{Name: "rpc", Port: 3901},
+			{Name: "admin", Port: 3903},
+		},
 		MountPath: "/data",
 		SubPath:   "data",
-		Storage:   storageSizeOr("BITSWAN_K8S_GARAGE_STORAGE", "8Gi"),
+		// The metadata lives on the volume too. Left in the container's writable
+		// layer it survives exactly until the pod is replaced, and then the
+		// store comes back knowing about none of its own buckets.
+		ExtraMounts: []k8srender.Mount{{Path: "/meta", SubPath: "meta"}},
+		Storage:     storageSizeOr("BITSWAN_K8S_GARAGE_STORAGE", "8Gi"),
 		// The object store is ready when it answers, not when its process
 		// starts: the provisioner mints keys and creates buckets against it, and
 		// against a node that is still coming up those calls fail in ways that
 		// read as permission problems.
-		Readiness: &k8srender.Probe{TCPPort: 3900, PeriodSeconds: 3, Failures: 60},
+		Readiness: &k8srender.Probe{TCPPort: garageS3Port, PeriodSeconds: 3, Failures: 60},
 		// Garage reads its RPC secret, admin token and ports from a file gitops
 		// writes beside the other secrets. Without it the process exits on its
 		// first line — it has no defaults to fall back on — so this mount is
@@ -140,6 +158,8 @@ type statefulSetSpec struct {
 	Storage     string
 	Readiness   *k8srender.Probe
 	Files       []k8srender.Mount
+	ExtraPorts  []k8srender.Port
+	ExtraMounts []k8srender.Mount
 	VolumeClaim string
 	Sidecars    []sidecar
 }
@@ -156,11 +176,9 @@ func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
 	selector := map[string]interface{}{k8srender.NameLabel: s.Service}
 
 	container := map[string]interface{}{
-		"name":  s.Service,
-		"image": s.Image,
-		"ports": []interface{}{
-			map[string]interface{}{"name": s.PortName, "containerPort": s.Port},
-		},
+		"name":         s.Service,
+		"image":        s.Image,
+		"ports":        containerPorts(s),
 		"volumeMounts": containerMounts(s),
 	}
 	if len(s.Command) > 0 {
@@ -234,7 +252,8 @@ func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
 
 	return k8srender.ObjectSet{
 		sts,
-		k8srender.Service(s.Service, s.Labels, selector, []k8srender.Port{{Name: s.PortName, Port: s.Port}}),
+		k8srender.Service(s.Service, s.Labels, selector,
+			append([]k8srender.Port{{Name: s.PortName, Port: s.Port}}, s.ExtraPorts...)),
 	}
 }
 
@@ -297,6 +316,11 @@ func containerMounts(s statefulSetSpec) []interface{} {
 		map[string]interface{}{"name": "data", "mountPath": s.MountPath, "subPath": s.SubPath},
 		map[string]interface{}{"name": "tools", "mountPath": toolsDir},
 	}
+	for _, m := range s.ExtraMounts {
+		out = append(out, map[string]interface{}{
+			"name": "data", "mountPath": m.Path, "subPath": m.SubPath,
+		})
+	}
 	for _, f := range s.Files {
 		m := map[string]interface{}{"name": "workspace", "mountPath": f.Path}
 		if f.SubPath != "" {
@@ -338,6 +362,19 @@ func statefulSetContainers(s statefulSetSpec, main map[string]interface{}) []int
 			c["command"] = sc.Command
 		}
 		out = append(out, c)
+	}
+	return out
+}
+
+// garageS3Port is where the config gitops writes binds the S3 API.
+const garageS3Port = 9000
+
+func containerPorts(s statefulSetSpec) []interface{} {
+	out := []interface{}{
+		map[string]interface{}{"name": s.PortName, "containerPort": s.Port},
+	}
+	for _, p := range s.ExtraPorts {
+		out = append(out, map[string]interface{}{"name": p.Name, "containerPort": p.Port})
 	}
 	return out
 }

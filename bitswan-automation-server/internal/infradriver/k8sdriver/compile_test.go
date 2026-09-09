@@ -101,6 +101,7 @@ func compileScenario(t *testing.T, name string) (k8srender.ObjectSet, []infradri
 		bs:        bs,
 		workspace: sc.WorkspaceName,
 		domain:    sc.Domain,
+		claim:     os.Getenv("BITSWAN_K8S_VOLUME_CLAIM"),
 	}
 	objs, routes, err := c.compile()
 	if err != nil {
