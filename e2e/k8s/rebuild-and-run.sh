@@ -33,7 +33,7 @@ echo "=== verify the images carry what this checkout added ==="
 sudo docker run --rm bitswan/infra-driver-k8s:dev \
   /usr/local/bin/infra-driver serve --help | grep -qE -- '--driver'
 sudo docker run --rm --entrypoint sh bitswan/infra-driver-k8s:dev \
-  -c 'command -v buildctl >/dev/null && command -v kubectl >/dev/null'
+  -c 'command -v buildctl >/dev/null && command -v kubectl >/dev/null && command -v syft >/dev/null'
 sudo docker run --rm --entrypoint sh bitswan/automation-server:dev \
   -c 'command -v kubectl >/dev/null'
 sudo docker run --rm --entrypoint sh bitswan/egress-gateway-dev:latest \
