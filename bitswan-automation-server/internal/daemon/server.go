@@ -437,12 +437,17 @@ func (s *Server) Run() error {
 	// this daemon's socket, so the routes they may call are served over TCP
 	// behind the workspace's token — and only those routes are registered there.
 	if onKubernetes() {
-		// Not fatal: the console and the gate matter more than this listener, and
-		// a daemon that refuses to start takes the whole Bailey down. Say plainly
-		// what will not work instead, because the alternative failure — deploys
-		// timing out with no explanation — is the one that wastes an afternoon.
+		// Fatal. This was a warning once, on the reasoning that a Bailey with a
+		// console is better than no Bailey — but what it actually produced was a
+		// Bailey that looked healthy and could not converge an ingress or answer
+		// what role a person holds, which surfaces much later as a deploy that
+		// times out and an auditor who appears to have no rights.
+		//
+		// It fails for one reason: no token to guard it with. Starting anyway
+		// would mean either an unguarded listener or none at all, and refusing
+		// names the missing setting at the moment it is missing.
 		if err := s.startWorkspaceAPI(); err != nil {
-			fmt.Printf("Warning: the workspace API is not serving (%v) — deploys cannot converge ingress until it does.\n", err)
+			return fmt.Errorf("the workspace API cannot serve: %w", err)
 		}
 	}
 

@@ -364,6 +364,12 @@ spec:
               value: ${INFRA_DRIVER_IMAGE}
             - name: BITSWAN_EGRESS_GATEWAY_IMAGE
               value: ${EGRESS_GATEWAY_IMAGE}
+            # The suite's registry is reached by a name that cannot hold a
+            # certificate anyone would trust, so it says so explicitly. Nothing
+            # outside the suite sets this, and without it the driver speaks
+            # https to its registry.
+            - name: BITSWAN_K8S_REGISTRY_INSECURE
+              value: "true"
             - name: BITSWAN_WORKSPACE_API_TOKEN
               valueFrom:
                 secretKeyRef:

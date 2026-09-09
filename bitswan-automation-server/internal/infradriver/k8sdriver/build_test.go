@@ -38,3 +38,41 @@ func TestABuiltBaseImageIsNamedInTheRegistry(t *testing.T) {
 		}
 	}
 }
+
+// TestTheRegistryIsSpokenToSecurelyUnlessAsked is the one that matters if this
+// ever ships: a registry reached over http carries every image a Bailey builds,
+// and the credentials baked into some of them, in the clear. Plaintext has to
+// be a thing an install chose, not a thing it got.
+func TestTheRegistryIsSpokenToSecurelyUnlessAsked(t *testing.T) {
+	t.Setenv("BITSWAN_K8S_REGISTRY", "registry.example:5000")
+
+	t.Setenv("BITSWAN_K8S_REGISTRY_INSECURE", "")
+	if got := registryScheme(); got != "https://" {
+		t.Errorf("scheme with nothing configured = %q, want https://", got)
+	}
+	if got := buildkitInsecure(); got != "" {
+		t.Errorf("builder told %q with nothing configured, want nothing", got)
+	}
+
+	// Anything that is not an explicit yes is a no, including the values a
+	// half-written template leaves behind.
+	for _, off := range []string{"false", "0", "no", "FALSE", " ", "maybe"} {
+		t.Setenv("BITSWAN_K8S_REGISTRY_INSECURE", off)
+		if registryInsecure() {
+			t.Errorf("%q was read as permission to use plaintext", off)
+		}
+	}
+
+	for _, on := range []string{"true", "1", "yes", "TRUE"} {
+		t.Setenv("BITSWAN_K8S_REGISTRY_INSECURE", on)
+		if !registryInsecure() {
+			t.Errorf("%q did not turn plaintext on", on)
+		}
+	}
+	if got := registryScheme(); got != "http://" {
+		t.Errorf("scheme when asked = %q, want http://", got)
+	}
+	if got := buildkitInsecure(); got != ",registry.insecure=true" {
+		t.Errorf("builder option when asked = %q", got)
+	}
+}

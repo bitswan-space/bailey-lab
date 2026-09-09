@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -35,7 +36,7 @@ func ReconcileIngress(ctx context.Context, workspaceName, bp string, routes []in
 		return err
 	}
 
-	client, base := ingressClientAndBase()
+	client, base, overSocket := ingressClientAndBase()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/ingress/reconcile", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -45,7 +46,17 @@ func ReconcileIngress(ctx context.Context, workspaceName, bp string, routes []in
 	// was the credential. Over the network it cannot, so the workspace's own
 	// token goes with the request — the same token gitops authenticates to this
 	// driver with, and the only thing the daemon's workspace listener accepts.
-	if token := os.Getenv("BITSWAN_INGRESS_TOKEN"); token != "" {
+	//
+	// Without one there is nothing to send and nothing that would be accepted,
+	// so this says so rather than making a request that can only 401. The
+	// difference matters: "no token is configured" names the thing to fix,
+	// where "unauthorized" sends the reader looking at the daemon.
+	if !overSocket {
+		token := strings.TrimSpace(os.Getenv("BITSWAN_INGRESS_TOKEN"))
+		if token == "" {
+			return fmt.Errorf(
+				"ingress reconcile: no socket to reach the daemon by and BITSWAN_INGRESS_TOKEN is not set")
+		}
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := client.Do(req)
@@ -59,9 +70,10 @@ func ReconcileIngress(ctx context.Context, workspaceName, bp string, routes []in
 	return nil
 }
 
-// ingressClientAndBase returns an HTTP client + base URL for the daemon ingress.
+// ingressClientAndBase returns an HTTP client, base URL, and whether the
+// connection is the trusted socket — which decides whether a token is needed.
 // Prefers the UNIX socket; falls back to the network URL.
-func ingressClientAndBase() (*http.Client, string) {
+func ingressClientAndBase() (client *http.Client, base string, overSocket bool) {
 	socket := os.Getenv("BITSWAN_INGRESS_SOCKET")
 	if socket == "" {
 		socket = "/var/run/bitswan/automation-server.sock"
@@ -74,13 +86,13 @@ func ingressClientAndBase() (*http.Client, string) {
 					return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 				},
 			},
-		}, "http://daemon"
+		}, "http://daemon", true
 	}
-	base := os.Getenv("BITSWAN_INGRESS_URL")
-	if base == "" {
-		base = "http://bitswan-automation-server-daemon:8080"
+	url := os.Getenv("BITSWAN_INGRESS_URL")
+	if url == "" {
+		url = "http://bitswan-automation-server-daemon:8080"
 	}
-	return &http.Client{Timeout: 180 * time.Second}, base
+	return &http.Client{Timeout: 180 * time.Second}, url, false
 }
 
 // ingressReconcileRequest mirrors daemon.IngressReconcileRequest.

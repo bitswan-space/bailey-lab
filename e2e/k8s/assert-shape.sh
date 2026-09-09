@@ -101,17 +101,46 @@ fi
 
 echo "=== the driver can act in its namespace and nowhere else ==="
 SA="system:serviceaccount:${NS}:bitswan-infra-driver"
-can() { $KUBECTL auth can-i "$1" "$2" ${3:+-n "$3"} --as "$SA" 2>/dev/null | grep -qx yes; }
-can create deployments "$NS" && pass "driver may create deployments in $NS" \
-  || fail "driver cannot create deployments in its own namespace"
-can create deployments default && fail "driver may create deployments in default" \
-  || pass "driver may not act in default"
-can list nodes && fail "driver may list nodes" || pass "driver may not list nodes"
-can create namespaces && fail "driver may create namespaces" || pass "driver may not create namespaces"
-can create rolebindings "$NS" && fail "driver may write RBAC — it can grant itself anything" \
-  || pass "driver may not write RBAC"
-can delete persistentvolumeclaims "$NS" && fail "driver may delete PVCs — a deploy could destroy data" \
-  || pass "driver may not delete PVCs"
+
+# A query that did not run is not a denial. Asked with 2>/dev/null and matched
+# on "yes", a kubectl that fails for any reason — wrong context, API server
+# down, a typo in the resource name — answers "no" to every question, and five
+# of the six checks below are looking for a no. They would all pass while
+# proving nothing. So the three outcomes are kept apart.
+can() {
+  local out
+  out=$($KUBECTL auth can-i "$1" "$2" ${3:+-n "$3"} --as "$SA" 2>&1)
+  case "$out" in
+    yes*) echo yes ;;
+    no*)  echo no ;;
+    *)    echo "error: $out" ;;
+  esac
+}
+
+allowed() {
+  local what="$1" verb="$2" res="$3" ns="${4:-}"
+  case "$(can "$verb" "$res" "$ns")" in
+    yes) pass "$what" ;;
+    no)  fail "$what — refused" ;;
+    *)   fail "$what — the question could not be asked: $(can "$verb" "$res" "$ns")" ;;
+  esac
+}
+
+refused() {
+  local what="$1" verb="$2" res="$3" ns="${4:-}"
+  case "$(can "$verb" "$res" "$ns")" in
+    no)  pass "$what" ;;
+    yes) fail "$what — ALLOWED" ;;
+    *)   fail "$what — the question could not be asked: $(can "$verb" "$res" "$ns")" ;;
+  esac
+}
+
+allowed "driver may create deployments in $NS" create deployments "$NS"
+refused "driver may not act in default" create deployments default
+refused "driver may not list nodes" list nodes
+refused "driver may not create namespaces" create namespaces
+refused "driver may not write RBAC" create rolebindings "$NS"
+refused "driver may not delete PVCs" delete persistentvolumeclaims "$NS"
 
 echo "=== production runs two slots and exactly one is served ==="
 slots=$($KUBECTL -n "$NS" get deploy -l gitops.stage=production \

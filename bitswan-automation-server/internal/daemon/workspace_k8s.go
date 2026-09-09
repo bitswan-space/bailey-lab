@@ -193,7 +193,11 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 				"BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"),
 			"BITSWAN_WORKSPACE_REPO_DIR": "/workspace-repo",
 			"BITSWAN_K8S_REGISTRY":       envOrDefault("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000"),
-			"BITSWAN_BUILDKIT_ADDR":      envOrDefault("BITSWAN_BUILDKIT_ADDR", "tcp://bitswan-buildkit:1234"),
+			// Off unless the install says otherwise. A registry spoken to in
+			// plaintext carries every image this Bailey builds, and the
+			// credentials baked into some of them, in the clear.
+			"BITSWAN_K8S_REGISTRY_INSECURE": os.Getenv("BITSWAN_K8S_REGISTRY_INSECURE"),
+			"BITSWAN_BUILDKIT_ADDR":         envOrDefault("BITSWAN_BUILDKIT_ADDR", "tcp://bitswan-buildkit:1234"),
 		},
 		Mounts: []k8srender.Mount{
 			{Path: "/git/deploy-repos", SubPath: sub("deploy-repos")},

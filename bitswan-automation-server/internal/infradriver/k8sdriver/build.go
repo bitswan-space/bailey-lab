@@ -52,17 +52,17 @@ func (d *K8sDriver) BuildImage(ctx context.Context, req infradriver.BuildRequest
 		"--local", "context=" + req.SourcePath,
 		"--local", "dockerfile=" + filepath.Dir(dockerfilePath),
 		"--opt", "filename=" + filepath.Base(dockerfilePath),
-		"--output", fmt.Sprintf("type=image,name=%s,push=true,registry.insecure=true", ref),
+		"--output", fmt.Sprintf("type=image,name=%s,push=true%s", ref, buildkitInsecure()),
 		// A layer cache that outlives the builder pod, and is shared across
 		// business processes: the expensive layers are the dependency installs,
 		// and they are identical between them.
 		//
-		// registry.insecure belongs on the cache refs too, not only on the
-		// output: the cache is written to the same plain-HTTP registry, and
-		// without it the export half of a successful build fails the whole
-		// build on "server gave HTTP response to HTTPS client".
-		"--export-cache", "type=registry,mode=max,registry.insecure=true,ref=" + cacheRef(),
-		"--import-cache", "type=registry,registry.insecure=true,ref=" + cacheRef(),
+		// Whatever the output says about the transport, the cache refs have to
+		// say too: they point at the same registry, and the export half of an
+		// otherwise successful build fails on "server gave HTTP response to
+		// HTTPS client" if only one of them is told.
+		"--export-cache", "type=registry,mode=max" + buildkitInsecure() + ",ref=" + cacheRef(),
+		"--import-cache", "type=registry" + buildkitInsecure() + ",ref=" + cacheRef(),
 	}
 	if gp := os.Getenv("BITSWAN_GOPROXY"); gp != "" {
 		args = append(args, "--opt", "build-arg:GOPROXY="+gp)
@@ -131,7 +131,7 @@ func (d *K8sDriver) manifestDigest(ctx context.Context, ref string) string {
 	if !ok {
 		return ""
 	}
-	url := fmt.Sprintf("http://%s/v2/%s/manifests/%s", host, repo, tag)
+	url := fmt.Sprintf("%s%s/v2/%s/manifests/%s", registryScheme(), host, repo, tag)
 	resp, err := exec.CommandContext(ctx, "curl", "-fsS", "-o", "/dev/null",
 		"-w", "%{http_code}", "-H", "Accept: application/vnd.oci.image.manifest.v1+json",
 		"-H", "Accept: application/vnd.docker.distribution.manifest.v2+json", url).Output()
@@ -209,4 +209,13 @@ func streamOutput(cmd *exec.Cmd, prog func(string)) error {
 		}
 	}
 	return cmd.Wait()
+}
+
+// buildkitInsecure is the option fragment that tells the builder to speak
+// plaintext to the registry, and the empty string when it must not.
+func buildkitInsecure() string {
+	if registryInsecure() {
+		return ",registry.insecure=true"
+	}
+	return ""
 }

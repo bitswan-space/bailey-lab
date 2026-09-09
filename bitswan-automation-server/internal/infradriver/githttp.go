@@ -89,6 +89,7 @@ func hookInheritedEnv() []string {
 		// configuration, on a path where the configuration is right.
 		"BITSWAN_K8S_VOLUME_CLAIM",
 		"BITSWAN_K8S_REGISTRY",
+		"BITSWAN_K8S_REGISTRY_INSECURE",
 		"BITSWAN_K8S_PULL_POLICY",
 		"BITSWAN_BUILDKIT_ADDR",
 		"BITSWAN_POSTGRES_IMAGE",

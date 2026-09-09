@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -33,8 +34,31 @@ func (d *K8sDriver) imageTagPrefix() string {
 	return "internal/" + d.workspace + "-"
 }
 
+// registryInsecure reports whether the namespace's registry is to be spoken to
+// in plaintext.
+//
+// Off unless asked for. A registry reached over http carries every image this
+// Bailey builds, and the credentials baked into some of them, in the clear —
+// and a default that does that silently is one nobody discovers until it
+// matters. The suite turns it on because a name like bs-e2e.localhost cannot
+// hold a certificate anyone would trust.
+func registryInsecure() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("BITSWAN_K8S_REGISTRY_INSECURE"))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
+}
+
+func registryScheme() string {
+	if registryInsecure() {
+		return "http://"
+	}
+	return "https://"
+}
+
 func registryBase() string {
-	return "http://" + envOr("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000")
+	return registryScheme() + envOr("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000")
 }
 
 var registryClient = &http.Client{Timeout: 30 * time.Second}
@@ -201,7 +225,9 @@ func (d *K8sDriver) ImageSBOM(ctx context.Context, _ infradriver.WorkspaceContex
 		return nil, fmt.Errorf("refused: image %q is not in workspace %q's namespace", tag, d.workspace)
 	}
 	cmd := exec.CommandContext(ctx, "syft", "registry:"+registryRef(tag), "-o", "syft-json")
-	cmd.Env = append(cmd.Environ(), "SYFT_REGISTRY_INSECURE_USE_HTTP=true")
+	if registryInsecure() {
+		cmd.Env = append(cmd.Environ(), "SYFT_REGISTRY_INSECURE_USE_HTTP=true")
+	}
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

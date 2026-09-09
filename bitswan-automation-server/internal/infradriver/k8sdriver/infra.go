@@ -21,7 +21,7 @@ func (c *compileState) infraService(service, realm string) (k8srender.ObjectSet,
 	name := c.workspace + "__" + service + core.ServiceSuffix(realm)
 	switch service {
 	case "postgres":
-		return c.postgres(name, realm), nil
+		return c.postgres(name, realm)
 	case "garage":
 		// Garage reads its config off the workspace volume. Rendering the mount
 		// without the volume produces a pod the API server rejects for a reason
@@ -36,25 +36,26 @@ func (c *compileState) infraService(service, realm string) (k8srender.ObjectSet,
 		"%q is declared as a service but the kubernetes driver cannot stand it up yet", service)
 }
 
-func (c *compileState) postgres(container, realm string) k8srender.ObjectSet {
+func (c *compileState) postgres(container, realm string) (k8srender.ObjectSet, error) {
 	objName := k8srender.Name(container, k8srender.WorkloadNameMax)
 	svcName := k8srender.Name(container, k8srender.ServiceNameMax)
 	labels := c.infraLabels(svcName, container, realm)
 
-	// The superuser comes from the service secrets gitops writes, because the
-	// coordinates a business process is handed come from that same file: a
-	// password generated here instead would mean the database and the things
-	// told how to reach it disagree. A workspace that has no such file yet gets
-	// a stable generated one, so a first apply still stands the database up.
-	creds := map[string]string{
-		"POSTGRES_USER":     "postgres",
-		"POSTGRES_PASSWORD": stableSecret("postgres", container),
-		"POSTGRES_DB":       "postgres",
-	}
+	// The superuser comes from the service secrets gitops writes, and from
+	// nowhere else. The coordinates a business process is handed come from that
+	// same file, so anything generated here would mean the database and the
+	// things told how to reach it disagree — and a generated one had a constant
+	// fallback seed, which is a superuser password printed in the source.
+	creds := map[string]string{"POSTGRES_DB": "postgres"}
 	for k, v := range core.ServiceSecrets(c.ctx.SecretsDir, "postgres", realm) {
 		if k == "POSTGRES_USER" || k == "POSTGRES_PASSWORD" {
 			creds[k] = v
 		}
+	}
+	if creds["POSTGRES_USER"] == "" || creds["POSTGRES_PASSWORD"] == "" {
+		return nil, fmt.Errorf(
+			"%s has no superuser credentials: gitops writes them beside the other secrets, "+
+				"and inventing one here would be a password nobody chose", container)
 	}
 	secretName := objName + "-superuser"
 	objs := k8srender.ObjectSet{k8srender.Secret(secretName, creds)}
@@ -78,7 +79,7 @@ func (c *compileState) postgres(container, realm string) k8srender.ObjectSet {
 			Failures:      60,
 		},
 	})...)
-	return objs
+	return objs, nil
 }
 
 func (c *compileState) garage(container, realm string) k8srender.ObjectSet {
@@ -320,21 +321,6 @@ func envOr(env, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-// stableSecret derives a password from the workspace's own secret material so it
-// is the same on every apply — a fresh one each time would lock the database out
-// of itself on the second reconcile — without being a constant anyone can guess.
-func stableSecret(purpose, scope string) string {
-	seed := os.Getenv("BITSWAN_INFRA_DRIVER_TOKEN")
-	if seed == "" {
-		seed = "bitswan"
-	}
-	return k8srender.LabelValue(purpose + "-" + hashHex(seed + "/" + scope)[:24])
-}
-
-func hashHex(s string) string {
-	return k8srender.HashHex(s)
 }
 
 // containerMounts is the data volume, the staged tools, and any single files
