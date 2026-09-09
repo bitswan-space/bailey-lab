@@ -40,6 +40,24 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "pods/log", "events"]
     verbs: ["get", "list", "watch"]
+  # Creating a workspace means creating the services it runs. This is the
+  # namespace's form of the Docker socket the daemon holds on a host — and a far
+  # narrower one: it can act in this namespace and nowhere else, and the API
+  # server enforces that rather than trusting the daemon to scope itself.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Claims can be created but never deleted: a workspace's data outliving a
+  # mistake is enforced by the API server, not by remembering not to.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "patch"]
   # What the namespace is allowed to use, which is the honest replacement for
   # reading the node's /proc/meminfo as if it were this server's budget.
   - apiGroups: [""]
@@ -255,6 +273,16 @@ spec:
               value: 127.0.0.1:443
             - name: HOME
               value: /root
+            - name: BITSWAN_K8S_VOLUME_CLAIM
+              value: bailey-config
+            - name: BITSWAN_K8S_PULL_POLICY
+              value: ${PULL_POLICY}
+            - name: BITSWAN_GITOPS_IMAGE
+              value: ${GITOPS_IMAGE}
+            - name: BITSWAN_DASHBOARD_IMAGE
+              value: ${DASHBOARD_IMAGE}
+            - name: BITSWAN_CODING_AGENT_IMAGE
+              value: ${CODING_AGENT_IMAGE}
           ports:
             - name: docs
               containerPort: 8080

@@ -29,6 +29,9 @@ export PROXY_IMAGE="quay.io/oauth2-proxy/oauth2-proxy:v7.7.1"
 export REDIS_IMAGE="redis:7-alpine"
 export KEYCLOAK_IMAGE="quay.io/keycloak/keycloak:26.0"
 export OTEL_IMAGE="otel/opentelemetry-collector:0.115.1"
+export GITOPS_IMAGE="bitswan/gitops-dev:latest"
+export DASHBOARD_IMAGE="bitswan/workspace-dashboard-dev:latest"
+export CODING_AGENT_IMAGE="bitswan/coding-agent-dev:latest"
 
 export OIDC_ISSUER="http://${KC_HOST}:${KC_PORT}/realms/bitswan"
 export OIDC_HOST="${KC_HOST}:${KC_PORT}"
@@ -51,7 +54,8 @@ SUBST='${NAMESPACE} ${DOMAIN} ${STORAGE_SIZE} ${PULL_POLICY} ${DAEMON_IMAGE}
 ${TRAEFIK_IMAGE} ${PROXY_IMAGE} ${REDIS_IMAGE} ${KEYCLOAK_IMAGE} ${OTEL_IMAGE}
 ${KC_HOST} ${KC_PORT} ${OIDC_ISSUER} ${OIDC_HOST} ${OIDC_CLIENT_ID}
 ${OIDC_CLIENT_SECRET} ${OIDC_COOKIE_SECRET} ${REALM_JSON_INDENTED}
-${OTEL_CONFIG_INDENTED}'
+${OTEL_CONFIG_INDENTED} ${GITOPS_IMAGE} ${DASHBOARD_IMAGE}
+${CODING_AGENT_IMAGE}'
 
 echo "=== [1/5] namespace ${NAMESPACE} ==="
 # Command one of the two. The label is part of it: the egress firewall's rule

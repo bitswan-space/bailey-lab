@@ -1097,6 +1097,14 @@ func workspaceDashboardEndpoint(workspaceName string) string {
 
 // isWorkspaceTraefikRunning checks if a workspace sub-traefik container is running.
 func isWorkspaceTraefikRunning(workspaceName string) bool {
+	// A namespace has no per-workspace Traefik. It exists on Docker because a
+	// workspace's stage networks are bridges the gate cannot reach, so something
+	// multi-homed onto them has to forward; in one namespace the gate resolves a
+	// workspace Service itself. Routes then take the branch that registers both
+	// hostnames at the auth proxy and lets the gate resolve the real upstream.
+	if onKubernetes() {
+		return false
+	}
 	containerName := fmt.Sprintf("%s__traefik", workspaceName)
 	out, err := exec.Command("docker", "ps", "-q", "-f", fmt.Sprintf("name=%s", containerName)).Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""

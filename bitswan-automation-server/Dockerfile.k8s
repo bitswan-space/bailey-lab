@@ -16,6 +16,14 @@
 ARG RUNTIME_IMAGE=bitswan/automation-server-runtime:latest
 FROM ${RUNTIME_IMAGE}
 
+# kubectl: the daemon brings a workspace's services up by applying objects, the
+# way it brings containers up by running docker on a host. Same reasoning as the
+# runtime image carrying the docker CLI.
+ARG KUBECTL_VERSION=v1.31.5
+RUN curl -fsSL -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl" && \
+    chmod 0755 /usr/local/bin/kubectl && kubectl version --client=true
+
 COPY bitswan /usr/local/bin/bitswan
 RUN chmod 0755 /usr/local/bin/bitswan && /usr/local/bin/bitswan version
 

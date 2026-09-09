@@ -727,14 +727,37 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
-	// Docker compose project names must be lowercase
-	projectName := strings.ToLower(workspaceName) + "-site"
-	// Use --pull missing to pull images if they don't exist locally (needed for CI)
-	dockerComposeCom := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--pull", "missing")
-
 	fmt.Println("Launching BitSwan Workspace services...")
-	if err := util.RunCommandVerbose(dockerComposeCom, true); err != nil {
-		return fmt.Errorf("failed to start docker-compose: %w", err)
+	if onKubernetes() {
+		// A namespace has no compose project. The same services, declared as
+		// objects and applied to this namespace; the compose file above is still
+		// written because it is the record of what a workspace is made of, and
+		// the update path reads it back.
+		gi, di, ai := k8sWorkspaceImages(gitopsImage, dashboardImage, codingAgentImage)
+		if err := bringUpWorkspaceK8s(context.Background(), workspaceK8sConfig{
+			Workspace:         workspaceName,
+			Domain:            domain,
+			VolumeClaim:       k8sWorkspaceVolumeClaim(),
+			GitopsImage:       gi,
+			DashboardImage:    di,
+			CodingAgentImage:  ai,
+			PullPolicy:        k8sPullPolicy(),
+			GitopsSecret:      token,
+			CodingAgentSecret: codingAgentSecret,
+			CertsDir:          os.Getenv("HOME") + "/.config/bitswan/certauthorities",
+			WithDashboard:     !noDashboard,
+			WithCodingAgent:   !noCodingAgent,
+		}); err != nil {
+			return fmt.Errorf("failed to start workspace services: %w", err)
+		}
+	} else {
+		// Docker compose project names must be lowercase
+		projectName := strings.ToLower(workspaceName) + "-site"
+		// Use --pull missing to pull images if they don't exist locally (needed for CI)
+		dockerComposeCom := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--pull", "missing")
+		if err := util.RunCommandVerbose(dockerComposeCom, true); err != nil {
+			return fmt.Errorf("failed to start docker-compose: %w", err)
+		}
 	}
 
 	fmt.Println("BitSwan GitOps initialized successfully!")
