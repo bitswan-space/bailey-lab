@@ -6,6 +6,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/dockerdriver"
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/k8sdriver"
 )
 
 // newDriver picks the backend that realizes a workspace declaration.
@@ -22,7 +23,10 @@ func newDriver(kind string, cf ctxFlags) (infradriver.Driver, error) {
 	case "", "docker":
 		return dockerdriver.New(cf.workspace), nil
 	case "k8s", "kubernetes":
-		return nil, fmt.Errorf("the kubernetes backend is not wired up yet")
+		return k8sdriver.New(k8sdriver.Options{
+			Workspace: cf.workspace,
+			Namespace: cf.namespace,
+		})
 	default:
 		return nil, fmt.Errorf("unknown infra driver %q (want docker or k8s)", kind)
 	}

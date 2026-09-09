@@ -50,4 +50,5 @@ var (
 	readAutomationConfig    = core.ReadAutomationConfig
 	firstNonEmpty           = core.FirstNonEmpty
 	loadRegistry            = core.LoadRegistry
+	reconcileIngress        = core.ReconcileIngress
 )

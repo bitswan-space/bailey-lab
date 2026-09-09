@@ -137,6 +137,13 @@ func LabelValue(v string) string {
 	return strings.Trim(clean[:LabelValueMax-7], "-_.") + "-" + hex.EncodeToString(sum[:])[:6]
 }
 
+// HashHex is the hex sha256 of s, used wherever a value has to be derived the
+// same way every time from something that is not itself safe to expose.
+func HashHex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
 // Mount is one path a workload sees, taken from a subdirectory of the
 // workspace's volume — the same shape the Docker driver mounts as a named-volume
 // subpath.

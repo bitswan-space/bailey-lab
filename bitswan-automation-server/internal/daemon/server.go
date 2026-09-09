@@ -433,6 +433,15 @@ func (s *Server) Run() error {
 	}
 	s.docsListener = docsListener
 
+	// In a namespace a workspace's services are their own pods and cannot share
+	// this daemon's socket, so the routes they may call are served over TCP
+	// behind the workspace's token — and only those routes are registered there.
+	if onKubernetes() {
+		if err := s.startWorkspaceAPI(); err != nil {
+			return fmt.Errorf("failed to start the workspace API: %w", err)
+		}
+	}
+
 	// Loopback-only listener for the identity-trusting Bailey management + gate
 	// handlers (issue #183 / BSY-05): reachable solely by the in-process gate,
 	// never by another container on the shared bitswan_network.

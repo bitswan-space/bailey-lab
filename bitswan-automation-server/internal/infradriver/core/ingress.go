@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 )
 
-// reconcileIngress declaratively converges the workspace's gitops-managed
+// ReconcileIngress declaratively converges the workspace's gitops-managed
 // ingress routes to exactly `routes` by POSTing the complete set to the daemon's
 // /ingress/reconcile. The driver owns this (k8s-style: whatever applies the
 // manifests configures the Ingress) — gitops no longer touches routing.
@@ -25,7 +25,7 @@ import (
 // bp scopes the reconcile to one business process (per-BP deploy repos): the
 // daemon then prunes only THIS bp's gitops-managed routes, never a sibling's.
 // Empty bp = legacy whole-workspace convergence (prune all gitops routes).
-func reconcileIngress(ctx context.Context, workspaceName, bp string, routes []infradriver.Route) error {
+func ReconcileIngress(ctx context.Context, workspaceName, bp string, routes []infradriver.Route) error {
 	body, err := json.Marshal(ingressReconcileRequest{
 		WorkspaceName:   workspaceName,
 		BusinessProcess: bp,
