@@ -27,6 +27,7 @@ import (
 type podRef struct {
 	pod       string
 	container string
+	name      string
 	labels    map[string]string
 	state     string
 	health    string
@@ -115,7 +116,14 @@ func (d *K8sDriver) pods(ctx context.Context, filter infradriver.ContainerFilter
 		if !matchesAll(labels, post) {
 			continue
 		}
-		name := labels["bitswan.io/name"]
+		// The name a caller knows this by is the one it would have on a Docker
+		// host: gitops and the provisioner both address containers as
+		// <workspace>__<service>-<realm>, and neither should have to learn what
+		// a pod is called.
+		name := labels[k8srender.ContainerNameLabel]
+		if name == "" {
+			name = labels[k8srender.NameLabel]
+		}
 		if name == "" {
 			name = item.Metadata.Name
 		}
@@ -124,6 +132,7 @@ func (d *K8sDriver) pods(ctx context.Context, filter infradriver.ContainerFilter
 			out = append(out, podRef{
 				pod:       item.Metadata.Name,
 				container: cs.Name,
+				name:      name,
 				labels:    labels,
 				state:     state,
 				health:    health,
@@ -147,9 +156,6 @@ func mergedLabels(labels, annotations map[string]string) map[string]string {
 	for k, v := range annotations {
 		if strings.HasPrefix(k, "gitops.bitswan.io/") {
 			out["gitops."+strings.TrimPrefix(k, "gitops.bitswan.io/")] = v
-		}
-		if k == "bitswan.io/name" {
-			out[k] = v
 		}
 	}
 	return out
@@ -197,8 +203,14 @@ func (d *K8sDriver) target(ctx context.Context, container string) (podRef, error
 			return p, nil
 		}
 	}
+	want := k8srender.LabelValue(container)
 	for _, p := range all {
-		if p.labels["bitswan.io/name"] == container {
+		if p.labels[k8srender.ContainerNameLabel] == want {
+			return p, nil
+		}
+	}
+	for _, p := range all {
+		if p.labels[k8srender.NameLabel] == want {
 			return p, nil
 		}
 	}
@@ -220,7 +232,7 @@ func (d *K8sDriver) ContainerList(ctx context.Context, req infradriver.Workspace
 	for _, p := range pods {
 		out = append(out, infradriver.Container{
 			ID:      p.id,
-			Name:    p.labels["bitswan.io/name"],
+			Name:    p.name,
 			State:   p.state,
 			Health:  p.health,
 			Image:   p.image,
@@ -257,7 +269,7 @@ func (d *K8sDriver) ContainerStats(ctx context.Context, req infradriver.Workspac
 	for _, p := range pods {
 		out = append(out, infradriver.ContainerStat{
 			ID:            p.id,
-			Name:          p.labels["bitswan.io/name"],
+			Name:          p.name,
 			MemUsageBytes: usage[p.id],
 			Labels:        p.labels,
 		})
@@ -507,7 +519,7 @@ func (d *K8sDriver) ContainerInspect(ctx context.Context, req infradriver.Worksp
 
 	record := map[string]interface{}{
 		"Id":           t.id,
-		"Name":         "/" + t.labels["bitswan.io/name"],
+		"Name":         "/" + t.name,
 		"Created":      pod.Metadata.CreationTimestamp.Format(time.RFC3339),
 		"RestartCount": restarts,
 		"State": map[string]interface{}{
