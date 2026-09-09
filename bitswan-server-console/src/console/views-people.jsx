@@ -288,6 +288,7 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
   const [busy, setBusy] = useP(false);
   const [submitErr, setSubmitErr] = useP('');
   const [created, setCreated] = useP(null); // { email, link } — invite made, link to copy
+  const [orgInvited, setOrgInvited] = useP(null);
 
   const load = async () => {
     setLoadErr(''); setUsers(null);
@@ -302,7 +303,7 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
   usePE(() => {
     if (!open) return;
     setQuery(''); setSelected(''); setRole('member');
-    setSubmitErr(''); setCreated(null);
+    setSubmitErr(''); setCreated(null); setOrgInvited(null);
     load();
   }, [open]);
 
@@ -323,14 +324,35 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
     (u.email || '').toLowerCase().includes(query.toLowerCase())
     || (u.username || '').toLowerCase().includes(query.toLowerCase()));
 
+  const typed = query.trim().toLowerCase();
+  const looksLikeEmail = /^[^@\s]+@[^@\s.]+\.[^@\s]+$/.test(typed);
+  const offerOrgInvite = looksLikeEmail
+    && !(users || []).some(u => (u.email || '').toLowerCase() === typed);
+
+  const orgInvite = async () => {
+    setBusy(true); setSubmitErr('');
+    try {
+      const r = await PApi.orgInvite(typed, role);
+      setOrgInvited({ email: typed, accountCreated: !!(r && r.account_created) });
+      toast(`Invitation emailed to ${typed}`, 'success');
+    } catch (e) {
+      setSubmitErr(e.message || 'Could not send the invitation.');
+    } finally { setBusy(false); }
+  };
+
   return (
     <PModal open={open} onClose={onClose} title="Invite someone" icon="user-plus" width={560}
-      subtitle="Only members of this server's organization can be invited. You get a single-use 48-hour link to pass on yourself — the server never sends it. Their first device is trusted when they open it."
+      subtitle="Pick someone from this server's organization to get a single-use 48-hour link you pass on yourself — the server never sends it, and their first device is trusted when they open it. Or type a new email address to invite that person to the organization, which the AOC emails them."
       footer={
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%' }}>
           <span style={{ flex: 1 }} />
           <PBtn variant={created ? 'primary' : 'default'} onClick={onClose}>{created ? 'Done' : 'Close'}</PBtn>
-          {!created && (
+          {!created && !orgInvited && offerOrgInvite && (
+            <PBtn variant="primary" leftIcon="mail" disabled={busy} onClick={orgInvite}>
+              {busy ? 'Sending\u2026' : 'Invite to organization'}
+            </PBtn>
+          )}
+          {!created && !orgInvited && !offerOrgInvite && (
             <PBtn variant="primary" leftIcon="link" disabled={!selected || busy} onClick={create}>
               {busy ? 'Creating\u2026' : 'Create invite link'}
             </PBtn>
@@ -340,6 +362,15 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
       {/* the invite exists — the admin's only job left is to deliver the link */}
       {created ? (
         <InviteLinkPanel email={created.email} link={created.link} />
+      ) : orgInvited ? (
+        <div style={{ display: 'flex', gap: 10, padding: 13, background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}` }}>
+          <PIcon name="check" size={15} color={PC.primary} style={{ marginTop: 1, flex: '0 0 auto' }} />
+          <span style={{ fontSize: 12.5, color: PC.fg, lineHeight: '18px' }}>
+            Invitation emailed to <strong>{orgInvited.email}</strong>.
+            {orgInvited.accountCreated ? ' Their account was created and added' : ' They were added'} to this
+            server's organization. Once they set a password and sign in, invite them here again for a device link.
+          </span>
+        </div>
       ) : (
       <>
       {/* who */}
@@ -359,11 +390,22 @@ function InviteDialog({ open, onClose, ctx, onChanged }) {
         <>
           <div style={{ position: 'relative', marginBottom: 10 }}>
             <PIcon name="search" size={14} color={PC.mutedFg} style={{ position: 'absolute', left: 11, top: 11 }} />
-            <PTextInput value={query} onChange={setQuery} placeholder="Search organization users\u2026" style={{ paddingLeft: 32 }} autoFocus />
+            <PTextInput value={query} onChange={setQuery} placeholder="Search, or type an email to invite someone new\u2026" style={{ paddingLeft: 32 }} autoFocus />
           </div>
           {list.length === 0 ? (
-            <PEmpty icon="users" title={query ? 'No users match' : 'No organization users'}
-              text={query ? 'Try a different search term.' : 'No users were returned for this organization.'} />
+            offerOrgInvite ? (
+              <div style={{ display: 'flex', gap: 10, padding: 13, background: PC.surface, borderRadius: 10, border: `1px solid ${PC.border}` }}>
+                <PIcon name="user-plus" size={15} color={PC.primary} style={{ marginTop: 1, flex: '0 0 auto' }} />
+                <span style={{ fontSize: 12.5, color: PC.fg, lineHeight: '18px' }}>
+                  <strong>{typed}</strong> is not in this server's organization yet.
+                  {' '}Invite them and the AOC will email them a link to set up their account.
+                  {' '}They will still pair a device the usual way once they can sign in.
+                </span>
+              </div>
+            ) : (
+              <PEmpty icon="users" title={query ? 'No users match' : 'No organization users'}
+                text={query ? 'Try a different search term, or type a full email address to invite someone new.' : 'No users were returned for this organization.'} />
+            )
           ) : (
             <div style={{ maxHeight: 260, overflow: 'auto', border: `1px solid ${PC.border}`, borderRadius: 10 }}>
               {list.map(u => {

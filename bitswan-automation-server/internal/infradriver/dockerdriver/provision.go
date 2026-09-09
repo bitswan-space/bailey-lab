@@ -417,13 +417,20 @@ func freshDeploymentIDs(preExistingIDs map[string]bool, infos []containerInfo) m
 }
 
 func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, preExistingIDs map[string]bool, infos []containerInfo, report func(step, msg string)) error {
-	// Only the backends THIS apply (re)created can have a not-yet-existing live
-	// DB — one that's been running already proved its DB exists. Match a
-	// deployment to its container by the gitops.deployment_id label; a container
-	// whose id wasn't present before this apply is fresh. fresh==nil means we
-	// couldn't scope (no pre-snapshot, or the container list failed) → process
-	// every deployment, the old whole-workspace behavior (safe).
+	// Match a deployment to its container by the gitops.deployment_id label; a
+	// container whose id wasn't present before this apply is fresh. fresh==nil
+	// means we couldn't scope (no pre-snapshot, or the container list failed) →
+	// process every deployment, the old whole-workspace behavior (safe).
 	fresh := freshDeploymentIDs(preExistingIDs, infos)
+	dbsByRealm := map[string]map[string]bool{}
+	databaseAlreadyExists := func(realm, container, user, dbName string) bool {
+		set, listed := dbsByRealm[realm]
+		if !listed {
+			set, _ = listPostgresDBs(ctx, container, user)
+			dbsByRealm[realm] = set
+		}
+		return set[dbName]
+	}
 
 	reg := loadRegistry(wctx.SecretsDir)
 	seen := map[string]bool{}
@@ -432,9 +439,7 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 		if conf == nil {
 			continue
 		}
-		if fresh != nil && !fresh[depID] {
-			continue // unchanged backend — its live DB already exists
-		}
+		unchangedSinceLastApply := fresh != nil && !fresh[depID]
 		bpSlug, copyName := deriveBPAndCopy(conf.RelativePath)
 		stage := conf.StageOrProduction()
 		realm := realmForStage(stage)
@@ -458,6 +463,9 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 			}
 			user := secrets["POSTGRES_USER"]
 			container := serviceContainerName(wctx.WorkspaceName, "postgres", realm)
+			if unchangedSinceLastApply && databaseAlreadyExists(realm, container, user, target) {
+				continue
+			}
 			if err := waitForPostgres(ctx, container, user); err != nil {
 				return err
 			}
@@ -503,6 +511,9 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 				continue
 			}
 			seen["bp:"+dbName] = true
+			if unchangedSinceLastApply && databaseAlreadyExists(realm, container, user, dbName) {
+				continue
+			}
 			report("provision", "Ensuring Postgres database "+dbName)
 			if err := waitForPostgres(ctx, container, user); err != nil {
 				return err

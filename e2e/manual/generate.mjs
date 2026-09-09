@@ -243,6 +243,12 @@ async function renderPdf(htmlPath, pdfPath) {
 }
 
 async function main() {
+  // build/ holds generated output and is not in the repo, so a fresh checkout
+  // has none. Every write below targets it, so create it first — without this
+  // the generator dies on ENOENT before writing a line, which is what made it
+  // unusable outside an environment that had already run the walkthrough.
+  mkdirSync(BUILD, { recursive: true });
+
   const shots = loadShotsMap();
   const manual = attachShots(MANUAL, shots);
   const present = Object.keys(shots).length;
@@ -282,14 +288,37 @@ async function main() {
   // Re-write the saved HTML WITH the inline Paged.js polyfill so the standalone
   // file (the published Artifact) paginates itself in the browser on open —
   // page numbers on every sheet + resolved TOC page numbers.
+  // The chapters the PDF pass had to unfloat are baked into the saved HTML too,
+  // so the standalone file paginates the same way when a reader prints it from
+  // the browser. Empty when no PDF was rendered, which makes this a no-op.
   let savedHtml = cleanHtml;
   for (const ch of fullWidthChapters) {
     savedHtml = savedHtml.split(`<div class="two" data-ch="${ch}">`)
       .join(`<div class="two full-howto" data-ch="${ch}">`);
   }
-  writeHandbookScripts();
-  writeFileSync(htmlPath, withPagedjs(savedHtml));
-  console.log('Embedded Paged.js into ' + htmlPath + ' for standalone pagination.');
+  //
+  // MANUAL_NO_PAGED=1 leaves the polyfill out, which is what a build with no
+  // e2e node_modules needs: the polyfill is a dependency of this package, and
+  // pagination is presentation, not content. The handbook is a scrolling
+  // document without it. Like MANUAL_NO_PDF this is opt-IN — the default still
+  // fails loudly when the polyfill is missing, so a release can't quietly ship
+  // an unpaginated handbook. Either way the saved file is `savedHtml`, so the
+  // measured classes are not lost with the pagination.
+  //
+  // The scripts are sidecar files now rather than inlined, so this flag also
+  // decides whether they are written at all: writing them would throw on the
+  // very build the flag exists for (no node_modules, no polyfill to copy), and
+  // linking them without writing them would serve a document that 404s for its
+  // own pagination.
+  const paginate = process.env.MANUAL_NO_PAGED !== '1';
+  if (paginate) {
+    writeHandbookScripts();
+    writeFileSync(htmlPath, withPagedjs(savedHtml));
+    console.log('Embedded Paged.js into ' + htmlPath + ' for standalone pagination.');
+  } else {
+    writeFileSync(htmlPath, savedHtml);
+    console.log('MANUAL_NO_PAGED=1 — leaving the handbook unpaginated.');
+  }
 
   // Publish into the Server Console so the manual is built INTO the product:
   // the console serves these as static assets (/handbook/handbook.{html,pdf})
@@ -302,8 +331,12 @@ async function main() {
     if (existsSync(pdfPath)) copyFileSync(pdfPath, join(pub, 'handbook.pdf'));
     // The scripts handbook.html loads. Without them the console serves an
     // unpaginated document (#451) and a tab titled "Bailey" with no icon.
-    for (const f of [PAGED_FILENAME, NAVSYNC_FILENAME]) {
-      copyFileSync(join(BUILD, f), join(pub, f));
+    // Skipped under MANUAL_NO_PAGED, where they were never written and the
+    // saved HTML does not reference them.
+    if (paginate) {
+      for (const f of [PAGED_FILENAME, NAVSYNC_FILENAME]) {
+        copyFileSync(join(BUILD, f), join(pub, f));
+      }
     }
     console.log('Published handbook into the Server Console (' + pub + ').');
   }

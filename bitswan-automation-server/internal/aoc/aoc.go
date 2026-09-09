@@ -569,6 +569,45 @@ func (c *AOCClient) ListOrgUsers() ([]OrgUser, error) {
 	return response.Users, nil
 }
 
+type OrgInviteResult struct {
+	Email          string `json:"email"`
+	AccountCreated bool   `json:"account_created"`
+	Role           string `json:"role"`
+}
+
+func (c *AOCClient) InviteToOrg(email, invitedBy, role string) (*OrgInviteResult, error) {
+	url := fmt.Sprintf("%s/api/automation_server/org-invite", c.settings.AOCUrl)
+	payload, err := json.Marshal(map[string]string{
+		"email": email, "invited_by": invitedBy, "role": role,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error encoding org invite: %w", err)
+	}
+	resp, err := c.sendRequest("POST", url, payload)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		var apiErr struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		if json.Unmarshal(body, &apiErr) == nil && apiErr.Error != "" {
+			return nil, fmt.Errorf("%s", apiErr.Error)
+		}
+		return nil, fmt.Errorf("failed to invite %s to the organization: %s", email, resp.Status)
+	}
+
+	var result OrgInviteResult
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("error decoding JSON: %w", err)
+	}
+	return &result, nil
+}
+
 // GetWorkspaceIdentityEnv is the AOC-derived env a workspace's containers
 // receive: the worker identity contract, and nothing else.
 //

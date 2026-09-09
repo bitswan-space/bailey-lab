@@ -114,6 +114,24 @@ blue-green / DR shots) run it in a KVM VM (above), or trigger the KVM build on a
 capable host (see `bp-lifecycle-e2e-vm.yml`, which SSHes to a KVM host and runs
 `run-qemu.sh`).
 
+## One suite, one fresh server
+
+Claiming a server trusts the browser that claimed it, and every other browser
+then arrives as an untrusted device that needs an admin to approve it. So a
+suite that claims cannot share a server with another suite that claims. That is
+why `tests-device-trust/` is a SEPARATE testDir with its own config rather than
+another file under `tests/` — `npm test` would otherwise run both against one
+server and the second one would sit on the pairing scene forever.
+
+```bash
+e2e/local-vm/run-device-trust-e2e.sh     # in the guest: reset, bring up, run it
+npm run test:device-trust                # against a stack that is already up
+```
+
+It stands the IdP up on its own registrable domain (`E2E_KC_DOMAIN`), because
+whether Keycloak is a sibling of the Bailey hosts decides whether the device
+cookie survives the round trip through the login form.
+
 ## Layout
 
 | path | what |
@@ -123,5 +141,6 @@ capable host (see `bp-lifecycle-e2e-vm.yml`, which SSHes to a KVM host and runs
 | `scenario.ts` | the Meridian Foods invoice-processing demo story (CZ/SK/DE cast) |
 | `fixtures/bitswan.ts` | login, dashboard-frame, and `capture()` helpers |
 | `tests/walkthrough.spec.ts` | the ordered product walkthrough |
+| `tests-device-trust/` | device trust across sign-out/sign-in — its own suite, own fresh server |
 | `manual/content.mjs` · `template.mjs` · `generate.mjs` | the handbook (copy · design · build) |
 | `local-vm/` | clean KVM-VM runners (raw QEMU + Vagrant) + guest provisioning |
