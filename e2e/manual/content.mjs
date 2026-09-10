@@ -276,12 +276,13 @@ export const MANUAL = {
       slots: [
         { id: 'promote-progress', label: 'Live capture', caption: 'Promotion in flight (dev → staging) · the idle slot coming up, the live step streaming, before the cutover' },
         { id: 'promote-progress-prod', label: 'Live capture', caption: 'Promotion in flight (staging → production) · the standby slot building on the live database before the production cutover' },
-        { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · Production Healthy after promotion, every stage green' },
+        { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · Production Healthy after promotion — every stage filled green (deployed) and ticked (its containers seen running)' },
       ],
       sell: [
         'Promote a stage and the idle slot comes up on that stage’s live database, ingress repoints to it, and the old slot retires. The pipeline streams its live step the whole way as the standby slot builds and starts, so a promotion is never a black box — and users never see a gap.',
         'What promotes is the <strong>image, verbatim</strong>: promotion re-deploys the exact bytes that were built and reviewed, even if the workspace source has moved on since. So what runs in production is precisely what was exercised in staging, not a fresh rebuild that might drift.',
         'Anyone on the team can promote <strong>dev → staging</strong>. Production is different: it is a <strong>gated</strong> step that opens only once staging has been frozen and audited — that is the next chapter. Either way, the pipeline is a state you can read at a glance: which slot is live, which is standby, what is <strong>Healthy</strong>, and the version each stage is current on.',
+        'Each stage in the pipeline carries <strong>two separate marks, and they answer two different questions</strong>. The circle’s <strong>green fill</strong> says something is <em>deployed</em> to that stage. The small badge on its corner says what those containers are <em>actually doing</em>: a <strong>green tick</strong> only when every one of them was seen running, a <strong>violet ↻</strong> when one keeps restarting, a <strong>red warning</strong> when one is not running at all, a <strong>blue dot</strong> when the stage is asleep and will wake on access, and a plain <strong>grey dot</strong> when Bailey has not read that stage’s containers from here. So a stage can be filled green — deployed — and still not be ticked, and that combination is the one worth looking at: the code is live and it is not well. A tick is never given for “we did not look”.',
       ],
       steps: ['Open <b>Deployments</b>.', 'Press <b>Promote all to Staging</b> and watch the blue-green cutover come up <b>Healthy</b>.', 'Exercise the app on staging — its own data, never production’s.', 'Production is gated — freeze &amp; audit it first (next chapter), then <b>Promote to Production</b>.'],
       specs: [{ v: '3 slots', l: 'blue-green over 2 DBs' }, { v: '0 s', l: 'downtime on promote' }, { v: 'verbatim', l: 'the reviewed image ships' }],
@@ -368,6 +369,7 @@ export const MANUAL = {
       ],
       sell: [
         'The <strong>Containers</strong> section is the operator’s ground truth for a stage: each member of the deployment as a real running container, with its status. Open <em>Logs</em> to read what it’s doing, <em>Inspect</em> for its configuration, or restart/stop a single service without touching the rest.',
+        'The status is the container’s own, not an intention: a service caught in a crash loop reads <strong>Restarting</strong> — never “running” — and carries <strong>how many times</strong> Docker has had to bring it back, because a container restarted twice during a deploy and one restarted twenty thousand times are not the same thing and no colour can tell them apart. That same count is on <em>Inspect</em> for any container.',
         'On Disaster Recovery, each container resolves to the standby slot’s own instance — so you operate the recovered app, not the live one.',
       ],
       steps: ['Open a stage → <b>Containers</b>.', 'Read status per service.', 'Use <b>Logs</b> / <b>Inspect</b> to investigate.', 'Restart or stop a single container if needed.'],
