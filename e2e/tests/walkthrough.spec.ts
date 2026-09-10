@@ -2993,7 +2993,13 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // "manual" badge + a Restore button appears. This is a LONG op — watch it
     // with the progress rule: the snapshot task streams step labels (Restoring
     // Postgres…/CouchDB…/object storage…) and must not go dark >PROGRESS.
-    const restoreRow = d.getByRole('button', { name: /^Restore$/ }).first();
+    //
+    // The signal is the snapshot ROW, which carries a "manual" badge — not a
+    // Restore button. An unscoped /^Restore$/ also matches the pipeline's
+    // RESTORE pill, which is on screen from the moment the stage renders, so
+    // the wait below returned immediately: the chapter passed while the
+    // snapshot was still at 0%, and went on passing when it failed outright.
+    const restoreRow = d.getByText(/^manual$/).first();
     let last = await progressSignature();
     const deadline = Date.now() + 30 * 60_000;
     for (;;) {

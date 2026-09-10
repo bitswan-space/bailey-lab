@@ -207,31 +207,49 @@ func (d *K8sDriver) target(ctx context.Context, container string) (podRef, error
 	if err != nil {
 		return podRef{}, err
 	}
-	// The handle this driver hands out, a Docker-style name, or a bare pod: in
-	// that order, and never a guess.
+	if t, ok := resolveTarget(all, container); ok {
+		return t, nil
+	}
+	return podRef{}, fmt.Errorf("refused: %q is not a container of workspace %q in namespace %q",
+		container, d.workspace, d.namespace)
+}
+
+// resolveTarget picks the container a caller means, in a fixed order and never
+// by guessing. Pure, so the order is a test rather than something only a
+// cluster can tell you.
+func resolveTarget(all []podRef, container string) (podRef, bool) {
+	// This driver's own handle for one container.
 	for _, p := range all {
 		if p.id == container {
-			return p, nil
+			return p, true
+		}
+	}
+	// The name it hands out for THIS container, which for a sidecar is the
+	// pod's with its own appended. Before the pod's label, because that label
+	// is one value shared by every container in the pod — so a sidecar asked
+	// for by its own name would match nothing at all.
+	for _, p := range all {
+		if p.name == container {
+			return p, true
 		}
 	}
 	want := k8srender.LabelValue(container)
 	for _, p := range all {
 		if p.labels[k8srender.ContainerNameLabel] == want {
-			return p, nil
+			return p, true
 		}
 	}
 	for _, p := range all {
 		if p.labels[k8srender.NameLabel] == want {
-			return p, nil
+			return p, true
 		}
 	}
 	for _, p := range all {
 		if p.pod == container {
-			return p, nil
+			return p, true
 		}
 	}
-	return podRef{}, fmt.Errorf("refused: %q is not a container of workspace %q in namespace %q",
-		container, d.workspace, d.namespace)
+	return podRef{}, false
 }
 
 func (d *K8sDriver) ContainerList(ctx context.Context, req infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
