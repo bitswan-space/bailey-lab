@@ -261,7 +261,12 @@ export function ContainersPane({ bp, copy, active }: Props) {
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <span className={STATUS_META[selected.status].labelColor}>
-                    {STATUS_META[selected.status].label}
+                    {/* STATUS_META's placeholder for 'unknown' is an em-dash,
+                        which reads as a broken line here rather than as a
+                        state. Say what it means instead. */}
+                    {selected.status === 'unknown'
+                      ? 'No container state'
+                      : STATUS_META[selected.status].label}
                   </span>
                   {!!selected.restartCount && (
                     <span className="text-violet-600">
