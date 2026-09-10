@@ -22,6 +22,7 @@ type systemStats struct {
 	MemUsedBytes  uint64  `json:"mem_used_bytes"`
 	MemFreeBytes  uint64  `json:"mem_free_bytes"`
 	MemUsedPct    float64 `json:"mem_used_pct"`
+	MemNote       string  `json:"mem_note,omitempty"`
 
 	DiskTotalBytes uint64  `json:"disk_total_bytes"`
 	DiskUsedBytes  uint64  `json:"disk_used_bytes"`
@@ -62,10 +63,11 @@ func sysStatsDiskPath() string {
 func gatherSystemStats() (*systemStats, error) {
 	s := &systemStats{CPUCount: runtime.NumCPU()}
 
-	memTotal, memAvail, err := serverMemory()
+	memTotal, memAvail, memNote, err := serverMemory()
 	if err != nil {
 		return nil, err
 	}
+	s.MemNote = memNote
 	s.MemTotalBytes = memTotal
 	s.MemFreeBytes = memAvail
 	if memTotal >= memAvail {
@@ -223,13 +225,11 @@ func readCPUSample() (idle, total uint64, err error) {
 // the node's memory as its own — an overview page confidently describing
 // somebody else's machine. The namespace's quota is the honest answer, and
 // where there is no quota there is no answer to give.
-func serverMemory() (total, avail uint64, err error) {
+func serverMemory() (total, avail uint64, note string, err error) {
 	if !onKubernetes() {
-		return readMemInfo()
+		total, avail, err = readMemInfo()
+		return total, avail, "", err
 	}
 	total, avail, warning := namespaceMemoryBudget(context.Background(), nil)
-	if warning != "" {
-		return 0, 0, fmt.Errorf("this namespace has no memory quota, so it has no memory budget to report")
-	}
-	return total, avail, nil
+	return total, avail, warning, nil
 }
