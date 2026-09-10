@@ -47,6 +47,13 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The shared vulnerability database is refreshed by a Job running the pinned
+  # gitops image — the namespace's form of the throwaway container the Docker
+  # path uses, and for the same reason: grype's binary and its database schema
+  # have to match the grype the workspaces actually scan with.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["services", "configmaps", "secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

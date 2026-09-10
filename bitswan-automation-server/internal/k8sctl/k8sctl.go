@@ -180,3 +180,57 @@ func WaitRollout(ctx context.Context, kind, name string, timeout time.Duration) 
 	}
 	return nil
 }
+
+// WaitJob blocks until a Job completes, and fails on the Job's own terms.
+//
+// `kubectl wait` has to be told which end it is waiting for, and waiting only
+// for "complete" hangs for the whole timeout on a Job that already failed. Both
+// conditions are watched, and the first to fire decides — cancelling the other,
+// so a success returns at once instead of waiting out the timeout that the
+// losing watcher is still holding.
+func WaitJob(ctx context.Context, name string, timeout time.Duration) error {
+	ns, err := Namespace()
+	if err != nil {
+		return err
+	}
+	watch, stop := context.WithCancel(ctx)
+	defer stop()
+
+	type outcome struct {
+		failed bool
+		fired  bool
+	}
+	results := make(chan outcome, 2)
+	for _, cond := range []string{"complete", "failed"} {
+		go func(cond string) {
+			cmd := exec.CommandContext(watch, "kubectl", "-n", ns, "wait",
+				"--for=condition="+cond, "job/"+name, "--timeout="+timeout.String())
+			cmd.Stdout, cmd.Stderr = nil, nil
+			err := cmd.Run()
+			results <- outcome{failed: cond == "failed", fired: err == nil}
+		}(cond)
+	}
+
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if !r.fired {
+			continue
+		}
+		stop()
+		if r.failed {
+			return fmt.Errorf("job %s failed: %s", name, jobLog(ctx, ns, name))
+		}
+		return nil
+	}
+	return fmt.Errorf("job %s neither completed nor failed within %s", name, timeout)
+}
+
+// jobLog is what the Job said, which is the only useful part of "it failed".
+func jobLog(ctx context.Context, ns, name string) string {
+	out, err := exec.CommandContext(ctx, "kubectl", "-n", ns, "logs",
+		"job/"+name, "--tail=20").Output()
+	if err != nil {
+		return "(no log)"
+	}
+	return strings.TrimSpace(string(out))
+}

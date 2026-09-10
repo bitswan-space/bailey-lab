@@ -102,6 +102,11 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			// business process off a named volume instead of a host path. In a
 			// namespace there is no host path to fall back to, and the driver
 			// renders volume mounts itself, so it is left unset.
+			// Point grype at the daemon's copy and stop it updating: the mount
+			// is read-only, and grype's auto-update would fight it with a
+			// "permission denied" that takes the whole scan down.
+			"GRYPE_DB_CACHE_DIR":          "/grype-db",
+			"BITSWAN_GRYPE_DB_MANAGED":    "1",
 			"BITSWAN_GITOPS_AGENT_SECRET": cfg.CodingAgentSecret,
 			// There is no socket to reach the daemon by from another pod, and
 			// gitops asks it who a person is before showing them anything an
@@ -121,6 +126,10 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			{Path: "/home/user1000/.ssh", SubPath: sub("ssh")},
 			{Path: "/git", SubPath: sub("git-repos")},
 			{Path: "/workspace-repo/copies", SubPath: sub("copies")},
+			// The daemon-owned vulnerability database, read-only. One per
+			// Bailey, not one per workspace, so it is a sibling of workspaces/
+			// rather than inside this one.
+			{Path: "/grype-db", SubPath: grypeDBSubPath, ReadOnly: true},
 		},
 		Readiness: &k8srender.Probe{TCPPort: 8079, PeriodSeconds: 5, Failures: 60},
 	}
