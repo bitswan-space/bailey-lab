@@ -844,6 +844,27 @@ class AutomationService:
     def forget_copy(self, copy: str) -> None:
         self._cache.pop(copy, None)
 
+    @staticmethod
+    def _worse_state(current: str | None, incoming: str) -> str:
+        """The less healthy of two container states for ONE deployment.
+
+        Replicas of a deployment share its deployment_id, so several containers
+        describe one entry. A dead replica beside a live one is not "running":
+        the operator has to see the worst of them, which is the same rule the
+        dashboard applies when it collapses records onto a row.
+        """
+        # Worst first. An unrecognised state ranks above "running" but below a
+        # known fault: it is an observation we cannot read, not a clean bill.
+        order = ["dead", "exited", "failed", "restarting", "paused", "created", "starting", "running"]
+        if not current:
+            return incoming
+        try:
+            return current if order.index(current) <= order.index(incoming) else incoming
+        except ValueError:
+            # Something outside the vocabulary — keep whichever is unknown, so
+            # it cannot be mistaken for a healthy reading.
+            return current if current not in order else incoming
+
     def _apply_docker_overlay(
         self,
         entries: list[DeployedAutomation],
@@ -877,6 +898,13 @@ class AutomationService:
                 if slot and base_id in by_id:
                     a = by_id[base_id].model_copy()
                     a.deployment_id = deployment_id
+                    # The clone must describe ITS OWN container, not inherit the
+                    # live slot's reading — the fields below are merged (worst
+                    # state wins, counts are kept), so anything carried over
+                    # from the base would stick to the standby slot.
+                    a.state = None
+                    a.container_id = None
+                    a.restart_count = None
                     entries.append(a)
                     by_id[deployment_id] = a
                 else:
@@ -910,9 +938,21 @@ class AutomationService:
             a.container_id = container.get("Id")
             a.endpoint_name = info.get("Name")
             a.created_at = created_at
-            a.state = container.get("State", "unknown")
+            # `deploy.replicas > 1` labels every replica with the SAME
+            # deployment_id, so this loop visits one entry several times. Taking
+            # the last container's word for it meant a 3-replica deployment with
+            # one replica crashlooping reported `running` — a healthy replica
+            # hiding a broken one, which is the bug the dashboard half of this
+            # change removes, still live at the source. So: the worst state
+            # observed wins, and a count that WAS read is never overwritten by
+            # a replica that carries none.
+            a.state = self._worse_state(a.state, container.get("State", "unknown"))
             a.status = container.get("Status", "")
-            a.restart_count = container.get("RestartCount")
+            count = container.get("RestartCount")
+            if count is not None:
+                a.restart_count = (
+                    count if a.restart_count is None else max(a.restart_count, count)
+                )
             a.automation_url = url
 
             # Memory overlay for the Containers tab: reservation + policy from the

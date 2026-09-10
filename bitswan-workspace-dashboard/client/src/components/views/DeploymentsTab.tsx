@@ -1250,7 +1250,10 @@ function ContainersSection({
   // an asleep stage still has its records (present=true) but no running container.
   const isUp = (m: Member) => isUpStatus(m.display);
   const anyRunning = members.some(isUp);
-  const asleep = members.length > 0 && members.every((m) => !isUp(m));
+  // Asleep means the members READ asleep — not merely that nothing is up, which
+  // also covers a stage whose containers all died (see lib/stageHealth.ts). The
+  // banner beside it promises "wakes on access"; that promise has to be true.
+  const asleep = members.length > 0 && members.every((m) => m.display === 'asleep');
   // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
   // so the message can attribute the sleep instead of a bare "asleep".
   const asleepReason = members.map((m) => m.asleepReason).find(Boolean) ?? null;
@@ -3110,20 +3113,24 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
               </div>
               <div className="flex flex-wrap gap-2.5">
                 {frontends.map((f) => {
-                  const running = f.display === 'running';
+                  const running = isUpStatus(f.display);
                   // A URL is openable even when the container is down: opening an
                   // on-demand host wakes it (loading screen → app). Only when there
                   // is no URL at all is it truly unreachable.
                   const openable = !!f.url;
-                  // "Asleep" is a promise that opening it wakes it. A container
-                  // in a restart loop is not asleep and opening it will not fix
-                  // it, so it says what is actually happening (bailey-lab #463).
+                  // "Asleep — opens with a loading screen" is a promise, and it
+                  // is only true for a container that is actually asleep.
+                  // Anything else gets what is actually happening: a restarting
+                  // frontend does serve between crashes (so it keeps its link),
+                  // and a stopped/failed/unknown one is not waiting to be woken.
                   const subtitle = f.url
-                    ? running
-                      ? f.url.replace('https://', '')
-                      : f.display === 'restarting'
-                        ? 'Restarting — the container keeps dying'
-                        : 'Asleep — opens with a loading screen'
+                    ? f.display === 'restarting'
+                      ? 'Restarting — the container keeps dying'
+                      : running
+                        ? f.url.replace('https://', '')
+                        : f.display === 'asleep'
+                          ? 'Asleep — opens with a loading screen'
+                          : STATUS_META[f.display].label
                     : 'Not deployed';
                   const inner = (
                     <>

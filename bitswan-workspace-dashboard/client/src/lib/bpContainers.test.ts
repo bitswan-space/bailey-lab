@@ -57,8 +57,12 @@ test('one healthy record does not hide a broken one behind the same name', () =>
   const c = only(
     bpContainers(
       [
-        rec({ deployment_id: 'backend-7622-production', state: 'running' }),
-        rec({ deployment_id: 'backend-7622-production@green', state: 'restarting' }),
+        // Two records for one name in one copy — the shape the blue/green
+        // slots have. (A copy's pane can only ever see its own live-dev
+        // records: `main` is excluded from the copies listing, and the
+        // promoted stages live under `copies/main/…`.)
+        rec({ deployment_id: 'backend-live-dev', state: 'running' }),
+        rec({ deployment_id: 'backend-live-dev@green', state: 'restarting' }),
       ],
       COPY,
       BP,
@@ -100,8 +104,8 @@ test('the restart count comes through, and the highest of a set wins', () => {
   const c = only(
     bpContainers(
       [
-        rec({ deployment_id: 'backend-7622-production', restart_count: 12 }),
-        rec({ deployment_id: 'backend-7622-production@green', restart_count: 23032 }),
+        rec({ deployment_id: 'backend-live-dev', restart_count: 12 }),
+        rec({ deployment_id: 'backend-live-dev@green', restart_count: 23032 }),
       ],
       COPY,
       BP,
@@ -152,9 +156,9 @@ test('asleep outranks running when a name collapses several records', () => {
   const c = only(
     bpContainers(
       [
-        rec({ deployment_id: 'backend-7622-production', state: 'running' }),
+        rec({ deployment_id: 'backend-live-dev', state: 'running' }),
         rec({
-          deployment_id: 'backend-7622-production@green',
+          deployment_id: 'backend-live-dev@green',
           active: false,
           state: null,
           container_id: null,
@@ -196,4 +200,22 @@ test('a RUNNING container never reads as asleep, whatever the flags say', () => 
     only(bpContainers([rec({ asleep_reason: 'manual', state: 'running' })], COPY, BP)).status,
     'running',
   );
+});
+
+test('the row points its buttons at the record its dot describes', () => {
+  // Worst-wins picks which record the row is about, so the deployment id has
+  // to come from that same record — otherwise the dot describes one container
+  // while Logs and Restart act on another.
+  const c = only(
+    bpContainers(
+      [
+        rec({ deployment_id: 'backend-live-dev', state: 'running' }),
+        rec({ deployment_id: 'backend-live-dev@green', state: 'restarting' }),
+      ],
+      COPY,
+      BP,
+    ),
+  );
+  assert.equal(c.status, 'restarting');
+  assert.equal(c.deploymentId, 'backend-live-dev@green');
 });

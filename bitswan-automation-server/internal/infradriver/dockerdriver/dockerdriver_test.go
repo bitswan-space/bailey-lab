@@ -92,28 +92,22 @@ func TestParsePS(t *testing.T) {
 	}
 }
 
-func TestRestartingIDsIsTheOnlySubsetInspected(t *testing.T) {
-	// The point of the subset: a healthy workspace must cost ZERO extra docker
-	// commands, because the count comes from `docker inspect` — the call
-	// ContainerList deliberately does not make per container.
-	healthy := []infradriver.Container{
-		{ID: "a", State: "running"},
-		{ID: "b", State: "exited"},
-		{ID: "c", State: "created"},
-		{ID: "d", State: "paused"},
-	}
-	if got := restartingIDs(healthy); len(got) != 0 {
-		t.Errorf("healthy workspace would inspect %v, want nothing", got)
-	}
-	mixed := []infradriver.Container{
+func TestEveryListedContainerIsInspectedInOneExec(t *testing.T) {
+	// The count has to be readable whatever state the poll catches: a container
+	// that crashes every few minutes is `running` at most instants, so
+	// inspecting only the ones caught mid-restart made the number blink in and
+	// out. One exec covers them all — the measured cost is per-exec.
+	cs := []infradriver.Container{
 		{ID: "a", State: "running"},
 		{ID: "b", State: "restarting"},
 		{ID: "c", State: "exited"},
-		{ID: "d", State: "restarting"},
 	}
-	got := restartingIDs(mixed)
-	if len(got) != 2 || got[0] != "b" || got[1] != "d" {
-		t.Errorf("restartingIDs = %v, want [b d]", got)
+	got := allIDs(cs)
+	if len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
+		t.Errorf("allIDs = %v, want [a b c]", got)
+	}
+	if len(allIDs(nil)) != 0 {
+		t.Error("an empty listing must not run a command at all")
 	}
 }
 

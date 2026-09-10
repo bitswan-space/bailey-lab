@@ -62,10 +62,19 @@ export function bpContainers(
     const status: DisplayStatus = displayFor(a);
     const restartCount = a.restart_count ?? undefined;
     const prev = byName.get(name);
+    // When several records share a name, the row describes ONE of them: the
+    // one in the worst state. Taking the status from that record but the
+    // deployment id from whichever record happened to come last would point
+    // the dot at one container and the Logs/Restart buttons at another.
+    const keep = !prev || worstStatus(prev.status, status) === status ? 'new' : 'prev';
     byName.set(name, {
       name,
-      deploymentId: a.deployment_id ?? prev?.deploymentId ?? undefined,
-      url: a.automation_url ?? prev?.url ?? undefined,
+      deploymentId:
+        (keep === 'new' ? a.deployment_id : prev?.deploymentId) ??
+        prev?.deploymentId ??
+        a.deployment_id ??
+        undefined,
+      url: (keep === 'new' ? a.automation_url : prev?.url) ?? prev?.url ?? a.automation_url ?? undefined,
       status: prev ? worstStatus(prev.status, status) : status,
       // Several records for one name means several containers (replicas, a
       // blue/green pair): the highest count is the one worth showing.
