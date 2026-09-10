@@ -29,6 +29,14 @@ export interface TerminalProps {
   /** Fires once when the underlying WebSocket reports close. */
   onExit?: (info: TerminalExitInfo) => void;
   /**
+   * Fires once when the WebSocket reaches OPEN, i.e. when there is really a
+   * session on the far end. The parent needs this because the existence of a
+   * session OBJECT says nothing about the connection: a socket the gate
+   * declines never opens, and a status dot that reads the object claims the
+   * agent is running while nothing is (bailey-lab #463).
+   */
+  onOpen?: () => void;
+  /**
    * Uploads pasted/dropped files somewhere the process on the far end of the
    * PTY can read them, and resolves to the paths (relative to that process's
    * cwd) to inject into the terminal as text. The PTY transport is UTF-8
@@ -46,12 +54,14 @@ export interface TerminalProps {
   onInputWriter?: (write: ((data: string) => void) | null) => void;
 }
 
-export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: TerminalProps) {
+export function Terminal({ wsUrl, onExit, onOpen, onUploadFiles, onInputWriter }: TerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // Pin the latest onExit in a ref so the effect doesn't tear down + rebuild
   // the xterm/WebSocket pair every time the parent passes a new closure.
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
   const onUploadFilesRef = useRef(onUploadFiles);
   onUploadFilesRef.current = onUploadFiles;
   const onInputWriterRef = useRef(onInputWriter);
@@ -213,6 +223,7 @@ export function Terminal({ wsUrl, onExit, onUploadFiles, onInputWriter }: Termin
 
     ws.addEventListener('open', () => {
       wasOpened = true;
+      onOpenRef.current?.();
       term.focus();
       sendResize();
       // Expose the PTY input channel to the parent (prompt injection).

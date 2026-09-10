@@ -53,6 +53,17 @@ export interface ActiveSession {
   startedAt: number;
   /** True when started via Resume (claude --resume <uuid>). */
   resume: boolean;
+  /**
+   * True once this session's WebSocket has actually reached OPEN.
+   *
+   * A session object exists from the moment something asks for one, which is
+   * NOT the same as an agent being reachable: the socket may still be opening,
+   * or the gate may decline it and never open it at all. Anything reporting
+   * the agent's state to the user has to read this and not the object's mere
+   * existence — that conflation is what put a green "Agent running" dot over a
+   * connection that never happened (bailey-lab #463).
+   */
+  connected: boolean;
 }
 
 interface Scope {
@@ -107,6 +118,9 @@ interface SessionsContextValue {
    * merge fast-forwards.
    */
   startMergeBackSession(copy: string, bp: string, parent: string): Promise<void>;
+
+  /** Called by SessionTerminal when its WS reaches OPEN. */
+  markConnected(id: string): void;
 
   /** Called by SessionTerminal when its WS closes. */
   markExited(id: string, exitCode?: number): void;
@@ -231,6 +245,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           ...(parent === undefined ? {} : { parent }),
           startedAt: Date.now(),
           resume: false,
+          connected: false,
         },
       }));
       return id;
@@ -252,6 +267,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           kind: 'claude',
           startedAt: Date.now(),
           resume: true,
+          connected: false,
         },
       }));
       return claudeSessionId;
@@ -325,6 +341,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const markConnected = useCallback((id: string) => {
+    setSessions((prev) => {
+      const key = Object.keys(prev).find((k) => prev[k]?.id === id);
+      const session = key ? prev[key] : undefined;
+      if (!key || !session || session.connected) return prev;
+      return { ...prev, [key]: { ...session, connected: true } };
+    });
+  }, []);
+
   const markExited = useCallback((id: string, exitCode?: number) => {
     writersRef.current.delete(id);
     // Drop any prompt queued for the dying session — its replacement starts
@@ -394,6 +419,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       resumeSession,
       sendPrompt,
       startMergeBackSession,
+      markConnected,
       markExited,
       onExit,
       currentScope,
@@ -406,6 +432,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       resumeSession,
       sendPrompt,
       startMergeBackSession,
+      markConnected,
       markExited,
       onExit,
       currentScope,
@@ -418,6 +445,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       <SessionsLayer
         sessions={sessions}
         currentScope={currentScope}
+        markConnected={markConnected}
         markExited={markExited}
         registerWriter={registerWriter}
         rect={paneRect}
@@ -440,6 +468,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 function SessionsLayer({
   sessions,
   currentScope,
+  markConnected,
   markExited,
   registerWriter,
   rect,
@@ -447,6 +476,7 @@ function SessionsLayer({
   sessions: Record<string, ActiveSession>;
   // eslint-disable-next-line no-restricted-syntax -- discriminated scope state
   currentScope: Scope | null;
+  markConnected: (id: string) => void;
   markExited: (id: string, exitCode?: number) => void;
   registerWriter: (id: string, write: ((data: string) => void) | null) => void;
   // eslint-disable-next-line no-restricted-syntax -- null = nowhere to overlay
@@ -489,6 +519,7 @@ function SessionsLayer({
               {...(s.parent ? { parent: s.parent } : {})}
               resume={s.resume}
               hidden={!visible}
+              onOpen={() => markConnected(s.id)}
               onExit={(info) => markExited(s.id, info.code)}
               onInputWriter={(write) => registerWriter(s.id, write)}
             />

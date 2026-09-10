@@ -247,14 +247,27 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Header: agent status dot + sub-tabs. No session name — one
           conversation per (user, copy, BP), so there is nothing to tell
-          apart; the dot alone carries running / failed / starting. */}
+          apart; the dot alone carries running / failed / starting.
+
+          It goes green on `agent.connected`, NOT on `agent`: a session object
+          exists from the moment one is asked for, so reading its existence
+          announced a running agent while the socket was still opening — or
+          had been declined outright and would never open (bailey-lab #463). */}
       <div className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-background px-5">
         <div className="flex items-center border-r border-border pr-4">
           <span
-            title={agent ? 'Agent running' : launchFailed ? 'Agent unavailable' : 'Starting agent…'}
+            title={
+              agent?.connected
+                ? 'Agent running'
+                : launchFailed
+                  ? 'Agent unavailable'
+                  : agent
+                    ? 'Connecting to agent…'
+                    : 'Starting agent…'
+            }
             className={cn(
               'size-1.5 rounded-full',
-              agent
+              agent?.connected
                 ? 'bg-emerald-600'
                 : launchFailed
                   ? 'bg-destructive'

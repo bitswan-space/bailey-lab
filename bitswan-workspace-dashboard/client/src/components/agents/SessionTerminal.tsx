@@ -15,6 +15,8 @@ interface Props {
   resume: boolean;
   hidden: boolean;
   onExit: (info: TerminalExitInfo) => void;
+  /** Fires when the session's WebSocket reaches OPEN — see Terminal.onOpen. */
+  onOpen?: () => void;
   /** Receives the PTY input writer while connected (null when it drops) — see Terminal.onInputWriter. */
   onInputWriter?: (write: ((data: string) => void) | null) => void;
 }
@@ -33,6 +35,7 @@ export function SessionTerminal({
   resume,
   hidden,
   onExit,
+  onOpen,
   onInputWriter,
 }: Props) {
   // The Bailey gate strips identity headers and WebSockets can't send an
@@ -102,6 +105,7 @@ export function SessionTerminal({
         <Terminal
           wsUrl={wsUrl}
           onExit={onExit}
+          {...(onOpen ? { onOpen } : {})}
           onUploadFiles={onUploadFiles}
           {...(onInputWriter ? { onInputWriter } : {})}
         />
