@@ -137,3 +137,25 @@ test('only the copy+BP asked for is listed, and each name appears once', () => {
   assert.equal(frontend.expose, true);
   assert.equal(frontend.url, 'https://x');
 });
+
+test('a slept automation reads as asleep, not as an unknown state', () => {
+  // The live-dev cap evicts previews the same way the memory sweep evicts a
+  // stage's members: the record stays, `active` goes false and no container
+  // state comes with it.
+  const c = only(bpContainers([rec({ active: false, state: null })], COPY, BP));
+  assert.equal(c.status, 'asleep');
+});
+
+test('asleep outranks running when a name collapses several records', () => {
+  const c = only(
+    bpContainers(
+      [
+        rec({ deployment_id: 'backend-7622-production', state: 'running' }),
+        rec({ deployment_id: 'backend-7622-production@green', active: false, state: null }),
+      ],
+      COPY,
+      BP,
+    ),
+  );
+  assert.equal(c.status, 'asleep');
+});

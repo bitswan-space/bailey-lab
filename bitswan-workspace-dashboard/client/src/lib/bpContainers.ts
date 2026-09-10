@@ -19,7 +19,7 @@
 // rest of the dashboard already uses, that decides what a state means.
 
 import type { DeployedAutomation } from '@/types';
-import { stateToDisplay, worstStatus, type DisplayStatus } from '@/lib/status';
+import { displayFor, worstStatus, type DisplayStatus } from '@/lib/status';
 
 /** One container of a business process, as the Coding Agent screen shows it. */
 export interface BpContainer {
@@ -53,13 +53,13 @@ export function bpContainers(
   for (const a of automations) {
     if (!(a.relative_path ?? '').startsWith(prefix)) continue;
     const name = a.automation_name ?? a.name;
-    // Read the state, and ONLY the state. gitops fills `status` with the
-    // container's health-or-state ("healthy", "unhealthy", …), so the old
-    // `state ?? status` fallback was comparing health strings against docker
-    // state names — none of which matched, quietly landing on "stopped".
-    const status: DisplayStatus = a.deployment_id
-      ? stateToDisplay(a.state)
-      : 'not-deployed';
+    // One shared reading (lib/status.ts). It ignores `status`, which gitops
+    // fills with the container's health-or-state ("healthy", "unhealthy", …) —
+    // the old `state ?? status` fallback compared health strings against docker
+    // state names, matched nothing, and quietly landed on "stopped" — and it
+    // tells a SLEPT automation (the live-dev cap evicts them too) from one
+    // whose state simply could not be read.
+    const status: DisplayStatus = displayFor(a);
     const restartCount = a.restart_count ?? undefined;
     const prev = byName.get(name);
     byName.set(name, {

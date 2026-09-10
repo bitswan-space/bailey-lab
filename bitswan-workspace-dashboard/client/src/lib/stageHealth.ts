@@ -20,6 +20,7 @@ export type StageHealthKind =
   | 'not-deployed'
   | 'unknown'
   | 'asleep'
+  | 'partly-asleep'
   | 'failing'
   | 'restarting'
   | 'healthy';
@@ -57,6 +58,17 @@ const HEALTH: Record<StageHealthKind, StageHealth> = {
   asleep: {
     kind: 'asleep',
     label: 'Asleep',
+    color: 'text-sky-600',
+    dot: 'bg-sky-500',
+    ring: 'ring-sky-500/10',
+  },
+  // Part of the stage is asleep and part of it is serving. The sweep evicts per
+  // DEPLOYMENT, so this is the ordinary case — and reporting it as "Healthy"
+  // (which is what happens when a sleeping member is read as no-observation)
+  // hides a service that is not there.
+  'partly-asleep': {
+    kind: 'partly-asleep',
+    label: '',
     color: 'text-sky-600',
     dot: 'bg-sky-500',
     ring: 'ring-sky-500/10',
@@ -111,5 +123,14 @@ export function stageHealth({
   // it passes every "is it up?" test and used to be counted as healthy.
   const restarting = statuses.filter((s) => s === 'restarting').length;
   if (restarting > 0) return { ...HEALTH.restarting, label: `${services(restarting)} restarting` };
+  // Something is up, so the stage is not asleep — but a member that IS asleep
+  // still has to be named, or the stage reads "Healthy" while one of its
+  // services is not running at all.
+  const asleep = statuses.filter((s) => s === 'asleep').length;
+  if (asleep > 0)
+    return {
+      ...HEALTH['partly-asleep'],
+      label: `${services(asleep)} of ${statuses.length} asleep`,
+    };
   return HEALTH.healthy;
 }

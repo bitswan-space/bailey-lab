@@ -52,3 +52,30 @@ test('a real failure outranks a restart loop, and both are counted', () => {
   const many = stageHealth({ deployed: true, statuses: ['restarting', 'restarting', 'running'] });
   assert.equal(many.label, '2 services restarting');
 });
+
+test('a stage with ONE service asleep is not Healthy', () => {
+  // The gap this pins: a slept member arrives with no container state, so
+  // reading only the state made it 'unknown' — no observation — and the
+  // summary counted nothing wrong and said Healthy, tick and all, while one
+  // of the stage's services was not running at all.
+  const h = stageHealth({ deployed: true, statuses: ['running', 'asleep'] });
+  assert.equal(h.kind, 'partly-asleep');
+  assert.equal(h.label, '1 service of 2 asleep');
+  assert.notEqual(h.kind, 'healthy');
+});
+
+test('a stage where everything is asleep still reads Asleep, not partly', () => {
+  assert.equal(stageHealth({ deployed: true, statuses: ['asleep', 'asleep'] }).kind, 'asleep');
+});
+
+test('a fault outranks a sleeping member', () => {
+  // Sleeping is deliberate; a container that died is not. The louder one wins.
+  assert.equal(
+    stageHealth({ deployed: true, statuses: ['asleep', 'restarting', 'running'] }).kind,
+    'restarting',
+  );
+  assert.equal(
+    stageHealth({ deployed: true, statuses: ['asleep', 'failed', 'running'] }).kind,
+    'failing',
+  );
+});
