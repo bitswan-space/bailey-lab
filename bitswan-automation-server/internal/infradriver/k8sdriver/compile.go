@@ -359,8 +359,16 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		port = 8080
 	}
 
+	// The live slot carries the BARE identifier and a standby carries
+	// "<id>@<slot>". That asymmetry is not cosmetic: gitops overlays a bare id
+	// onto the automation's base entry, and treats a slotted one as a separate
+	// automation with no base — which is how the DR stage shows the standby's
+	// container without ever showing the live one. Slotting both left
+	// production's base entry with no container at all, so the dashboard showed
+	// a stage with nothing running while five pods were running.
+	isLiveSlot := slot == "" || slot == core.LiveSlotFor(c.bs, conf)
 	slotDepID := depID
-	if slot != "" {
+	if !isLiveSlot {
 		slotDepID = depID + "@" + slot
 	}
 	env := map[string]string{
@@ -467,7 +475,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	// opened without touching production; an idle slot mid-promote serves
 	// nothing, which is what makes the cutover a single ingress change.
 	isDR := slot != "" && slot == core.DRSlotFor(c.bs, conf)
-	isLive := slot == "" || slot == core.LiveSlotFor(c.bs, conf)
+	isLive := isLiveSlot
 	hostStage := stage
 	if isDR {
 		hostStage = "dr"

@@ -673,3 +673,45 @@ func TestTheFoundationComesBeforeTheProcess(t *testing.T) {
 		})
 	}
 }
+
+// TestTheLiveSlotCarriesTheBareIdentifier is a fidelity detail with a large
+// consequence. gitops overlays a bare deployment id onto the automation's base
+// entry and treats a slotted one as a separate automation with no base — which
+// is how the DR stage shows the standby's container and never the live one.
+// Slotting both leaves production's base entry with no container, so the
+// dashboard reports a stage with nothing running while every pod is running.
+func TestTheLiveSlotCarriesTheBareIdentifier(t *testing.T) {
+	objs, _, _ := compileScenario(t, "bluegreen")
+
+	bare, slotted := 0, 0
+	for _, o := range objs {
+		if kindOf(o) != "Deployment" || labelsOf(o)["gitops.stage"] != "production" {
+			continue
+		}
+		// On the pod template, not the Deployment: it is the POD's annotations
+		// the driver merges into what it reports as container labels.
+		spec, _ := o["spec"].(map[string]interface{})
+		tmpl, _ := spec["template"].(map[string]interface{})
+		tmeta, _ := tmpl["metadata"].(map[string]interface{})
+		ann, _ := tmeta["annotations"].(map[string]interface{})
+		id, _ := ann["gitops.bitswan.io/deployment_id"].(string)
+		slot, _ := labelsOf(o)["gitops.slot"].(string)
+		if slot == "" {
+			continue
+		}
+		if strings.Contains(id, "@") {
+			slotted++
+			if !strings.HasSuffix(id, "@"+slot) {
+				t.Errorf("%s is slot %q but its identifier is %q", nameOf(o), slot, id)
+			}
+		} else {
+			bare++
+		}
+	}
+	if bare == 0 {
+		t.Error("no production container carries a bare identifier; gitops would report the stage as empty")
+	}
+	if slotted == 0 {
+		t.Error("no production container carries a slotted identifier; the DR stage would show the live container")
+	}
+}
