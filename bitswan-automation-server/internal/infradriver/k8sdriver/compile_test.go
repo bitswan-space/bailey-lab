@@ -16,12 +16,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
-// The Kubernetes compiler is checked against the SAME declarations the Docker
-// compiler's goldens use, because the point of the two backends is that they
-// realize one declaration. What is asserted here is not a golden manifest —
-// that would freeze incidental shape — but the properties Kubernetes and the
-// rest of the system actually require of the output.
-
 type scenario struct {
 	WorkspaceName string `json:"workspace_name"`
 	Domain        string `json:"domain"`
@@ -109,8 +103,6 @@ func compileScenario(t *testing.T, name string) (k8srender.ObjectSet, []infradri
 	if err != nil {
 		t.Fatalf("compile %s: %v", name, err)
 	}
-	// The properties below hold over everything an apply creates, whichever
-	// phase creates it.
 	return append(append(k8srender.ObjectSet{}, foundation...), workloads...), routes, sc
 }
 
@@ -128,10 +120,6 @@ func nameOf(o k8srender.Object) string {
 
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
-// TestEveryNameIsAddressable is the constraint Kubernetes will not bend on: an
-// object whose name is not a DNS label is rejected at apply, and a Service whose
-// name is over 63 characters is rejected even though a Deployment's may be
-// longer. Both are reachable from a long workspace or automation name.
 func TestEveryNameIsAddressable(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -149,10 +137,6 @@ func TestEveryNameIsAddressable(t *testing.T) {
 	}
 }
 
-// TestEveryLabelValueIsLegal guards the case that forced the annotation twins:
-// a deployment identifier carries an "@" once a slot is involved, and a content
-// hash is longer than a label value may be. Either one makes the whole apply
-// fail, not just the object carrying it.
 func TestEveryLabelValueIsLegal(t *testing.T) {
 	legal := regexp.MustCompile(`^[a-zA-Z0-9]([-a-zA-Z0-9_.]*[a-zA-Z0-9])?$`)
 	for _, name := range scenarios {
@@ -177,9 +161,6 @@ func TestEveryLabelValueIsLegal(t *testing.T) {
 	}
 }
 
-// TestEveryRouteHasAService is what the ingress depends on: the daemon writes
-// the upstream into Traefik's file provider verbatim, so an upstream naming
-// something that was not created is a 502 with nothing in any log to explain it.
 func TestEveryRouteHasAService(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -205,9 +186,6 @@ func TestEveryRouteHasAService(t *testing.T) {
 	}
 }
 
-// TestOneRoutePerHostname is the blue/green invariant. Both slots run; exactly
-// one answers. Two routes for one hostname is a coin toss over which version a
-// request reaches — the precise failure a promote exists to avoid.
 func TestOneRoutePerHostname(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -223,8 +201,6 @@ func TestOneRoutePerHostname(t *testing.T) {
 	}
 }
 
-// TestProductionRunsBothSlots asserts the topology a promote needs to exist
-// before it can use it: a production automation is two workloads, not one.
 func TestProductionRunsBothSlots(t *testing.T) {
 	objs, _, _ := compileScenario(t, "bluegreen")
 	slots := map[string]int{}
@@ -246,10 +222,6 @@ func TestProductionRunsBothSlots(t *testing.T) {
 	}
 }
 
-// TestNothingEscapesTheSandbox is the assertion pass: a compiler that can be
-// talked into a host mount or a privileged container has handed the namespace
-// away, and every one of these is reachable from tenant-writable declaration
-// fields.
 func TestNothingEscapesTheSandbox(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -296,9 +268,6 @@ func TestNothingEscapesTheSandbox(t *testing.T) {
 	}
 }
 
-// TestOnlyTheRuleInstallerIsCapable states the arrangement plainly: NET_ADMIN
-// exists in exactly one place, an init container that has exited by the time
-// tenant code runs.
 func TestOnlyTheRuleInstallerIsCapable(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -325,8 +294,6 @@ func TestOnlyTheRuleInstallerIsCapable(t *testing.T) {
 	}
 }
 
-// TestLiveDevRunsTheWorkingTree is the property that makes live-dev live: the
-// author's tree is what runs, mounted read-only, rather than a built image.
 func TestLiveDevRunsTheWorkingTree(t *testing.T) {
 	objs, _, sc := compileScenario(t, "livedev")
 	found := false
@@ -335,8 +302,6 @@ func TestLiveDevRunsTheWorkingTree(t *testing.T) {
 		if kindOf(o) != "Deployment" || l["gitops.stage"] != "live-dev" {
 			continue
 		}
-		// The firewall proxy shares the stage and writes its attempts log to
-		// this same volume; it is not the automation.
 		if l["gitops.firewall_proxy"] == "true" {
 			continue
 		}
@@ -380,10 +345,6 @@ func asSlice(v interface{}) []interface{} {
 	return s
 }
 
-// TestEveryEnvFromExists is referential integrity for the credentials: a
-// workload that names a Secret which was not created starts with none of its
-// environment — no database URL, no bucket key — and fails at its first query
-// rather than at apply, which is far from where the mistake is.
 func TestEveryEnvFromExists(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -416,11 +377,6 @@ func TestEveryEnvFromExists(t *testing.T) {
 	}
 }
 
-// TestThePruneScopeMatchesTheLabelsItSweeps is the property a retirement
-// depends on: the sweep is a label selector, so anything it is meant to be able
-// to delete has to be selectable by it. If a scope and a workload's labels
-// disagree the selector matches nothing, the apply reports success, and the
-// retired slot goes on serving beside its replacement.
 func TestThePruneScopeMatchesTheLabelsItSweeps(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -448,10 +404,6 @@ func TestThePruneScopeMatchesTheLabelsItSweeps(t *testing.T) {
 	}
 }
 
-// TestACopyIsSweptByItsBusinessProcessNotItsContext pins the case the two
-// spellings actually diverge in. A live-dev copy declares context
-// "copy-<user>-<bp>" while its workloads are labelled with the business process
-// the copy is of, so a sweep keyed on the context selects nothing at all.
 func TestACopyIsSweptByItsBusinessProcessNotItsContext(t *testing.T) {
 	objs, _, _ := compileScenario(t, "livedev")
 	scopes := prunableScopes(objs)
@@ -472,10 +424,6 @@ func TestACopyIsSweptByItsBusinessProcessNotItsContext(t *testing.T) {
 	}
 }
 
-// TestCredentialSecretsAreSweptWithTheirWorkload closes the leak the sweep
-// otherwise has: a retired slot's Secret outlives the workload that mounted it,
-// so a namespace accumulates the credentials of every process ever deployed
-// into it. The Secret has to be selectable by the same scope as its reader.
 func TestCredentialSecretsAreSweptWithTheirWorkload(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -525,14 +473,6 @@ func TestCredentialSecretsAreSweptWithTheirWorkload(t *testing.T) {
 	}
 }
 
-// TestAScopedBackendGetsItsCredentials states the point of the whole
-// credentials pass: a process with a database of its own must actually be told
-// how to reach it.
-//
-// Frontends are excluded, and deliberately: they carry the resource names for
-// display but never the credentials, because a frontend is served to a browser
-// and the code that talks to the database is behind it. The Docker compiler
-// draws the line in the same place.
 func TestAScopedBackendGetsItsCredentials(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -563,11 +503,6 @@ func TestAScopedBackendGetsItsCredentials(t *testing.T) {
 	}
 }
 
-// TestCredentialsRollTheWorkloadExceptInProduction states both halves of how a
-// changed secret reaches a running process. Kubernetes does not restart a pod
-// when a Secret it reads through envFrom changes, so the content's fingerprint
-// rides in the pod template — except on a production slot, which must not be
-// recreated in place.
 func TestCredentialsRollTheWorkloadExceptInProduction(t *testing.T) {
 	c := &compileState{ctx: infradriver.WorkspaceContext{SecretsDir: t.TempDir()}}
 	a := c.credentialsFingerprint("", map[string]string{"A": "1"})
@@ -583,12 +518,6 @@ func TestCredentialsRollTheWorkloadExceptInProduction(t *testing.T) {
 	}
 }
 
-// TestTheCredentialAnnotationIsNotAnOracle guards the reason the fingerprint is
-// keyed. Listing pods is a weaker right than reading Secrets, so an annotation
-// carrying a bare digest of the values would let anyone with it confirm a
-// guessed password offline. Two workspaces holding the same credential must not
-// annotate the same value either — that would leak the equality across a
-// boundary the Secrets themselves keep.
 func TestTheCredentialAnnotationIsNotAnOracle(t *testing.T) {
 	content := map[string]string{"PASSWORD": "hunter2"}
 	one := &compileState{ctx: infradriver.WorkspaceContext{SecretsDir: t.TempDir()}}
@@ -603,11 +532,6 @@ func TestTheCredentialAnnotationIsNotAnOracle(t *testing.T) {
 	}
 }
 
-// TestEveryMountHasAVolume is the invariant a hand-written pod spec breaks
-// silently: a volumeMount naming a volume the pod does not declare is accepted
-// by the apply and rejected by the pod, so the object exists, looks right in a
-// listing, and never produces a running container. Nothing in the compile can
-// see it; only the StatefulSet's events say so.
 func TestEveryMountHasAVolume(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -624,7 +548,6 @@ func TestEveryMountHasAVolume(t *testing.T) {
 						declared[n] = true
 					}
 				}
-				// A StatefulSet's claim templates are volumes too.
 				sp, _ := o["spec"].(map[string]interface{})
 				for _, ct := range asSlice(sp["volumeClaimTemplates"]) {
 					cm, _ := ct.(map[string]interface{})
@@ -651,13 +574,6 @@ func TestEveryMountHasAVolume(t *testing.T) {
 	}
 }
 
-// TestGarageCarriesItsTooling guards the other half of the same hand-written
-// spec: the sidecar snapshots exec into, the config file without which the
-// process exits on its first line, and a volume for every mount.
-//
-// The renderer is called directly rather than through a fixture, because none
-// of the four declares an object store — a test that only runs when a fixture
-// happens to want one is a test that silently does not run.
 func TestGarageCarriesItsTooling(t *testing.T) {
 	t.Setenv("BITSWAN_K8S_VOLUME_CLAIM", "bailey-config")
 	c := &compileState{workspace: "ws", claim: "bailey-config"}
@@ -725,9 +641,6 @@ func TestGarageCarriesItsTooling(t *testing.T) {
 		t.Error("garage has no configuration mounted; it exits on its first line")
 	}
 
-	// Without --single-node there is no cluster layout, and every request is
-	// answered "Layout not ready" — an object store that is up and refuses
-	// everything, which reads at the client as a credentials problem.
 	var single bool
 	for _, con := range asSlice(spec["containers"]) {
 		cm, _ := con.(map[string]interface{})
@@ -741,8 +654,6 @@ func TestGarageCarriesItsTooling(t *testing.T) {
 		t.Error("garage is started without --single-node; it will have no cluster layout")
 	}
 
-	// The Service has to publish what the config binds, or a client handed
-	// S3_PORT dials a port nothing is listening on.
 	var published []interface{}
 	for _, o := range objs {
 		if kindOf(o) == "Service" {
@@ -762,11 +673,6 @@ func TestGarageCarriesItsTooling(t *testing.T) {
 	}
 }
 
-// TestTheFoundationComesBeforeTheProcess is the ordering the whole apply rests
-// on. A backend waits three minutes for the bucket it authenticates against and
-// then exits; the bucket is created by provisioning, and provisioning can only
-// run once the object store is up. Applied together, the workload loses that
-// race and the restart it causes is indistinguishable from a crash.
 func TestTheFoundationComesBeforeTheProcess(t *testing.T) {
 	for _, name := range scenarios {
 		t.Run(name, func(t *testing.T) {
@@ -806,12 +712,6 @@ func TestTheFoundationComesBeforeTheProcess(t *testing.T) {
 	}
 }
 
-// TestTheLiveSlotCarriesTheBareIdentifier is a fidelity detail with a large
-// consequence. gitops overlays a bare deployment id onto the automation's base
-// entry and treats a slotted one as a separate automation with no base — which
-// is how the DR stage shows the standby's container and never the live one.
-// Slotting both leaves production's base entry with no container, so the
-// dashboard reports a stage with nothing running while every pod is running.
 func TestTheLiveSlotCarriesTheBareIdentifier(t *testing.T) {
 	objs, _, _ := compileScenario(t, "bluegreen")
 
@@ -820,8 +720,6 @@ func TestTheLiveSlotCarriesTheBareIdentifier(t *testing.T) {
 		if kindOf(o) != "Deployment" || labelsOf(o)["gitops.stage"] != "production" {
 			continue
 		}
-		// On the pod template, not the Deployment: it is the POD's annotations
-		// the driver merges into what it reports as container labels.
 		spec, _ := o["spec"].(map[string]interface{})
 		tmpl, _ := spec["template"].(map[string]interface{})
 		tmeta, _ := tmpl["metadata"].(map[string]interface{})

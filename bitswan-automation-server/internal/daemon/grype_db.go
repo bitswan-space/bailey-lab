@@ -170,10 +170,6 @@ func refreshGrypeDB(ctx context.Context) error {
 // finds it), then populates + refreshes the DB in the background. Startup never
 // blocks on the ~40s download.
 func startGrypeDBRefresher() {
-	// The volume has to exist before a workspace that declares it as external
-	// comes up. In a namespace there is nothing to create: the database is a
-	// subdirectory of the volume this daemon already holds, and the subPath
-	// mount brings it into being.
 	if !onKubernetes() {
 		if out, err := exec.Command("docker", "volume", "create", dockercompose.GrypeDBVolume).CombinedOutput(); err != nil {
 			fmt.Printf("Warning: could not create shared grype DB volume: %v: %s\n", err, strings.TrimSpace(string(out)))

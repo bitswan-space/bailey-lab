@@ -1,18 +1,9 @@
 #!/usr/bin/env bash
-# Rebuild what this checkout changed, hand it to the cluster, and run the suite.
-#
-# A file rather than a command typed through two layers of ssh: the escaping
-# needed to nest quotes that deep has broken this three times, each time in a way
-# that looked like a product failure — a grep pattern that became a filename, a
-# verification that never ran, a launch that never happened.
 set -uo pipefail
 set -e
 export PATH="$PATH:/usr/local/go/bin"
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# The symlink a watcher follows, pointed at this run's own log. Set by the run
-# itself rather than by whatever launched it: the launcher's clock is not the
-# guest's, and a stamp computed on the wrong side names a file nobody writes.
 ln -sfn "$(readlink -f /proc/$$/fd/1)" /tmp/current-run.log 2>/dev/null || true
 
 echo "=== build the binaries and images ==="
@@ -21,22 +12,12 @@ make console >/dev/null
 go build -o bitswan .
 sudo docker build -q -f Dockerfile.k8s -t bitswan/automation-server:dev . >/dev/null
 sudo docker build -q -f Dockerfile.infra-driver.k8s -t bitswan/infra-driver-k8s:dev . >/dev/null
-# The egress gateway is built here too: its entrypoint is what installs a pod's
-# rules, and a stale one holds the network namespace open forever, which on
-# Kubernetes is an init container that never exits and a workload that never
-# starts.
 sudo docker build -q -f cmd/egress-gateway/Dockerfile -t bitswan/egress-gateway-dev:latest . >/dev/null
 cd ..
 
-# gitops too. It is not a Go binary this script compiles, which is exactly why
-# it was missed: a change to its Python reached the guest's checkout and never
-# reached the image the guest runs, so the cluster kept serving the old code
-# while every file on disk said otherwise.
 sudo docker build -q -f bitswan-gitops/Dockerfile -t bitswan/gitops-dev:latest . >/dev/null
 
 echo "=== verify the images carry what this checkout added ==="
-# `docker build` leaves the PREVIOUS tag in place when it fails, so "the build
-# ran" and "the image is current" are different claims. This asserts the second.
 sudo docker run --rm bitswan/infra-driver-k8s:dev \
   /usr/local/bin/infra-driver serve --help | grep -qE -- '--driver'
 sudo docker run --rm --entrypoint sh bitswan/infra-driver-k8s:dev \
@@ -50,16 +31,6 @@ sudo docker run --rm --entrypoint sh bitswan/gitops-dev:latest \
 echo IMAGES_VERIFIED
 
 echo "=== hand them to containerd ==="
-# The kubelet pulls from containerd and cannot see the docker image store. The
-# base images matter as much as ours: an automation runs one directly in
-# live-dev, and a deploy builds FROM one, so a guest that has them only in
-# docker stalls on a rate-limited pull mid-chapter.
-#
-# containerd pulls those itself rather than taking them out of docker: several
-# are multi-arch, and a docker save of one holds a manifest whose layers the
-# export does not carry, which the import rejects with "content digest not
-# found". Pulling straight into containerd has neither problem, and these are
-# published images — nothing about them is under test.
 BASE_IMAGES=(
   docker.io/library/postgres:16
   docker.io/dxflrs/garage:v2.3.0
@@ -77,7 +48,6 @@ for image in "${BASE_IMAGES[@]}"; do
   sudo k3s ctr images pull --platform linux/amd64 "$image" >/dev/null 2>&1 \
     || echo "PREPULL_FAILED $image"
 done
-# Only what this checkout builds has to make the docker-to-containerd hop.
 present=()
 for image in \
   bitswan/automation-server:dev \
@@ -88,11 +58,6 @@ for image in \
   bitswan/egress-gateway-dev:latest; do
   sudo docker image inspect "$image" >/dev/null 2>&1 && present+=("$image")
 done
-# One image per archive. A single save of the whole set has failed the import
-# with "content digest not found" — one image whose export containerd will not
-# resolve takes the whole batch with it, and a half-imported set looks exactly
-# like a stale image. Ours are load-bearing and fail the cycle; a base image
-# that will not import is reported and left to be pulled.
 TARBALL=/var/tmp/bitswan-image.tar
 trap 'sudo rm -f "$TARBALL"' EXIT
 for image in "${present[@]}"; do
@@ -111,19 +76,11 @@ bash e2e/k8s/bringup-k8s.sh
 
 cd e2e
 rm -rf test-results
-# And the screenshots. They are the record of THIS run, and comparing them with
-# the Docker baseline is how two dead features were found — but a chapter that
-# does not run leaves the last run's shot in place, and a debug capture from a
-# past failure lingers for ever. Both make the comparison say things about a
-# run that did not happen.
 rm -rf manual/build/shots
 set +e
 npx playwright test --reporter=list
 suite=$?
 
-# The browser saw the product work. This sees whether the namespace it worked in
-# is one anybody should accept — a green walkthrough is necessary and not
-# sufficient, so both have to pass.
 cd ..
 bash e2e/k8s/assert-shape.sh
 shape=$?

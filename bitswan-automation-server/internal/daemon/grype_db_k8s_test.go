@@ -5,10 +5,6 @@ import (
 	"testing"
 )
 
-// TestTheRefreshJobMatchesTheDockerContract keeps the two paths saying the same
-// thing. The database is shared read-only with every workspace, so what writes
-// it has to write where they read, with the cache directory they are pointed
-// at, using the grype whose schema they scan with.
 func TestTheRefreshJobMatchesTheDockerContract(t *testing.T) {
 	job := grypeDBJob("bitswan/gitops:pinned", "bailey-config")
 
@@ -21,15 +17,10 @@ func TestTheRefreshJobMatchesTheDockerContract(t *testing.T) {
 	}
 	c, _ := containers[0].(map[string]interface{})
 
-	// The pinned gitops image, not this daemon's: grype's binary and its
-	// database schema have to match what the workspaces scan with.
 	if got := c["image"]; got != "bitswan/gitops:pinned" {
 		t.Errorf("refresh runs %v, not the pinned gitops image", got)
 	}
 
-	// And under the platform's pull policy. Kubernetes defaults a :latest tag
-	// to Always, which sends a locally built image to a registry that has
-	// never heard of it.
 	if c["imagePullPolicy"] == nil || c["imagePullPolicy"] == "" {
 		t.Error("the refresh declares no imagePullPolicy; :latest would be pulled from a registry")
 	}
@@ -60,8 +51,6 @@ func TestTheRefreshJobMatchesTheDockerContract(t *testing.T) {
 		t.Errorf("refresh writes subPath %q, workspaces read %q", wroteTo, grypeDBSubPath)
 	}
 
-	// The script the Docker path runs, unchanged: update, then make the result
-	// readable by the unprivileged user the workspaces scan as.
 	cmd, _ := c["command"].([]interface{})
 	joined := ""
 	for _, a := range cmd {
@@ -71,8 +60,6 @@ func TestTheRefreshJobMatchesTheDockerContract(t *testing.T) {
 		t.Errorf("refresh command is %q", strings.TrimSpace(joined))
 	}
 
-	// One failure is a failure. Retrying inside the Job would hide it behind
-	// the backoff the caller already has, and report success it did not have.
 	if spec["backoffLimit"] != 0 {
 		t.Errorf("backoffLimit is %v", spec["backoffLimit"])
 	}

@@ -1,19 +1,5 @@
 #!/bin/sh
 # Egress-gateway entrypoint. Two roles, selected by $BITSWAN_FW_ROLE:
-#
-#   owner  — installs the egress rules in this network namespace. On Docker it
-#            then HOLDS the namespace, because the BP worker joins it
-#            (network_mode: service:<owner>) with NET_ADMIN dropped and so
-#            cannot alter the rules. In a pod the sandbox owns the namespace, so
-#            this runs as an init container and exits (BITSWAN_FW_HOLD=0) —
-#            the rules outlive it and the app container has no NET_ADMIN.
-#            Critically, on either platform NO
-#            proxy runs here: the worker's :443/:80 is DNAT'd to the proxy
-#            container (a separate namespace), so there is no privileged uid in
-#            the worker's namespace to impersonate. A root worker that setuid()s
-#            to anything is still fully subject to these rules — the firewall is
-#            enforced OUTSIDE everything the worker can reach.
-#
 #   proxy  — the SNI/Host allow-list filter (the egress-gateway binary). Runs in
 #            its own container/namespace on the stage network, unprivileged.
 set -e
@@ -31,10 +17,6 @@ if [ "$ROLE" = "owner" ]; then
   # Used to scope the infra-peer allowance instead of all of RFC1918.
   STAGE_SUBNET=$(ip -o -f inet addr show scope global 2>/dev/null | awk '{print $4; exit}')
 
-  # The resolvers this namespace actually uses. On Docker that is the embedded
-  # one at 127.0.0.11; in a pod it is the cluster's DNS service, whose address
-  # is only knowable from resolv.conf. Allowing exactly these — rather than :53
-  # to anywhere — is what stops DNS tunnelling on either platform.
   RESOLVERS=$(awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')
 
   # nat OUTPUT: keep Docker's embedded-DNS DNAT (flushing OUTPUT drops the jump
@@ -48,10 +30,6 @@ if [ "$ROLE" = "owner" ]; then
   iptables -t nat -A OUTPUT -p tcp --dport 80  -j DNAT --to-destination "$PROXY_IP:18080"
 
   if [ "$BITSWAN_FW_MODE" = "enforce" ]; then
-    # Default-deny egress. Allow: loopback, established, DNS to THIS namespace's
-    # own resolvers only (direct :53 to anywhere else is dropped — no DNS
-    # tunnelling), the worker's own stage subnet (infra peers — not all RFC1918),
-    # the proxy, and the :80/:443 the proxy enforces.
     iptables -F OUTPUT
     iptables -A OUTPUT -o lo -j ACCEPT
     iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
@@ -62,15 +40,6 @@ if [ "$ROLE" = "owner" ]; then
     done
     iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
     [ -n "$STAGE_SUBNET" ] && iptables -A OUTPUT -d "$STAGE_SUBNET" -j ACCEPT
-    # The infra peers this workload is entitled to reach, by name.
-    #
-    # On Docker they share the stage bridge, so the subnet rule above covers
-    # them. In a namespace a peer is reached through a service address on a
-    # range that has nothing to do with the pod's own, and there is no safe way
-    # to guess that range — on some clusters it is public address space, so a
-    # wrong guess opens the internet. Each peer is resolved and allowed as a
-    # single address instead: exact, and tighter than the subnet rule it stands
-    # in for.
     for peer in $(echo "${BITSWAN_FW_PEERS:-}" | tr ',' ' '); do
       [ -n "$peer" ] || continue
       peer_ip=$(host -t A "$peer" 2>/dev/null | awk '/has address/{print $NF; exit}')
@@ -131,11 +100,6 @@ if [ "$ROLE" = "owner" ]; then
 
   touch /tmp/fw-ready
 
-  # Whether to stay. On Docker the owner IS the network namespace — the worker
-  # joins it — so it must hold. In a pod the sandbox owns the namespace and this
-  # runs as an init container, which has to exit for the workload to start; the
-  # rules it wrote outlive it, and the app container has no NET_ADMIN to undo
-  # them, which is a stronger arrangement than an idling privileged sibling.
   if [ "${BITSWAN_FW_HOLD:-1}" = "0" ]; then
     echo "egress-gateway[owner]: rules installed (mode=${BITSWAN_FW_MODE:-monitor}, proxy=$PROXY_IP); exiting"
     exit 0

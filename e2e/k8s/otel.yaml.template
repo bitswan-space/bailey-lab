@@ -1,8 +1,3 @@
-# The OTLP collector: the SIEM target the walkthrough points Bailey's audit
-# forwarding at.
-#
-# In the Bailey's own namespace, and its Service keeps the NAME the Docker suite
-# uses as a container name, so the walkthrough's endpoint strings are unchanged.
 ---
 apiVersion: v1
 kind: ConfigMap

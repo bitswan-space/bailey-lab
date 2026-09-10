@@ -9,23 +9,12 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
-// infraService renders the shared services a business process asks for, one set
-// per stage.
-//
-// A StatefulSet rather than a Deployment, for the reason a database wants one:
-// the volume belongs to the object rather than to a pod, so it survives the
-// workload being replaced, and the pod's name is derived from the object's — it
-// is always <name>-0 — which is what makes an exec-based backup or a psql
-// provisioning step able to find it without a lookup.
 func (c *compileState) infraService(service, realm string) (k8srender.ObjectSet, error) {
 	name := c.workspace + "__" + service + core.ServiceSuffix(realm)
 	switch service {
 	case "postgres":
 		return c.postgres(name, realm)
 	case "garage":
-		// Garage reads its config off the workspace volume. Rendering the mount
-		// without the volume produces a pod the API server rejects for a reason
-		// that names neither the setting nor the service.
 		if c.volumeClaim() == "" {
 			return nil, fmt.Errorf(
 				"%s needs the workspace volume to read its configuration, and none is configured", name)
@@ -41,11 +30,6 @@ func (c *compileState) postgres(container, realm string) (k8srender.ObjectSet, e
 	svcName := k8srender.Name(container, k8srender.ServiceNameMax)
 	labels := c.infraLabels(svcName, container, realm)
 
-	// The superuser comes from the service secrets gitops writes, and from
-	// nowhere else. The coordinates a business process is handed come from that
-	// same file, so anything generated here would mean the database and the
-	// things told how to reach it disagree — and a generated one had a constant
-	// fallback seed, which is a superuser password printed in the source.
 	creds := map[string]string{"POSTGRES_DB": "postgres"}
 	for k, v := range core.ServiceSecrets(c.ctx.SecretsDir, "postgres", realm) {
 		if k == "POSTGRES_USER" || k == "POSTGRES_PASSWORD" {
@@ -70,9 +54,6 @@ func (c *compileState) postgres(container, realm string) (k8srender.ObjectSet, e
 		MountPath: "/var/lib/postgresql/data",
 		SubPath:   "pgdata",
 		Storage:   storageSizeOr("BITSWAN_K8S_POSTGRES_STORAGE", "8Gi"),
-		// pg_isready, with the fast first probe the compose healthcheck uses so
-		// a cold start is noticed the moment it finishes rather than up to a
-		// whole interval later.
 		Readiness: &k8srender.Probe{
 			Exec:          []string{"sh", "-c", `pg_isready -U "$POSTGRES_USER" -q`},
 			PeriodSeconds: 5,
@@ -89,56 +70,29 @@ func (c *compileState) garage(container, realm string) k8srender.ObjectSet {
 
 	objs := garageServiceSecret(c, realm, objName)
 	return append(objs, statefulSet(statefulSetSpec{
-		Name:    objName,
-		Service: svcName,
-		Labels:  labels,
-		Image:   imageOr("BITSWAN_GARAGE_IMAGE", "dxflrs/garage:v2.3.0"),
-		// --single-node creates the one-node cluster layout on first boot.
-		// Without it the process starts, listens, and answers every request
-		// with "Layout not ready" — an object store that is up and refuses
-		// everything, which reads as a credentials problem.
-		Command: []string{"/garage", "server", "--single-node"},
-		// The same service secrets the Docker service takes as an env_file.
-		// The config file carries the rpc secret and the admin token, but the
-		// tooling that execs in reads them from the environment.
-		EnvFrom: garageServiceEnv(c, realm, objName),
-		// The ports the config file actually binds, not the defaults: a client
-		// is handed S3_PORT out of the same secrets gitops wrote that config
-		// from, so a Service publishing anything else is a coordinate pointing
-		// at nothing.
+		Name:     objName,
+		Service:  svcName,
+		Labels:   labels,
+		Image:    imageOr("BITSWAN_GARAGE_IMAGE", "dxflrs/garage:v2.3.0"),
+		Command:  []string{"/garage", "server", "--single-node"},
+		EnvFrom:  garageServiceEnv(c, realm, objName),
 		Port:     garageS3Port,
 		PortName: "s3",
 		ExtraPorts: []k8srender.Port{
 			{Name: "rpc", Port: 3901},
 			{Name: "admin", Port: 3903},
 		},
-		MountPath: "/data",
-		SubPath:   "data",
-		// The metadata lives on the volume too. Left in the container's writable
-		// layer it survives exactly until the pod is replaced, and then the
-		// store comes back knowing about none of its own buckets.
+		MountPath:   "/data",
+		SubPath:     "data",
 		ExtraMounts: []k8srender.Mount{{Path: "/meta", SubPath: "meta"}},
 		Storage:     storageSizeOr("BITSWAN_K8S_GARAGE_STORAGE", "8Gi"),
-		// The object store is ready when it answers, not when its process
-		// starts: the provisioner mints keys and creates buckets against it, and
-		// against a node that is still coming up those calls fail in ways that
-		// read as permission problems.
-		Readiness: &k8srender.Probe{TCPPort: garageS3Port, PeriodSeconds: 3, Failures: 60},
-		// Garage reads its RPC secret, admin token and ports from a file gitops
-		// writes beside the other secrets. Without it the process exits on its
-		// first line — it has no defaults to fall back on — so this mount is
-		// what makes the object store start at all.
+		Readiness:   &k8srender.Probe{TCPPort: garageS3Port, PeriodSeconds: 3, Failures: 60},
 		Files: []k8srender.Mount{{
 			Path:     "/etc/garage.toml",
 			SubPath:  c.volumeSubPath("secrets/garage" + core.ServiceSuffix(realm) + ".toml"),
 			ReadOnly: true,
 		}},
 		VolumeClaim: c.volumeClaim(),
-		// The rclone sidecar. Snapshot and restore move bucket contents by
-		// exec'ing rclone somewhere, and Garage's own image is a single static
-		// binary with no shell and no rclone in it. On Docker that somewhere is
-		// a sibling container; here it is a second container in the same pod,
-		// which is the same thing with one fewer object and a shared lifecycle.
 		Sidecars: []sidecar{{
 			Name:    "toolbox",
 			Image:   imageOr("BITSWAN_GARAGE_TOOLBOX_IMAGE", "rclone/rclone:1.68"),
@@ -147,9 +101,6 @@ func (c *compileState) garage(container, realm string) k8srender.ObjectSet {
 	})...)
 }
 
-// garageServiceSecret carries the object store's own credentials, the ones the
-// Docker service takes as an env_file. Nothing when gitops has not written them
-// yet, which is a workspace whose object store has not been enabled.
 func garageServiceSecret(c *compileState, realm, objName string) k8srender.ObjectSet {
 	values := core.ServiceSecrets(c.ctx.SecretsDir, "garage", realm)
 	if len(values) == 0 {
@@ -165,9 +116,6 @@ func garageServiceEnv(c *compileState, realm, objName string) []string {
 	return []string{objName + "-service"}
 }
 
-// infraSecretLabels deliberately omits gitops.bp: a stage's Postgres and object
-// store are shared by every business process on that stage, so a per-process
-// sweep must never be able to select their credentials.
 func (c *compileState) infraSecretLabels(realm string) map[string]interface{} {
 	return map[string]interface{}{
 		k8srender.WorkspaceLabel: k8srender.LabelValue(c.workspace),
@@ -205,8 +153,6 @@ type statefulSetSpec struct {
 	Sidecars    []sidecar
 }
 
-// sidecar is a second container in an infra service's pod: a tool the main
-// image does not carry, kept alive so something can be exec'd into it.
 type sidecar struct {
 	Name    string
 	Image   string
@@ -253,11 +199,6 @@ func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
 				"metadata": map[string]interface{}{"labels": s.Labels},
 				"spec": map[string]interface{}{
 					"automountServiceAccountToken": false,
-					// A snapshot has to read bytes out of these, and `docker cp` has
-					// no counterpart here: kubectl's copy is exec plus tar, and
-					// neither Garage's static binary nor a slim database image ships
-					// one. A static busybox is staged into a volume of its own, where
-					// it shadows nothing in the image.
 					"initContainers": []interface{}{
 						map[string]interface{}{
 							"name":    "stage-tools",
@@ -272,9 +213,6 @@ func statefulSet(s statefulSetSpec) k8srender.ObjectSet {
 					"volumes":    podVolumes(s),
 				},
 			},
-			// The claim belongs to the object, so replacing the workload keeps
-			// the data — the same promise `docker rm` makes by leaving a named
-			// volume behind.
 			"volumeClaimTemplates": []interface{}{
 				map[string]interface{}{
 					"metadata": map[string]interface{}{"name": "data"},
@@ -333,8 +271,6 @@ func envOr(env, fallback string) string {
 	return fallback
 }
 
-// containerMounts is the data volume, the staged tools, and any single files
-// this service reads out of the workspace volume.
 func containerMounts(s statefulSetSpec) []interface{} {
 	out := []interface{}{
 		map[string]interface{}{"name": "data", "mountPath": s.MountPath, "subPath": s.SubPath},
@@ -371,7 +307,6 @@ func podVolumes(s statefulSetSpec) []interface{} {
 	return out
 }
 
-// statefulSetContainers is the service and whatever tooling it needs beside it.
 func statefulSetContainers(s statefulSetSpec, main map[string]interface{}) []interface{} {
 	out := []interface{}{main}
 	for _, sc := range s.Sidecars {
@@ -390,7 +325,6 @@ func statefulSetContainers(s statefulSetSpec, main map[string]interface{}) []int
 	return out
 }
 
-// garageS3Port is where the config gitops writes binds the S3 API.
 const garageS3Port = 9000
 
 func containerPorts(s statefulSetSpec) []interface{} {

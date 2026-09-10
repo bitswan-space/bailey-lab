@@ -42,10 +42,6 @@ func sysStatsDiskPath() string {
 	if _, err := os.Stat("/host"); err == nil {
 		return "/host"
 	}
-	// In a namespace there is no host filesystem to report, and the container
-	// root is a node detail nobody here can act on. The volume holding this
-	// Bailey's state is the number that means something: it is what fills up,
-	// and it is what an operator can resize.
 	if onKubernetes() {
 		if home := os.Getenv("HOME"); home != "" {
 			cfg := home + "/.config/bitswan"
@@ -57,7 +53,7 @@ func sysStatsDiskPath() string {
 	return "/"
 }
 
-// gatherSystemStats reads the live server stats. It returns the first error
+// gatherSystemStats reads the live host stats. It returns the first error
 // it hits rather than fabricating a value — a missing /proc must surface as
 // an honest error on the overview, not as a fake "0 bytes free".
 func gatherSystemStats() (*systemStats, error) {
@@ -217,14 +213,6 @@ func readCPUSample() (idle, total uint64, err error) {
 	return 0, 0, fmt.Errorf("no aggregate cpu line in /proc/stat")
 }
 
-// serverMemory is what this server has, which is not the same question on the
-// two platforms.
-//
-// On a host it is the host's memory. In a pod /proc/meminfo still reports the
-// NODE's, and a Bailey with a four-gigabyte quota on a large node would show
-// the node's memory as its own — an overview page confidently describing
-// somebody else's machine. The namespace's quota is the honest answer, and
-// where there is no quota there is no answer to give.
 func serverMemory() (total, avail uint64, note string, err error) {
 	if !onKubernetes() {
 		total, avail, err = readMemInfo()

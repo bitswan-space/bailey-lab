@@ -12,31 +12,12 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
-// bringUpWorkspaceK8s starts a workspace's own services in this namespace: the
-// gitops state manager, the dashboard people work in, and the coding agent.
-//
-// It is the namespace's answer to `docker compose -p <ws>-site up -d`. Every
-// path a service reads is a subdirectory of the volume this daemon already
-// carries — the same layout a Docker host keeps under
-// ~/.config/bitswan/workspaces/<ws> — so the daemon can do all of a workspace's
-// filesystem work directly, exactly as it does today, and the services mount
-// subpaths of it.
-//
-// One consequence worth stating: a ReadWriteOnce volume is single-NODE, not
-// single-pod, so these land on the node the daemon is on. That is the same
-// topology a Docker host has, and a cluster that wants them spread needs a
-// volume class that allows it.
 func bringUpWorkspaceK8s(ctx context.Context, cfg workspaceK8sConfig) error {
 	adoptBuildProxyEnvK8s(ctx)
 	objs := workspaceObjects(cfg)
 	if err := k8sctl.Apply(ctx, objs); err != nil {
 		return fmt.Errorf("apply workspace objects: %w", err)
 	}
-	// gitops is what the dashboard and the agent talk to, and the driver is what
-	// every deploy goes through. A workspace missing either is broken, and it
-	// should say so now rather than at the first deploy — where it surfaces as a
-	// build failing to connect, which reads as a problem with the deploy rather
-	// than with the workspace.
 	for _, name := range []string{cfg.Workspace + "-gitops", cfg.Workspace + "-infra-driver"} {
 		if err := k8sctl.WaitAvailable(ctx, k8srender.Name(name, k8srender.WorkloadNameMax), 5*time.Minute); err != nil {
 			return err
@@ -45,37 +26,27 @@ func bringUpWorkspaceK8s(ctx context.Context, cfg workspaceK8sConfig) error {
 	return nil
 }
 
-// workspaceK8sConfig is what a workspace needs to run, gathered by the caller
-// that already computes it for the Docker path.
 type workspaceK8sConfig struct {
-	Workspace         string
-	Domain            string
-	VolumeClaim       string
-	GitopsImage       string
-	DashboardImage    string
-	CodingAgentImage  string
-	PullPolicy        string
-	GitopsSecret      string
-	CodingAgentSecret string
-	CertsDir          string
-	WithDashboard     bool
-	WithCodingAgent   bool
-	// EditorSSHPublicKey is the key the agent will accept from the dashboard's
-	// terminal, read from the workspace's own ssh directory.
+	Workspace          string
+	Domain             string
+	VolumeClaim        string
+	GitopsImage        string
+	DashboardImage     string
+	CodingAgentImage   string
+	PullPolicy         string
+	GitopsSecret       string
+	CodingAgentSecret  string
+	CertsDir           string
+	WithDashboard      bool
+	WithCodingAgent    bool
 	EditorSSHPublicKey string
 	InfraDriverImage   string
 	InfraDriverToken   string
 	IngressURL         string
 }
 
-// driverServiceAccount is the identity the infra driver runs as. It is created
-// by the seed, not by a workspace: a workspace that could create its own
-// service account could grant itself one, which is the whole reason the daemon's
-// own role cannot write RBAC.
 const driverServiceAccount = "bitswan-infra-driver"
 
-// workspaceObjects renders everything a workspace runs. Pure, so the shape is a
-// test rather than something only a cluster can tell you.
 func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 	ws := cfg.Workspace
 	sub := func(dir string) string { return "workspaces/" + ws + "/" + dir }
@@ -89,35 +60,24 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 		VolumeClaim:   cfg.VolumeClaim,
 		Ports:         []k8srender.Port{{Name: "api", Port: 8079}, {Name: "agent-ssh", Port: 2222}},
 		Env: map[string]string{
-			"BITSWAN_GITOPS_DIR":         "/gitops",
-			"BITSWAN_GITOPS_DIR_HOST":    "/gitops",
-			"BITSWAN_GITOPS_SECRET":      cfg.GitopsSecret,
-			"BITSWAN_GITOPS_DOMAIN":      cfg.Domain,
-			"BITSWAN_WORKSPACE_NAME":     ws,
-			"BITSWAN_CERTS_DIR":          cfg.CertsDir,
-			"BITSWAN_GIT_REPOS_DIR":      "/git",
-			"BITSWAN_WORKSPACE_REPO_DIR": "/workspace-repo",
-			"BITSWAN_COPIES_DIR":         "/workspace-repo/copies",
-			"BITSWAN_GIT_REMOTE":         "http://" + ws + "-gitops:8079/git",
-			// The volume name is how the Docker compiler decides to mount a
-			// business process off a named volume instead of a host path. In a
-			// namespace there is no host path to fall back to, and the driver
-			// renders volume mounts itself, so it is left unset.
-			// Point grype at the daemon's copy and stop it updating: the mount
-			// is read-only, and grype's auto-update would fight it with a
-			// "permission denied" that takes the whole scan down.
+			"BITSWAN_GITOPS_DIR":          "/gitops",
+			"BITSWAN_GITOPS_DIR_HOST":     "/gitops",
+			"BITSWAN_GITOPS_SECRET":       cfg.GitopsSecret,
+			"BITSWAN_GITOPS_DOMAIN":       cfg.Domain,
+			"BITSWAN_WORKSPACE_NAME":      ws,
+			"BITSWAN_CERTS_DIR":           cfg.CertsDir,
+			"BITSWAN_GIT_REPOS_DIR":       "/git",
+			"BITSWAN_WORKSPACE_REPO_DIR":  "/workspace-repo",
+			"BITSWAN_COPIES_DIR":          "/workspace-repo/copies",
+			"BITSWAN_GIT_REMOTE":          "http://" + ws + "-gitops:8079/git",
 			"GRYPE_DB_CACHE_DIR":          "/grype-db",
 			"BITSWAN_GRYPE_DB_MANAGED":    "1",
 			"BITSWAN_GITOPS_AGENT_SECRET": cfg.CodingAgentSecret,
-			// There is no socket to reach the daemon by from another pod, and
-			// gitops asks it who a person is before showing them anything an
-			// auditor may do. Without this it resolves the Docker-era hostname,
-			// fails, and every role comes back unprivileged.
-			"BITSWAN_INGRESS_URL":        cfg.IngressURL,
-			"BITSWAN_INGRESS_TOKEN":      os.Getenv(workspaceAPITokenEnv),
-			"BITSWAN_INFRA_DRIVER_URL":   "http://" + ws + "-infra-driver:9090",
-			"BITSWAN_INFRA_DRIVER_TOKEN": cfg.InfraDriverToken,
-			"BITSWAN_DEPLOY_REMOTE_BASE": "http://x:" + cfg.InfraDriverToken + "@" + ws + "-infra-driver:9090/deploy-repos",
+			"BITSWAN_INGRESS_URL":         cfg.IngressURL,
+			"BITSWAN_INGRESS_TOKEN":       os.Getenv(workspaceAPITokenEnv),
+			"BITSWAN_INFRA_DRIVER_URL":    "http://" + ws + "-infra-driver:9090",
+			"BITSWAN_INFRA_DRIVER_TOKEN":  cfg.InfraDriverToken,
+			"BITSWAN_DEPLOY_REMOTE_BASE":  "http://x:" + cfg.InfraDriverToken + "@" + ws + "-infra-driver:9090/deploy-repos",
 		},
 		Mounts: []k8srender.Mount{
 			{Path: "/gitops/gitops", SubPath: sub("gitops")},
@@ -127,9 +87,6 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			{Path: "/home/user1000/.ssh", SubPath: sub("ssh")},
 			{Path: "/git", SubPath: sub("git-repos")},
 			{Path: "/workspace-repo/copies", SubPath: sub("copies")},
-			// The daemon-owned vulnerability database, read-only. One per
-			// Bailey, not one per workspace, so it is a sibling of workspaces/
-			// rather than inside this one.
 			{Path: "/grype-db", SubPath: grypeDBSubPath, ReadOnly: true},
 		},
 		Readiness: &k8srender.Probe{TCPPort: 8079, PeriodSeconds: 5, Failures: 60},
@@ -162,9 +119,6 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 		})...)
 	}
 
-	// The infra driver: what gitops pushes a business process to, and what turns
-	// that declaration into workloads. It is the one workspace service that
-	// reaches the API server, so it is the one with a service account.
 	objs = append(objs, k8srender.Deployment(k8srender.Workload{
 		Name:           ws + "-infra-driver",
 		ContainerName:  ws + "-infra-driver",
@@ -189,23 +143,13 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			"BITSWAN_INFRA_DRIVER_KIND":  "k8s",
 			"BITSWAN_K8S_PULL_POLICY":    cfg.PullPolicy,
 			"BITSWAN_WORKSPACE_NAME":     ws,
-			// There is no socket to reach the daemon by from another pod, so the
-			// driver converges ingress over the daemon's workspace listener.
-			"BITSWAN_INGRESS_URL":   cfg.IngressURL,
-			"BITSWAN_INGRESS_TOKEN": os.Getenv(workspaceAPITokenEnv),
-			// What the driver mounts an automation's source off: live-dev runs
-			// the author's working tree, and an unbuilt deployment runs the
-			// checksum tree, both subpaths of this same volume.
-			"BITSWAN_K8S_VOLUME_CLAIM": cfg.VolumeClaim,
-			// The image the egress firewall runs, as both the rule installer and
-			// the allow-list proxy. Same image the Docker driver uses.
+			"BITSWAN_INGRESS_URL":        cfg.IngressURL,
+			"BITSWAN_INGRESS_TOKEN":      os.Getenv(workspaceAPITokenEnv),
+			"BITSWAN_K8S_VOLUME_CLAIM":   cfg.VolumeClaim,
 			"BITSWAN_EGRESS_GATEWAY_IMAGE": envOrDefault(
 				"BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest"),
-			"BITSWAN_WORKSPACE_REPO_DIR": "/workspace-repo",
-			"BITSWAN_K8S_REGISTRY":       envOrDefault("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000"),
-			// Off unless the install says otherwise. A registry spoken to in
-			// plaintext carries every image this Bailey builds, and the
-			// credentials baked into some of them, in the clear.
+			"BITSWAN_WORKSPACE_REPO_DIR":    "/workspace-repo",
+			"BITSWAN_K8S_REGISTRY":          envOrDefault("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000"),
 			"BITSWAN_K8S_REGISTRY_INSECURE": os.Getenv("BITSWAN_K8S_REGISTRY_INSECURE"),
 			"BITSWAN_BUILDKIT_ADDR":         envOrDefault("BITSWAN_BUILDKIT_ADDR", "tcp://bitswan-buildkit:1234"),
 			"BITSWAN_GOPROXY":               os.Getenv("BITSWAN_GOPROXY"),
@@ -245,15 +189,6 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 	return objs
 }
 
-// codingAgentIsolation is the namespace's form of the dedicated bridge the agent
-// gets on a Docker host.
-//
-// The agent runs code its users and an AI wrote, so its entire reachable surface
-// must be the authenticated gitops API and nothing else — not the daemon's gate,
-// not the dashboard, not another workspace. On Docker that is a private network
-// it shares only with gitops. In a namespace every pod can reach every pod by
-// default, so the same property has to be stated as policy, and stated as egress:
-// what matters is not who can reach the agent but what the agent can reach.
 func codingAgentIsolation(ws string) k8srender.Object {
 	agentSelector := map[string]interface{}{
 		"matchLabels": map[string]interface{}{
@@ -282,9 +217,6 @@ func codingAgentIsolation(ws string) k8srender.Object {
 			"policyTypes": []interface{}{"Egress"},
 			"egress": []interface{}{
 				map[string]interface{}{"to": []interface{}{gitopsPeer}},
-				// Without an explicit allowance for DNS, an egress policy takes
-				// name resolution with it and every failure looks like something
-				// else.
 				map[string]interface{}{
 					"to": []interface{}{
 						map[string]interface{}{
@@ -305,10 +237,6 @@ func codingAgentIsolation(ws string) k8srender.Object {
 	}
 }
 
-// k8sWorkspaceVolumeClaim is the volume a workspace's services mount subpaths
-// of. It is the same volume the daemon keeps its own state on, because that is
-// where a workspace's tree lives — the namespace equivalent of the one named
-// volume a Docker host shares between the daemon and every workspace.
 func k8sWorkspaceVolumeClaim() string {
 	if c := os.Getenv("BITSWAN_K8S_VOLUME_CLAIM"); c != "" {
 		return c
@@ -316,12 +244,6 @@ func k8sWorkspaceVolumeClaim() string {
 	return "bailey-config"
 }
 
-// k8sPullPolicy defaults to IfNotPresent, and is set to Never by the suite so a
-// mistyped tag fails loudly instead of quietly pulling a published image and
-// testing code that is not the code under test.
-// k8sWorkspaceImages reports the images a workspace's services run, which in a
-// namespace can only come from this daemon's own environment: there is no
-// `--dev` host flag and no image resolution against a local Docker.
 func k8sWorkspaceImages(gitops, dashboard, agent string) (string, string, string) {
 	if v := os.Getenv("BITSWAN_GITOPS_IMAGE"); v != "" {
 		gitops = v
@@ -342,13 +264,6 @@ func k8sPullPolicy() string {
 	return "IfNotPresent"
 }
 
-// codingAgentEnv is what the agent needs to be reachable and to reach gitops.
-//
-// The public key matters more than it looks: the dashboard opens the agent's
-// terminal over ssh through the proxy gitops runs, and the agent's entrypoint
-// installs this key as the one it will accept. Without it the terminal sits on
-// "Connecting…" forever, which reads as a broken agent rather than a missing
-// environment variable.
 func codingAgentEnv(ws string, cfg workspaceK8sConfig) map[string]string {
 	env := map[string]string{
 		"BITSWAN_WORKSPACE_NAME":      ws,
@@ -362,9 +277,6 @@ func codingAgentEnv(ws string, cfg workspaceK8sConfig) map[string]string {
 	return env
 }
 
-// readWorkspaceSSHPublicKey reads the key the dashboard authenticates to the
-// agent with, from the workspace's own ssh directory. Absent is not an error:
-// a workspace without an agent has no use for it.
 func readWorkspaceSSHPublicKey(workspacePath string) string {
 	b, err := os.ReadFile(filepath.Join(workspacePath, "ssh", "id_ed25519.pub"))
 	if err != nil {

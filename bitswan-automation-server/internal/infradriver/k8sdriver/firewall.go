@@ -10,23 +10,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
-// The egress firewall, in a namespace.
-//
-// The Docker arrangement is two containers: one owns a network namespace and
-// installs the rules, the worker joins that namespace with NET_ADMIN dropped,
-// and a separate proxy elsewhere does the SNI allow-listing. The point of the
-// split is that nothing privileged is ever co-resident with tenant code.
-//
-// A pod already owns a network namespace, so the owner becomes an init
-// container: it writes the rules and exits before the app container starts.
-// That is the same guarantee with less running — there is no privileged sibling
-// at all, only a privileged step that is over.
-//
-// The proxy stays exactly what it was: its own workload, its own namespace,
-// unprivileged, reached by Service name.
-
-// fwGroup is one firewalled scope: every deployment in a (context, stage) pair
-// shares a posture, an allow-list and a proxy.
 type fwGroup struct {
 	proxy string
 	mode  string
@@ -37,11 +20,6 @@ type fwGroup struct {
 
 type fwKey struct{ ctx, stage string }
 
-// firewallScope decides which groups are firewalled and how.
-//
-// Fail closed, the same way the Docker compiler does: an enforcing realm gets a
-// group even when the declaration names no firewall node for it, because a
-// missing node means an empty allow-list — default deny — and not "no firewall".
 func (c *compileState) firewallScope() map[fwKey]*fwGroup {
 	scope := map[fwKey]*fwGroup{}
 	for _, depID := range core.SortedDepIDs(c.bs.Deployments) {
@@ -84,7 +62,6 @@ func (c *compileState) fwGroupFor(conf *core.Deployment) *fwGroup {
 	return c.fw[fwKey{conf.Context, conf.StageOrProduction()}]
 }
 
-// firewallObjects renders one proxy per group.
 func (c *compileState) firewallObjects() k8srender.ObjectSet {
 	keys := make([]fwKey, 0, len(c.fw))
 	for k := range c.fw {
@@ -134,17 +111,10 @@ func (c *compileState) firewallObjects() k8srender.ObjectSet {
 	return objs
 }
 
-// attemptsPath is where the proxy records what was reached for. The name is the
-// Docker one, because the same dashboard reads it.
 func (g *fwGroup) attemptsPath() string {
 	return path.Join("/firewall", fmt.Sprintf("%s__%s.attempts.jsonl", g.bp, g.realm))
 }
 
-// ruleInstaller is the init container that writes this pod's egress rules.
-//
-// It runs the same image and the same entrypoint as the Docker owner, told not
-// to hold the namespace: in a pod there is nothing to hold it for, and an init
-// container that does not exit is a pod that never starts.
 func ruleInstaller(g *fwGroup, peers []string) k8srender.InitContainer {
 	return k8srender.InitContainer{
 		Name:       "egress-rules",
@@ -155,9 +125,6 @@ func ruleInstaller(g *fwGroup, peers []string) k8srender.InitContainer {
 			"BITSWAN_FW_MODE":  g.mode,
 			"BITSWAN_FW_PROXY": k8srender.Name(g.proxy, k8srender.ServiceNameMax),
 			"BITSWAN_FW_HOLD":  "0",
-			// Under enforcement the pod's own subnet says nothing about where
-			// its peers are, so they are named. Empty in monitor mode, where
-			// nothing is blocked in the first place.
 			"BITSWAN_FW_PEERS": strings.Join(peers, ","),
 		},
 		Capabilities: []string{"NET_ADMIN"},
@@ -182,13 +149,6 @@ func gatewayImage() string {
 	return envOr("BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest")
 }
 
-// peersFor is what a workload in this realm is entitled to reach inside the
-// namespace: the infra services of its stage, and the other automations of its
-// own business process.
-//
-// Derived from the declaration rather than from the rendered objects, so it is
-// known before a workload is rendered — the rule installer is part of that
-// workload.
 func (c *compileState) peersFor(realm, bp string) []string {
 	seen := map[string]bool{}
 	var out []string

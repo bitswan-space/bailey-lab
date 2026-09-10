@@ -154,14 +154,8 @@ func ensureDeployRepoAt(gitDir, bp string, cf ctxFlags) error {
 		"bitswan.secretsdir": cf.secretsDir,
 		"bitswan.gitopsdir":  cf.gitopsDir,
 		"bitswan.wrap":       fmt.Sprintf("%t", cf.wrap),
-		// Which backend applies this repo. Recorded here rather than read from
-		// the environment because the post-receive hook runs as a CGI grandchild
-		// of a process that may have been restarted with different flags: the
-		// repo says how it is applied, so it cannot be applied the wrong way.
-		// Empty reads back as docker, so repos created before this need no
-		// migration.
-		"bitswan.driver":    cf.driver,
-		"bitswan.namespace": cf.namespace,
+		"bitswan.driver":     cf.driver,
+		"bitswan.namespace":  cf.namespace,
 		// git-http-backend refuses receive-pack (push) unless this is set.
 		"http.receivepack": "true",
 		// Forbid force-push and ref deletion server-side: the deploy history is

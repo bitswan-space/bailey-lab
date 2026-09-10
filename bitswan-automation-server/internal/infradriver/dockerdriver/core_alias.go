@@ -62,13 +62,6 @@ var (
 	reconcileIngress        = core.ReconcileIngress
 )
 
-// The provisioning half of the driver moved to core when the Kubernetes driver
-// needed it: the SQL that gives a business process its own role, the blue/green
-// database clone, the bucket grants. None of it cares which backend runs the
-// container, so it takes a core.Execer and this is the Docker one.
-//
-// The names below keep their old spelling so the call sites — and the tests
-// that stub dockerExec — did not have to move with them.
 type dockerExecer struct{}
 
 func (dockerExecer) Exec(ctx context.Context, container string, args ...string) (string, string, int) {

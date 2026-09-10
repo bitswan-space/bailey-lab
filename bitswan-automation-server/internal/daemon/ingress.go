@@ -394,11 +394,6 @@ providers:
     network: bitswan_network
 `
 
-	// A namespace has no Docker socket for Traefik to poll, and configuring the
-	// provider anyway means it retries and logs forever. Every route this daemon
-	// manages comes from the file provider in either case; the Docker provider
-	// only ever served the workspace label catch-all, which a namespace expresses
-	// as a Service.
 	if onKubernetes() {
 		cfg = strings.Replace(cfg, `  docker:
     exposedByDefault: false
@@ -622,11 +617,6 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	// and always succeeds — it can no longer tell whether Traefik is up. If the
 	// config has drifted (e.g. the DNS-01 resolver was just enabled), fall
 	// through and recreate the container.
-	// In a namespace Traefik is a container in this pod, started with the pod:
-	// there is nothing to create and nothing to restart from here. Only the two
-	// config files matter, and the static one is not watched — a change to it
-	// needs the pod replaced, which is reported to the caller rather than done
-	// behind its back.
 	if onKubernetes() {
 		if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0644); err != nil {
 			return false, fmt.Errorf("failed to write traefik.yml: %w", err)
@@ -1097,11 +1087,6 @@ func workspaceDashboardEndpoint(workspaceName string) string {
 
 // isWorkspaceTraefikRunning checks if a workspace sub-traefik container is running.
 func isWorkspaceTraefikRunning(workspaceName string) bool {
-	// A namespace has no per-workspace Traefik. It exists on Docker because a
-	// workspace's stage networks are bridges the gate cannot reach, so something
-	// multi-homed onto them has to forward; in one namespace the gate resolves a
-	// workspace Service itself. Routes then take the branch that registers both
-	// hostnames at the auth proxy and lets the gate resolve the real upstream.
 	if onKubernetes() {
 		return false
 	}
@@ -1161,10 +1146,6 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 	//     deploy.
 	wrapAvailable := protectedProxyAvailable()
 	if !wrapAvailable && mustWrapRoutes() {
-		// Restoring the outer host without the wrap would republish every one
-		// of this workspace's endpoints unauthenticated. Leaving them 404 until
-		// the proxy answers is the safe half of the choice, and saying so is
-		// what stops it looking like the re-push simply did nothing.
 		fmt.Printf("Warning: the authentication proxy is not answering — "+
 			"%s's outer routes are left unpublished rather than published unwrapped.\n", workspaceName)
 	}
@@ -1258,12 +1239,6 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 
 	wrapAvailable := protectedProxyAvailable()
 	if !wrapAvailable && mustWrapRoutes() {
-		// Every branch below that runs without the wrap publishes the outer
-		// hostname straight at the workload. On Docker that is the single-tier
-		// install and is meant. In a namespace the proxy is a container of this
-		// same pod and is never legitimately absent, so publishing anyway would
-		// put a workspace endpoint on the internet with no authentication in
-		// front of it — a fault worth failing on, not degrading through.
 		return fmt.Errorf(
 			"the authentication proxy is not answering; refusing to publish %s without it", outer)
 	}

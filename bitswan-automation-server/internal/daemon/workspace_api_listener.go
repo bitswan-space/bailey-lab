@@ -9,34 +9,11 @@ import (
 	"strings"
 )
 
-// workspaceAPIPort is where a workspace's own services reach the small set of
-// daemon routes they legitimately call.
 const workspaceAPIPort = 9079
 
-// workspaceAPITokenEnv names the credential this listener accepts.
 const workspaceAPITokenEnv = "BITSWAN_WORKSPACE_API_TOKEN"
 
-// startWorkspaceAPI serves the workspace-callable routes over TCP, for the
-// services that cannot reach the UNIX socket.
-//
-// On a Docker host every workspace container mounts /var/run/bitswan and calls
-// the daemon over the socket, and authMiddleware trusts whoever reaches it. That
-// premise has failed three times already (#128, #189, #234), which is why the
-// socket's routes are classified into two lists: the operator-only ones and the
-// ones a first-party workspace service legitimately calls.
-//
-// In a namespace a workspace service is its own pod and cannot share the socket
-// at all. Rather than widen the socket's trust, this serves ONLY
-// socketWorkspaceCallableRoutes, and only to a caller holding the workspace's
-// driver token. The privileged routes are not registered on this mux at all, so
-// they are not merely refused here — they are unreachable.
-//
-// That makes the classification enforced rather than documented, which is the
-// half of it that was missing.
 func (s *Server) startWorkspaceAPI() error {
-	// A server-level token, not a workspace's: this listener exists before any
-	// workspace does, and a workspace's own driver token is generated when the
-	// workspace is created. The seed supplies it.
 	token := strings.TrimSpace(os.Getenv(workspaceAPITokenEnv))
 	if token == "" {
 		return fmt.Errorf("no %s is set", workspaceAPITokenEnv)
@@ -73,12 +50,6 @@ func bearerEquals(header, token string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 }
 
-// registerWorkspaceCallableRoutes registers exactly the routes a workspace's own
-// services may call, and nothing else.
-//
-// The handlers are the same ones the socket mux serves; what differs is that the
-// bearer token has already been checked, so authMiddleware's socket-peer
-// reasoning does not apply and is not used.
 func (s *Server) registerWorkspaceCallableRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ingress", s.handleIngress)
 	mux.HandleFunc("/ingress/", s.handleIngress)
@@ -86,8 +57,6 @@ func (s *Server) registerWorkspaceCallableRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/memory/admit", s.handleMemoryAdmit)
 }
 
-// workspaceCallableRoutePatterns reports what the workspace listener serves, so
-// the classification can be asserted rather than trusted.
 func workspaceCallableRoutePatterns() []string {
 	return []string{"/ingress", "/ingress/", "/bailey/role", "/memory/admit"}
 }

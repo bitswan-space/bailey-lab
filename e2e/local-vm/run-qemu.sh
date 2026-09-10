@@ -235,10 +235,6 @@ fi
 
 echo "=== sync repo into guest ==="
 $SSH "$VM" 'sudo mkdir -p /repo && sudo chown ubuntu /repo'
-# --delete, so the guest is a MIRROR: without it a file moved in the checkout
-# exists in both places in the guest and the build fails on a redeclaration,
-# several steps away from anything that looks like a sync problem. Excluded
-# paths are not deleted, so the guest keeps what it builds for itself.
 rsync -a --delete -e "$SSH" --exclude node_modules --exclude .git --exclude 'dist/' \
   --exclude 'serverconsole_dist' \
   --exclude 'e2e/manual/build/' --exclude 'e2e/playwright-report/' "$REPO_ROOT/" "$VM:/repo/"

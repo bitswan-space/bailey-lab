@@ -22,8 +22,6 @@ func TestNameShortensDeterministicallyAndKeepsNamesApart(t *testing.T) {
 	if len(got) > WorkloadNameMax {
 		t.Fatalf("Name() = %q (%d chars), over the %d budget", got, len(got), WorkloadNameMax)
 	}
-	// Two names that share the surviving prefix must not collide, or two
-	// automations would fight over one object.
 	if Name(other, WorkloadNameMax) == got {
 		t.Fatalf("two distinct names both shortened to %q", got)
 	}
@@ -42,9 +40,6 @@ func TestNameIsALegalDNSLabel(t *testing.T) {
 }
 
 func TestLabelValueRoundTripsAnIdentifierWithASlot(t *testing.T) {
-	// gitops selects containers with labels={"gitops.deployment_id": "<id>@<slot>"}.
-	// "@" is not a legal label value, so the projection has to be applied on both
-	// sides — stamping and selecting — and agree.
 	raw := "backend-test@green"
 	stamped := LabelValue(raw)
 	if strings.Contains(stamped, "@") {
@@ -56,8 +51,6 @@ func TestLabelValueRoundTripsAnIdentifierWithASlot(t *testing.T) {
 }
 
 func TestLabelValueBoundsAContentHash(t *testing.T) {
-	// A sha256 in hex is 64 characters: one over the limit, which is exactly the
-	// sort of value that is accepted everywhere until the API server rejects it.
 	raw := strings.Repeat("a", 64)
 	got := LabelValue(raw)
 	if len(got) > LabelValueMax {
@@ -77,8 +70,6 @@ func TestAWorkspaceWorkloadGetsNoAPICredential(t *testing.T) {
 }
 
 func TestAListeningWorkloadGetsAServiceNamedForIt(t *testing.T) {
-	// Routes point at "<name>:<port>", so the Service has to carry the name the
-	// route was written with or every upstream breaks.
 	objs := Deployment(Workload{
 		Name:      "finance-gitops",
 		Workspace: "finance",
@@ -105,8 +96,6 @@ func TestASilentWorkloadGetsNoService(t *testing.T) {
 }
 
 func TestAnEmptyStorageClassIsOmittedRatherThanSetEmpty(t *testing.T) {
-	// "" means no dynamic provisioning, so the claim would stay Pending forever;
-	// absence means the cluster's default class.
 	spec := PVC("workspace-finance", "20Gi", "")["spec"].(map[string]interface{})
 	if _, ok := spec["storageClassName"]; ok {
 		t.Fatal("storageClassName was set to empty rather than left out")
@@ -135,8 +124,6 @@ func TestMarshalIsStable(t *testing.T) {
 	if string(first) != string(second) {
 		t.Fatal("the same declaration rendered differently twice")
 	}
-	// Environment order is part of that: a map iteration would make every render
-	// a spurious diff, and on Kubernetes a spurious diff rolls a pod.
 	if !strings.Contains(string(first), "name: A") {
 		t.Fatal("environment did not render")
 	}

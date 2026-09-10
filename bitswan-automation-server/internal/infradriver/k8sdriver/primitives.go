@@ -19,14 +19,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
-// The operational half of the contract: what gitops asks about a workspace's
-// containers, answered about its pods.
-//
-// Every call resolves through target(), which re-checks that the pod is in this
-// driver's namespace and carries this driver's workspace label before anything
-// acts on it — the same refusal the Docker driver makes, with the difference
-// that here the namespace half is also enforced by the API server.
-
 type podRef struct {
 	pod       string
 	container string
@@ -50,12 +42,6 @@ func (d *K8sDriver) kubectl(ctx context.Context, args ...string) ([]byte, error)
 	return out.Bytes(), nil
 }
 
-// selectorFor builds a label selector from a caller's filter, projecting each
-// value exactly as it was projected when the label was stamped, and returning
-// whatever could not be expressed as a label so it can be matched in Go.
-//
-// The workspace is always forced and any caller-supplied workspace is dropped: a
-// listing must never be able to name someone else's.
 func (d *K8sDriver) selectorFor(filter infradriver.ContainerFilter) (string, map[string]string) {
 	selectors := []string{k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace)}
 	post := map[string]string{}
@@ -65,9 +51,6 @@ func (d *K8sDriver) selectorFor(filter infradriver.ContainerFilter) (string, map
 		}
 		switch k {
 		case "gitops.deployment_id":
-			// The raw value is an annotation, because it carries an "@" once a
-			// slot is involved. Match it in Go against the annotation instead of
-			// pretending a label can hold it.
 			post[k] = v
 		default:
 			selectors = append(selectors, k+"="+k8srender.LabelValue(v))
@@ -119,10 +102,6 @@ func (d *K8sDriver) pods(ctx context.Context, filter infradriver.ContainerFilter
 		if !matchesAll(labels, post) {
 			continue
 		}
-		// The name a caller knows this by is the one it would have on a Docker
-		// host: gitops and the provisioner both address containers as
-		// <workspace>__<service>-<realm>, and neither should have to learn what
-		// a pod is called.
 		name := labels[k8srender.ContainerNameLabel]
 		if name == "" {
 			name = labels[k8srender.NameLabel]
@@ -133,10 +112,6 @@ func (d *K8sDriver) pods(ctx context.Context, filter infradriver.ContainerFilter
 		primary := labels[k8srender.NameLabel]
 		for _, cs := range item.Status.ContainerStatuses {
 			state, health := stateAndHealth(cs.Ready, cs.State)
-			// A pod with more than one container needs more than one handle.
-			// The main one answers to the pod's name; a sidecar answers to that
-			// name with its own appended — which is how the Docker driver names
-			// the garage toolbox, so gitops asks for the same string either way.
 			handle := name
 			if cs.Name != primary && cs.Name != "" {
 				handle = name + "-" + cs.Name
@@ -157,9 +132,6 @@ func (d *K8sDriver) pods(ctx context.Context, filter infradriver.ContainerFilter
 	return out, nil
 }
 
-// mergedLabels reports the labels a caller sees: the projected ones, overlaid by
-// the raw values kept as annotations, so gitops reads back exactly what it wrote
-// even where a label could not hold it.
 func mergedLabels(labels, annotations map[string]string) map[string]string {
 	out := map[string]string{}
 	for k, v := range labels {
@@ -215,20 +187,12 @@ func (d *K8sDriver) target(ctx context.Context, container string) (podRef, error
 		container, d.workspace, d.namespace)
 }
 
-// resolveTarget picks the container a caller means, in a fixed order and never
-// by guessing. Pure, so the order is a test rather than something only a
-// cluster can tell you.
 func resolveTarget(all []podRef, container string) (podRef, bool) {
-	// This driver's own handle for one container.
 	for _, p := range all {
 		if p.id == container {
 			return p, true
 		}
 	}
-	// The name it hands out for THIS container, which for a sidecar is the
-	// pod's with its own appended. Before the pod's label, because that label
-	// is one value shared by every container in the pod — so a sidecar asked
-	// for by its own name would match nothing at all.
 	for _, p := range all {
 		if p.name == container {
 			return p, true
@@ -273,10 +237,6 @@ func (d *K8sDriver) ContainerList(ctx context.Context, req infradriver.Workspace
 	return out, nil
 }
 
-// ContainerStats reports live memory, and reports NOTHING when the metrics API
-// is absent rather than reporting zeroes: an empty listing reads as "nothing to
-// show", where a zero reads as "this workload uses no memory" and would make the
-// memory page and its over-reservation events confidently wrong.
 func (d *K8sDriver) ContainerStats(ctx context.Context, req infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.ContainerStat, error) {
 	pods, err := d.pods(ctx, filter)
 	if err != nil {
@@ -298,9 +258,6 @@ func (d *K8sDriver) ContainerStats(ctx context.Context, req infradriver.Workspac
 	}
 	var out []infradriver.ContainerStat
 	for _, p := range pods {
-		// Only what was actually measured. A pod the metrics API has not
-		// scraped yet is absent from the listing, not present with zero — the
-		// same reason the whole call returns nothing when the API is missing.
 		mem, measured := usage[p.id]
 		if !measured {
 			continue
@@ -317,10 +274,6 @@ func (d *K8sDriver) ContainerStats(ctx context.Context, req infradriver.Workspac
 
 var metricsUnavailableOnce sync.Once
 
-// noteMetricsUnavailable says once, in the driver's log, why the memory page is
-// showing reservations and no usage. Returning nothing is the right answer —
-// zeroes would be read as measurements — but a page that quietly omits a column
-// is indistinguishable from a cluster where nothing uses memory.
 func noteMetricsUnavailable(err error) {
 	metricsUnavailableOnce.Do(func() {
 		fmt.Printf("no live memory readings: %v — install metrics-server for the memory page to show usage\n", err)
@@ -368,22 +321,12 @@ func (d *K8sDriver) ContainerLogs(ctx context.Context, req infradriver.Workspace
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
-		// Kubernetes does not separate the two streams in a log, so every line
-		// arrives as stdout. Nothing downstream distinguishes them today, but it
-		// is a fidelity gap rather than a choice.
 		sink(infradriver.LogLine{Line: sc.Text()})
 	}
 	_ = cmd.Wait()
 	return nil
 }
 
-// ContainerEvents reports when a workspace's containers come up, go away or
-// change readiness.
-//
-// gitops uses this only as a signal that something changed — it re-reads live
-// state itself — so a watch of the workspace's pods carries exactly the
-// information it needs, including a health transition, which Kubernetes has no
-// concept of beyond readiness.
 func (d *K8sDriver) ContainerEvents(ctx context.Context, req infradriver.WorkspaceContext, sink func(infradriver.ContainerEvent)) error {
 	seen := map[string]string{}
 	first := true
@@ -436,11 +379,6 @@ func actionFor(state string) string {
 	}
 }
 
-// ContainerStop scales the workload to nothing.
-//
-// Deleting the pod would be a restart, because something would immediately
-// recreate it. Docker's stop leaves a container stopped, so the faithful mapping
-// is to stop wanting it.
 func (d *K8sDriver) ContainerStop(ctx context.Context, req infradriver.WorkspaceContext, container string) error {
 	owner, err := d.ownerOf(ctx, container)
 	if err != nil {
@@ -450,7 +388,6 @@ func (d *K8sDriver) ContainerStop(ctx context.Context, req infradriver.Workspace
 	return err
 }
 
-// ContainerRestart replaces the pod, which is what a restart is here.
 func (d *K8sDriver) ContainerRestart(ctx context.Context, req infradriver.WorkspaceContext, container string) error {
 	t, err := d.target(ctx, container)
 	if err != nil {
@@ -460,11 +397,6 @@ func (d *K8sDriver) ContainerRestart(ctx context.Context, req infradriver.Worksp
 	return err
 }
 
-// ContainerRemove deletes the workload.
-//
-// The contract is "make an inactive deployment cost nothing", and the caller has
-// already recorded that it is inactive, so nothing recreates it. Deleting only
-// the pod would achieve nothing at all.
 func (d *K8sDriver) ContainerRemove(ctx context.Context, req infradriver.WorkspaceContext, container string) error {
 	owner, err := d.ownerOf(ctx, container)
 	if err != nil {
@@ -493,8 +425,6 @@ func (d *K8sDriver) ownerOf(ctx context.Context, container string) (string, erro
 	}
 	switch strings.ToLower(kind) {
 	case "replicaset":
-		// A ReplicaSet is an implementation detail of the Deployment that owns
-		// it, and acting on it would be undone the moment the Deployment noticed.
 		rsOwner, err := d.kubectl(ctx, "get", "replicaset", name, "-o",
 			"jsonpath={.metadata.ownerReferences[0].name}")
 		if err != nil {
@@ -508,9 +438,6 @@ func (d *K8sDriver) ownerOf(ctx context.Context, container string) (string, erro
 	}
 }
 
-// ContainerInspect answers in the shape its readers parse, which is a Docker
-// inspect record. Only the fields they actually read are filled in, and the
-// environment is resolved rather than left as the references the pod carries.
 func (d *K8sDriver) ContainerInspect(ctx context.Context, req infradriver.WorkspaceContext, container string) ([]byte, error) {
 	t, err := d.target(ctx, container)
 	if err != nil {
@@ -556,11 +483,6 @@ func (d *K8sDriver) ContainerInspect(ctx context.Context, req infradriver.Worksp
 		return nil, err
 	}
 
-	// The environment as the process sees it, not as the pod spec writes it.
-	// Most of what a business process runs on arrives through envFrom, so a
-	// listing built from the inline entries alone would show a backend with no
-	// database and no credentials — and the env view a person reads is the one
-	// place that would be believed.
 	resolved := map[string]string{}
 	var order []string
 	put := func(k, v string) {
@@ -581,7 +503,6 @@ func (d *K8sDriver) ContainerInspect(ctx context.Context, req infradriver.Worksp
 				put(k, v)
 			}
 		}
-		// Inline last: it wins, which is what it does in Kubernetes.
 		for _, e := range c.Env {
 			put(e.Name, e.Value)
 		}
@@ -628,12 +549,6 @@ func (d *K8sDriver) ContainerExec(ctx context.Context, req infradriver.Workspace
 	if err != nil {
 		return -1, err
 	}
-	// A requested user is not honoured: an exec here joins a running container
-	// and runs as whoever that container runs as, and there is no per-exec
-	// override. The command is still run, because the one caller that asks for
-	// root asks in order to remove a directory the container already owns, and
-	// refusing outright would fail work that succeeds. What must not happen is
-	// a failure that looks like something else, so the exit is annotated below.
 	args := []string{"-n", d.namespace, "exec", t.pod, "-c", t.container}
 	if in != nil {
 		args = append(args, "-i")
@@ -678,8 +593,6 @@ func (d *K8sDriver) ContainerExec(ctx context.Context, req infradriver.Workspace
 		return 0, nil
 	}
 	if ee, ok := err.(*exec.ExitError); ok {
-		// A command that ran and failed is a result, not an error: the caller
-		// wants the code.
 		if spec.User != "" && ee.ExitCode() != 0 {
 			out(true, []byte(fmt.Sprintf(
 				"\n[bitswan] this ran as the container's own user; %q was asked for and kubernetes has no per-exec user\n",
@@ -690,9 +603,6 @@ func (d *K8sDriver) ContainerExec(ctx context.Context, req infradriver.Workspace
 	return -1, err
 }
 
-// secretValues reads a Secret's contents. A Secret that cannot be read gives
-// nothing rather than an error: an inspect is a read, and failing the whole
-// record over one unreadable reference would hide everything else in it.
 func (d *K8sDriver) secretValues(ctx context.Context, name string) map[string]string {
 	raw, err := d.kubectl(ctx, "get", "secret", name, "-o", "json")
 	if err != nil {
@@ -719,8 +629,6 @@ func (d *K8sDriver) secretValues(ctx context.Context, name string) map[string]st
 	return out
 }
 
-// workloadWanted reports whether something in this namespace is declared to run
-// under this container's name, whatever its pods are doing at the moment.
 func (d *K8sDriver) workloadWanted(ctx context.Context, container string) bool {
 	selector := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
 		"," + k8srender.ContainerNameLabel + "=" + k8srender.LabelValue(container)

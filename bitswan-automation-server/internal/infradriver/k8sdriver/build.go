@@ -14,18 +14,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 )
 
-// BuildImage bakes a source tree into an image the kubelet can pull.
-//
-// On Docker the driver builds into the daemon's own image store, and the store
-// the kubelet — there is none — would read is the same one. Here they are two
-// different things: buildkit builds, a registry in the namespace holds the
-// result, and the kubelet pulls from that registry. So a build is a push, and
-// the tag a workload names has to be a reference the kubelet can resolve.
-//
-// The cache semantics are the Docker driver's, because gitops depends on them:
-// the tag is content-addressed, so an existing tag is a hit and needs no work,
-// and a byte-identical image already built for another business process is a
-// retag rather than a rebuild.
 func (d *K8sDriver) BuildImage(ctx context.Context, req infradriver.BuildRequest, prog func(string)) (infradriver.ImageRef, error) {
 	if req.Tag == "" || req.SourcePath == "" {
 		return infradriver.ImageRef{}, fmt.Errorf("build: tag and source_path are required")
@@ -55,14 +43,6 @@ func (d *K8sDriver) BuildImage(ctx context.Context, req infradriver.BuildRequest
 		"--local", "dockerfile=" + filepath.Dir(dockerfilePath),
 		"--opt", "filename=" + filepath.Base(dockerfilePath),
 		"--output", fmt.Sprintf("type=image,name=%s,push=true%s", ref, buildkitInsecure()),
-		// A layer cache that outlives the builder pod, and is shared across
-		// business processes: the expensive layers are the dependency installs,
-		// and they are identical between them.
-		//
-		// Whatever the output says about the transport, the cache refs have to
-		// say too: they point at the same registry, and the export half of an
-		// otherwise successful build fails on "server gave HTTP response to
-		// HTTPS client" if only one of them is told.
 		"--export-cache", "type=registry,mode=max" + buildkitInsecure() + ",ref=" + cacheRef(),
 		"--import-cache", "type=registry" + buildkitInsecure() + ",ref=" + cacheRef(),
 	}
@@ -82,22 +62,11 @@ func (d *K8sDriver) BuildImage(ctx context.Context, req infradriver.BuildRequest
 	return infradriver.ImageRef{FullTag: req.Tag, ImageID: digest}, nil
 }
 
-// registryRef is the reference a built image is pushed to and a workload names.
-//
-// One reference for both, deliberately. The kubelet resolves image names through
-// the NODE's resolver, where a Service name means nothing, so the cluster is
-// configured to mirror this registry's name to where the node can reach it. The
-// alternative — one name to push to and another to pull by — puts a node-local
-// address inside a tag recorded in bitswan.yaml.
 func registryRef(tag string) string {
 	registry := envOr("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000")
 	return registry + "/" + strings.TrimPrefix(tag, "/")
 }
 
-// splitRef takes a reference apart the way a registry client does: the tag is
-// after the LAST colon, not the first, because the host carries a port. Cutting
-// at the first colon turns bitswan-registry:5000/x:sha into host
-// "bitswan-registry" and tag "5000/x:sha", which no registry has ever heard of.
 func splitRef(ref string) (host, repo, tag string, ok bool) {
 	name := ref
 	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
@@ -122,13 +91,7 @@ func buildkitAddr() string {
 	return envOr("BITSWAN_BUILDKIT_ADDR", "tcp://bitswan-buildkit:1234")
 }
 
-// manifestDigest reports the digest of a reference already in the registry, or
-// "" when it is not there. That is the cache check: the tag is a content
-// address, so its presence means the work is done.
 func (d *K8sDriver) manifestDigest(ctx context.Context, ref string) string {
-	// The registry is asked directly rather than through buildkit, which has no
-	// command for "does this tag exist" — and an image already pushed is a hit
-	// whether or not the builder happens to be up.
 	_, repo, tag, ok := splitRef(ref)
 	if !ok {
 		return ""
@@ -161,14 +124,7 @@ func dockerfileFor(req infradriver.BuildRequest) (string, func(), error) {
 	if mount == "" {
 		mount = "/app"
 	}
-	// The base is resolved the same way a workload's image is. A source bake
-	// often builds FROM an image this driver built earlier, and handed to the
-	// builder as a bare tag that goes to Docker Hub for something that exists
-	// only in this namespace's registry.
 	body := fmt.Sprintf("FROM %s\nCOPY . %s\n", resolveImage(req.BaseImage), mount)
-	// A build.sh runs as the final layer so the work happens once, here, and the
-	// deployed workload serves what was built rather than building on every
-	// start. A failing build.sh fails the build, which is correct.
 	body += fmt.Sprintf("RUN if [ -f %s/build.sh ]; then cd %s && sh ./build.sh; fi\n", mount, mount)
 	path := filepath.Join(dir, "Dockerfile")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
@@ -197,8 +153,6 @@ func streamOutput(cmd *exec.Cmd, prog func(string)) error {
 	return cmd.Wait()
 }
 
-// buildkitInsecure is the option fragment that tells the builder to speak
-// plaintext to the registry, and the empty string when it must not.
 func buildkitInsecure() string {
 	if registryInsecure() {
 		return ",registry.insecure=true"

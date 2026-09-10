@@ -1,17 +1,3 @@
-// Package k8sdriver realizes a workspace's declaration in one Kubernetes
-// namespace.
-//
-// It is the second implementation of infradriver.Driver. The first compiles
-// bitswan.yaml to compose and runs Docker; this one compiles the same
-// declaration to Kubernetes objects and applies them to the namespace it runs
-// in. Both read the declaration through internal/infradriver/core, so they
-// cannot disagree about what it says — only about how to run it.
-//
-// Scope is a namespace, pinned when the driver is constructed rather than taken
-// from a request, exactly as the Docker driver pins its workspace: a compromised
-// gitops must not be able to name someone else's. Here the API server enforces
-// the boundary too, which is stronger than a label check on a socket that could
-// do anything.
 package k8sdriver
 
 import (
@@ -23,7 +9,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8sctl"
 )
 
-// K8sDriver applies a workspace's declaration to one namespace.
 type K8sDriver struct {
 	workspace string
 	namespace string
@@ -31,8 +16,6 @@ type K8sDriver struct {
 
 var _ infradriver.Driver = (*K8sDriver)(nil)
 
-// Options is what the driver needs to know about itself. The namespace defaults
-// to the one this pod runs in, which is the only one it can act in anyway.
 type Options struct {
 	Workspace string
 	Namespace string
@@ -53,7 +36,6 @@ func New(opts Options) (*K8sDriver, error) {
 	return &K8sDriver{workspace: opts.Workspace, namespace: ns}, nil
 }
 
-// Apply compiles the declaration and applies it.
 func (d *K8sDriver) Apply(ctx context.Context, req infradriver.ApplyRequest, prog func(infradriver.Progress)) ([]infradriver.Route, error) {
 	report := func(step, msg string) {
 		if prog != nil {

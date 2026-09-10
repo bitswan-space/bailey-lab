@@ -64,10 +64,6 @@ func startBuildProxiesK8s() {
 
 const buildProxyReadyTimeout = 5 * time.Minute
 
-// adoptBuildProxyEnvK8s wires the build path only to what is actually serving.
-// The Go proxy carries its own `|direct` fallback so an absent one costs speed;
-// npm has no such fallback, and naming a registry that does not answer turns
-// every build that installs a package into a failure.
 func adoptBuildProxyEnvK8s(ctx context.Context) {
 	if os.Getenv("BITSWAN_GOPROXY") == "" && k8sctl.Available(ctx, goProxyWorkload) {
 		_ = os.Setenv("BITSWAN_GOPROXY", goProxyURLK8s())
@@ -77,11 +73,6 @@ func adoptBuildProxyEnvK8s(ctx context.Context) {
 	}
 }
 
-// seedBuildProxyState writes what a container cannot create for itself. A
-// subPath mount of a file the volume does not hold is refused by the kubelet,
-// and a directory the kubelet does create is root-owned 0755 — unwritable by
-// the unprivileged user each of these images runs as, which is why the modes
-// are widened here rather than by running the proxies as root.
 func seedBuildProxyState() error {
 	for _, dir := range []string{
 		buildProxyPath("athens"),

@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Guest-side runner for the Kubernetes-namespace Bailey suite.
-#
-# Grows in step with the driver: right now it hands this checkout's images to
-# k3s's containerd and reports what the cluster looks like, which is the signal
-# needed while the seed manifest and namespace mode are being built.
 set -euo pipefail
 export PATH="$PATH:/usr/local/go/bin"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -16,10 +11,6 @@ echo "=== build this checkout's images ==="
 mark "k8s: build dev images"
 
 echo "=== hand the images to k3s containerd ==="
-# The kubelet pulls from containerd, which cannot see the docker image store, so
-# every image a pod names has to be imported. imagePullPolicy stays Never for
-# these, so a tag typo fails loudly instead of silently pulling from Docker Hub
-# and testing code that is not in this checkout.
 IMAGES=(
   bitswan/gitops-dev:latest
   bitswan/workspace-dashboard-dev:latest
@@ -28,16 +19,10 @@ IMAGES=(
   bitswan/infra-driver-dev:latest
 )
 echo "=== the automation server as a self-contained image ==="
-# The runtime image ships without the binary (a Docker host bind-mounts it); a
-# pod has no host, so it is baked in and the tag names the version.
-# `make console` first: the Server Console SPA is embedded into the binary with
-# go:embed, and without it the gate serves an empty console — which looks exactly
-# like a broken iframe rather than a missing build step.
 ( cd bitswan-automation-server && make console && go build -o bitswan . \
   && sudo docker build -q -f Dockerfile.k8s -t bitswan/automation-server:dev . )
 mark "k8s: build the automation-server image"
 
-# The driver needs kubectl where the Docker one needs the docker CLI.
 sudo docker build -q -f bitswan-automation-server/Dockerfile.infra-driver.k8s \
   -t bitswan/infra-driver-k8s:dev bitswan-automation-server
 mark "k8s: build the infra-driver image"

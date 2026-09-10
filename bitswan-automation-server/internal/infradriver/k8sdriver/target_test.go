@@ -6,11 +6,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
-// TestASidecarResolvesByItsOwnName is the case that broke every snapshot. The
-// object store's tooling is a sidecar, gitops addresses it as
-// "<container>-toolbox", and the pod's container-name label is one value shared
-// by both containers — so matching on the label alone resolved the pod for the
-// main container and nothing at all for the sidecar.
 func TestASidecarResolvesByItsOwnName(t *testing.T) {
 	labels := map[string]string{
 		k8srender.ContainerNameLabel: k8srender.LabelValue("finance__garage"),
@@ -26,11 +21,11 @@ func TestASidecarResolvesByItsOwnName(t *testing.T) {
 		asked string
 		want  string
 	}{
-		{"finance__garage-toolbox", "toolbox"},  // the sidecar, by its own name
-		{"finance__garage", "finance-garage"},   // the service itself
-		{"finance-garage-0/toolbox", "toolbox"}, // this driver's own handle
-		{"finance-garage", "finance-garage"},    // the Service name
-		{"finance-garage-0", "finance-garage"},  // the bare pod
+		{"finance__garage-toolbox", "toolbox"},
+		{"finance__garage", "finance-garage"},
+		{"finance-garage-0/toolbox", "toolbox"},
+		{"finance-garage", "finance-garage"},
+		{"finance-garage-0", "finance-garage"},
 	} {
 		got, ok := resolveTarget(all, tc.asked)
 		if !ok {

@@ -10,22 +10,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
-// The memory backend for a namespace.
-//
-// The business logic — the admin page, the admission gate, the eviction sweep —
-// depends only on MemoryGovernor and the pure model, so all that is needed here
-// is where the two numbers come from. Both answers differ from Docker's in a
-// way that matters:
-//
-// The inventory is the namespace's own pods, not every container on a host. A
-// Bailey in a namespace shares its node with things that are none of its
-// business, and counting them would make the budget somebody else's.
-//
-// The budget is what the namespace is ALLOWED, not what the node has. Reading
-// /proc/meminfo in a pod reports the node's memory, so a Bailey with a 4 GB
-// quota on a 256 GB node would believe it had 256 GB and admit workloads until
-// the quota killed them. A ResourceQuota is the honest number; without one,
-// there is no limit to report and the model is told so rather than guessing.
 type k8sMemoryGovernor struct {
 	namespace       string
 	countWorkspaces func() int
@@ -47,7 +31,7 @@ func (g k8sMemoryGovernor) Inventory(ctx context.Context) ([]memContainer, error
 	if err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
-	usage, _ := k8sctl.PodMemoryUsage(ctx) // best-effort: no metrics-server, no usage
+	usage, _ := k8sctl.PodMemoryUsage(ctx)
 
 	out := make([]memContainer, 0, len(pods))
 	for _, p := range pods {
@@ -96,10 +80,6 @@ func (g k8sMemoryGovernor) Budget(ctx context.Context) (memBudget, error) {
 	return b, nil
 }
 
-// namespaceMemoryBudget is what this namespace may use, and how much of it is
-// still free. Free is derived from what is reserved rather than measured: there
-// is no "available memory" for a namespace, only a ceiling and what has been
-// claimed against it.
 func namespaceMemoryBudget(ctx context.Context, inv []memContainer) (total, avail uint64, warning string) {
 	limit, err := namespaceMemoryLimit(ctx)
 	if err != nil {
@@ -108,8 +88,6 @@ func namespaceMemoryBudget(ctx context.Context, inv []memContainer) (total, avai
 	return budgetFromQuota(limit, inv)
 }
 
-// budgetFromQuota is the arithmetic, separated from the cluster so it can be
-// tested: a ceiling, and what is still unclaimed against it.
 func budgetFromQuota(limit uint64, inv []memContainer) (total, avail uint64, warning string) {
 	if limit == 0 {
 		return 0, 0, "This namespace has no memory quota, so there is no budget to divide — " +
@@ -127,7 +105,6 @@ func budgetFromQuota(limit uint64, inv []memContainer) (total, avail uint64, war
 	return limit, limit - claimed, ""
 }
 
-// namespaceMemoryLimit reads the tightest memory ceiling the namespace has.
 func namespaceMemoryLimit(ctx context.Context) (uint64, error) {
 	raw, err := k8sctl.Get(ctx, "resourcequota", "")
 	if err != nil {
@@ -159,5 +136,4 @@ func namespaceMemoryLimit(ctx context.Context) (uint64, error) {
 	return tightest, nil
 }
 
-// parseNamespaceQuantity reads a Kubernetes memory quantity.
 func parseNamespaceQuantity(v string) int64 { return k8sctl.MemoryQuantityBytes(v) }

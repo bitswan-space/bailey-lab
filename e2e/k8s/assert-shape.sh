@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# What the walkthrough cannot see.
-#
-# A green browser run says the product works. It says nothing about whether the
-# namespace it works in is one a customer would accept: whether anything is
-# privileged, whether the driver could act outside its namespace, whether the
-# firewall that reports "monitoring" actually intercepts anything, whether the
-# images running are the ones this cluster built. Each of those can be wrong
-# while every chapter passes, so each is asserted here.
-#
-# Behaviour, not object existence, wherever behaviour is what matters — a
-# NetworkPolicy that is accepted and not enforced fails open, and an object
-# check would call that a pass.
 set -uo pipefail
 
 KUBECTL="${KUBECTL:-sudo k3s kubectl}"
@@ -26,12 +14,6 @@ check() {
 }
 
 echo "=== nothing in the namespace can reach a container runtime ==="
-# The guest does run docker, and that is not the question: it is how the images
-# this cycle builds get into containerd, the way a CI runner builds them. The
-# question is whether anything the Bailey runs can reach a runtime — which is
-# what the Docker install's whole trust model rests on and what this one is
-# supposed to replace. A socket would arrive as a host path, so it is the mount
-# that is checked, not the binary.
 sockets=$($KUBECTL -n "$NS" get pods -o json |
   python3 -c '
 import json,sys
@@ -49,12 +31,6 @@ else
 fi
 
 echo "=== what PodSecurity is actually enforcing ==="
-# Reported, not asserted. Baseline rejects NET_ADMIN, which the egress
-# firewall's rule installer needs, and rejects the unconfined seccomp profile
-# rootless buildkit needs — so a namespace that both builds images and enforces
-# its own egress cannot carry that label, and there is no level between. The
-# checks below are what actually holds the line; this line exists so nobody
-# reads "baseline" somewhere and believes the API server is enforcing it.
 level=$($KUBECTL get ns "$NS" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null)
 echo "note: PodSecurity enforce=${level:-<unset>} on $NS — the assertions below, not this label, are the guarantee"
 
@@ -102,16 +78,6 @@ fi
 echo "=== the driver can act in its namespace and nowhere else ==="
 SA="system:serviceaccount:${NS}:bitswan-infra-driver"
 
-# A query that did not run is not a denial. Asked with 2>/dev/null and matched
-# on "yes", a kubectl that fails for any reason — wrong context, API server
-# down, a typo in the resource name — answers "no" to every question, and five
-# of the six checks below are looking for a no. They would all pass while
-# proving nothing. So the three outcomes are kept apart.
-# stdout only. Merging stderr looked like the careful thing to do and was the
-# opposite: asking about a cluster-scoped resource prints "Warning: resource
-# 'nodes' is not namespace scoped" first, so every such answer parsed as an
-# error and the check reported that it could not be asked. The answer is on
-# stdout and nothing else is; empty stdout is what "could not ask" looks like.
 can() {
   local out
   out=$($KUBECTL auth can-i "$1" "$2" ${3:+-n "$3"} --as "$SA" 2>/dev/null | tail -1)
@@ -204,20 +170,12 @@ else
 fi
 
 echo "=== the egress firewall actually intercepts ==="
-# Behaviour, not object existence. In monitor mode the proxy records what was
-# reached for, so a request from inside a firewalled pod has to show up in its
-# attempts log — which is the only thing that distinguishes an installed rule
-# from an installed rule that does nothing.
 proxy=$($KUBECTL -n "$NS" get pods -l gitops.firewall_proxy=true -o name 2>/dev/null | head -1)
 target=$($KUBECTL -n "$NS" get pods -l gitops.bp -o name 2>/dev/null |
   grep -v firewall | head -1)
 if [ -z "$proxy" ] || [ -z "$target" ]; then
   fail "no firewall proxy or no firewalled workload to test through"
 else
-  # A name that resolves, deliberately. The interception is a destination
-  # rewrite, so the client has to get as far as opening a connection — a name
-  # that does not resolve produces no packet and the check would fail whether
-  # or not the firewall works.
   probe_host="${E2E_EGRESS_PROBE_HOST:-example.com}"
   $KUBECTL -n "$NS" exec "$target" -- sh -c \
     "wget -q -T 4 -O /dev/null https://$probe_host/ 2>/dev/null || true" >/dev/null 2>&1
@@ -231,18 +189,10 @@ else
 fi
 
 echo "=== the coding agent can reach gitops and nothing else ==="
-# Behaviour, because a NetworkPolicy the CNI accepts and does not enforce fails
-# OPEN, and an object check calls that a pass. The agent runs code its users and
-# an AI wrote; its whole reachable surface is meant to be the authenticated
-# gitops API. So it is asked to reach two things — one it must and one it must
-# not — and a probe that cannot be run at all is a failure, not a silent pass.
 agent=$($KUBECTL -n "$NS" get pods -l bitswan.io/role=coding-agent -o name 2>/dev/null | head -1)
 if [ -z "$agent" ]; then
   fail "no coding-agent pod to test isolation against"
 else
-  # Whatever the image happens to carry. The agent has no nc, which the first
-  # version of this check treated as "cannot test" — so a policy that was not
-  # enforced would have been reported as untestable rather than as open.
   reach() {
     $KUBECTL -n "$NS" exec "$agent" -- sh -c "
       if command -v bash >/dev/null; then
@@ -270,11 +220,6 @@ else
 fi
 
 echo "=== the features that exist on Docker exist here ==="
-# Three times a namespace implementation has been written and its call site
-# left gated to Docker, and each time every chapter stayed green because the
-# chapters navigate and capture rather than assert. These check the EFFECT, in
-# the place a person would look: a database with something in it, and a page
-# that answers.
 gitops_pod=$($KUBECTL -n "$NS" get pods -l app.kubernetes.io/name -o name 2>/dev/null |
   grep -- '-gitops' | head -1)
 if [ -z "$gitops_pod" ]; then
@@ -288,12 +233,6 @@ else
   fi
 fi
 
-# The resources API sits behind the device-trust gate, so this cannot ask it
-# without a session — and faking one to satisfy a check would be worse than not
-# checking. Two things it can observe honestly instead: that the namespace has
-# a budget at all, since without one the page has nothing to report; and that
-# the governor is not failing to take an inventory, which is the symptom that
-# had it erroring every five minutes while every chapter stayed green.
 quota=$($KUBECTL -n "$NS" get resourcequota -o jsonpath='{.items[0].status.hard.requests\.memory}' 2>/dev/null)
 if [ -n "$quota" ]; then
   pass "the namespace has a memory budget ($quota)"

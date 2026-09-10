@@ -31,11 +31,7 @@ func TestSplitRefTakesTheTagAfterTheLastColon(t *testing.T) {
 func TestABuiltBaseImageIsNamedInTheRegistry(t *testing.T) {
 	t.Setenv("BITSWAN_K8S_REGISTRY", "bitswan-registry:5000")
 	for _, tc := range []struct{ in, want string }{
-		// A source bake often builds FROM something this driver built earlier.
-		// Handed to the builder as a bare tag it goes to Docker Hub and comes
-		// back "pull access denied" for a repository that exists only here.
 		{"internal/acme-frontend:sha123", "bitswan-registry:5000/internal/acme-frontend:sha123"},
-		// A published base is already resolvable and must be left alone.
 		{"node:24-alpine", "node:24-alpine"},
 		{"bitswan/pipeline-runtime-environment:latest", "bitswan/pipeline-runtime-environment:latest"},
 	} {
@@ -45,10 +41,6 @@ func TestABuiltBaseImageIsNamedInTheRegistry(t *testing.T) {
 	}
 }
 
-// TestTheRegistryIsSpokenToSecurelyUnlessAsked is the one that matters if this
-// ever ships: a registry reached over http carries every image a Bailey builds,
-// and the credentials baked into some of them, in the clear. Plaintext has to
-// be a thing an install chose, not a thing it got.
 func TestTheRegistryIsSpokenToSecurelyUnlessAsked(t *testing.T) {
 	t.Setenv("BITSWAN_K8S_REGISTRY", "registry.example:5000")
 
@@ -60,8 +52,6 @@ func TestTheRegistryIsSpokenToSecurelyUnlessAsked(t *testing.T) {
 		t.Errorf("builder told %q with nothing configured, want nothing", got)
 	}
 
-	// Anything that is not an explicit yes is a no, including the values a
-	// half-written template leaves behind.
 	for _, off := range []string{"false", "0", "no", "FALSE", " ", "maybe"} {
 		t.Setenv("BITSWAN_K8S_REGISTRY_INSECURE", off)
 		if registryInsecure() {

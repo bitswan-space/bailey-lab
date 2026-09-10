@@ -609,17 +609,6 @@ def _ingress_client_and_base() -> tuple:
     base_url = os.environ.get(
         "BITSWAN_INGRESS_URL", "http://bitswan-automation-server-daemon:8080"
     )
-    # Over the socket the daemon trusts the peer, because reaching the socket
-    # was the credential. Over the network it cannot, and the listener that
-    # serves these routes accepts nothing else — so the workspace's token goes
-    # with the request.
-    #
-    # Without one there is nothing to send and nothing that would be accepted,
-    # so this refuses rather than making a request that can only come back 401.
-    # Callers of these helpers fail closed on a transport error, which is the
-    # behaviour wanted: an unresolvable role must never read as "no privileges"
-    # by accident, and "no token is configured" names the thing to fix where
-    # "unauthorized" sends the reader to look at the daemon.
     token = os.environ.get("BITSWAN_INGRESS_TOKEN", "").strip()
     if not token:
         raise RuntimeError(

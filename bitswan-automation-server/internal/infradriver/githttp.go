@@ -51,12 +51,6 @@ func gitCGIHandler(projectRoot string) http.Handler {
 	}
 }
 
-// hookInheritedEnv is what the post-receive hook is given.
-//
-// A named function rather than a literal so it can be asserted against what the
-// compilers actually read: the hook is a CGI grandchild with a scrubbed
-// environment, and a setting missing from this list fails only on the push
-// path, as an apply that refuses over configuration the serve process has.
 func hookInheritedEnv() []string {
 	return []string{
 		"BITSWAN_VOLUME_NAME",
@@ -72,21 +66,11 @@ func hookInheritedEnv() []string {
 		"BITSWAN_INGRESS_SOCKET",
 		"BITSWAN_INFRA_DRIVER_TOKEN",
 		"KEYCLOAK_URL",
-		// The hook is a CGI grandchild, so an in-cluster client can only be
-		// built from what is listed here: the service-account token and CA
-		// are files it inherits, but these two are environment-only, and
-		// without them the Kubernetes backend fails to find its API server
-		// on the push path while working perfectly under `serve`.
 		"KUBERNETES_SERVICE_HOST",
 		"KUBERNETES_SERVICE_PORT",
 		"BITSWAN_INFRA_DRIVER_KIND",
 		"BITSWAN_K8S_NAMESPACE",
 		"BITSWAN_INGRESS_TOKEN",
-		// Everything else the Kubernetes compiler reads. These are the exact
-		// counterpart of BITSWAN_VOLUME_NAME above and fail the same way:
-		// the serve process has them, the hook does not, so a build works
-		// and the apply that follows it refuses — with an error about
-		// configuration, on a path where the configuration is right.
 		"BITSWAN_K8S_VOLUME_CLAIM",
 		"BITSWAN_K8S_REGISTRY",
 		"BITSWAN_K8S_REGISTRY_INSECURE",
@@ -99,9 +83,6 @@ func hookInheritedEnv() []string {
 		"BITSWAN_K8S_POSTGRES_STORAGE",
 		"BITSWAN_K8S_GARAGE_STORAGE",
 		"BITSWAN_WORKSPACE_NAME",
-		// Build settings and the perf log. These reach the hook for the same
-		// reason as everything above, and a test asserts this list stays a
-		// superset of what the compilers actually read.
 		"BITSWAN_BUILD_NETWORK",
 		"BITSWAN_GOPROXY",
 		"BITSWAN_NPM_REGISTRY",

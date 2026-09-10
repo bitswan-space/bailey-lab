@@ -599,14 +599,6 @@ func handleGatePath(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// registerBaileyRoutesWhenProxyUp keeps trying to register the console's routes
-// until the auth proxy is answering, and reports whether it managed it.
-//
-// The routes cannot be written before the proxy is up: they point at it, and
-// registering them without it would publish the console with nothing checking
-// identity. But the proxy coming up is a race the daemon does not control — in a
-// pod it starts alongside this process and has to reach the identity provider
-// first — so the answer is to wait for it rather than to give up.
 func registerBaileyRoutesWhenProxyUp(within, every time.Duration) bool {
 	if protectedHostnameDomain() == "" {
 		return true

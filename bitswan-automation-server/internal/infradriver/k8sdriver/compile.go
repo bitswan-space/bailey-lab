@@ -16,13 +16,6 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/k8srender"
 )
 
-// apply compiles the declaration into objects, applies them, and hands the
-// resulting routes to the daemon.
-//
-// The order matters and is the same order the Docker driver reconciles in: the
-// things a workload reads must exist before it starts, the infra a business
-// process depends on comes up before the process, and the ingress is converged
-// last so nothing is routed at a workload that is not there yet.
 func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, report func(step, msg string)) ([]infradriver.Route, error) {
 	report("compile", "compiling bitswan.yaml")
 	bs, err := core.ParseBitswanYAML([]byte(req.BitswanYAML))
@@ -30,10 +23,6 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		return nil, fmt.Errorf("parse bitswan.yaml: %w", err)
 	}
 
-	// Garage mints its access keys server-side, so they are ensured before the
-	// compile that bakes them into a workload's environment. On the first apply
-	// Garage is not up yet; the compiler writes the placeholder and the
-	// post-apply pass mints for real, exactly as the Docker driver does.
 	x := execer{d: d}
 	report("provision", "Ensuring Garage access keys for scoped backends...")
 	core.EnsureGarageKeysPrecompile(x, ctx, req.Ctx, bs, report)
@@ -59,8 +48,6 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		return routes, nil
 	}
 
-	// Phase one: what a business process needs before it can run. Its database,
-	// its object store, and the proxy its egress is redirected through.
 	if len(foundation) > 0 {
 		report("apply", fmt.Sprintf("applying %d foundation object(s)", len(foundation)))
 		if err := k8sctl.Apply(ctx, foundation); err != nil {
@@ -72,27 +59,18 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		}
 	}
 
-	// Then provision into it, while nothing is yet trying to authenticate
-	// against it. A backend gives up after three minutes of Access Denied and
-	// exits, so doing this after the workloads are up is a race the workload
-	// loses — and the restart it causes is indistinguishable from a crash.
 	report("provision", "Ensuring live databases for (re)created backends...")
 	if err := core.EnsureLivePostgresDBs(x, ctx, req.Ctx, bs, nil, runningInfos(ctx, d), report); err != nil {
 		return nil, fmt.Errorf("ensure live postgres dbs: %w", err)
 	}
 	report("provision", "Provisioning per-BP namespaces...")
 	if changed := core.ProvisionForDeployments(x, ctx, req.Ctx, bs, report); len(changed) > 0 {
-		// Garage mints its keys server-side, so the first compile wrote a
-		// placeholder. The material on disk is real now, and recompiling before
-		// the workloads are applied means they are born with it rather than
-		// rolled onto it.
 		report("provision", fmt.Sprintf("credentials arrived for %d resource(s); recompiling", len(changed)))
 		if _, workloads, routes, err = c.compile(); err != nil {
 			return nil, err
 		}
 	}
 
-	// Phase two: the business process itself.
 	if len(workloads) > 0 {
 		report("apply", fmt.Sprintf("applying %d workload object(s)", len(workloads)))
 		if err := k8sctl.Apply(ctx, workloads); err != nil {
@@ -102,14 +80,6 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 
 	applied := append(append(k8srender.ObjectSet{}, foundation...), workloads...)
 
-	// What a promotion retires has to actually go away, or the old slot keeps
-	// serving beside the new one. The Docker driver gets this from
-	// --remove-orphans; here it is an explicit sweep, scoped twice over: to
-	// this business process, and to the stages this declaration actually
-	// describes. A push that carries only production must not reap a live-dev
-	// session the author is in the middle of — "absent from this file" and
-	// "retired" are different things, and only the second is a reason to
-	// delete something.
 	if req.Ctx.BP != "" {
 		keep := appliedNames(applied)
 		for _, scope := range prunableScopes(applied) {
@@ -121,10 +91,6 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		}
 	}
 
-	// Nothing is routed at a workload that is not serving yet. A Service with no
-	// ready endpoints is a 502, and on a promotion that 502 is production: the
-	// whole point of running both slots is that the cutover happens after the
-	// new one answers, not before.
 	if len(routes) > 0 {
 		report("wait", fmt.Sprintf("waiting for %d routed workload(s)", len(routes)))
 		if err := waitForRouted(ctx, workloads, routes, report); err != nil {
@@ -139,9 +105,6 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 	return routes, nil
 }
 
-// waitForFoundation blocks until every workload a business process depends on
-// has rolled out. Bounded, and named in the error: a database that never
-// arrives is a different problem from a deploy that is merely slow.
 func waitForFoundation(ctx context.Context, foundation k8srender.ObjectSet, report func(step, msg string)) error {
 	for _, obj := range foundation {
 		kind, _ := obj["kind"].(string)
@@ -161,8 +124,6 @@ func waitForFoundation(ctx context.Context, foundation k8srender.ObjectSet, repo
 	return nil
 }
 
-// foundationReadyTimeout is how long a database or object store has to come up.
-// Generous, because a cold node pulling an image it has never seen is minutes.
 const foundationReadyTimeout = 10 * time.Minute
 
 type compileState struct {
@@ -172,35 +133,15 @@ type compileState struct {
 	workspace string
 	domain    string
 	fw        map[fwKey]*fwGroup
-	// claim is read once, at construction. Reading an environment variable at
-	// each use invites two reads of the same setting disagreeing, and the shape
-	// that takes is a pod with a mount and no volume — which the API server
-	// rejects with a message about a volume name, several steps from the cause.
-	claim string
-	// peerIPs pins what the rule installer will resolve, so a peer Service that
-	// is recreated with a new address changes the pod template and the workload
-	// rolls onto rules that match reality. Empty in a unit test, which keeps the
-	// compile a pure function of the declaration.
-	peerIPs map[string]string
+	claim     string
+	peerIPs   map[string]string
 }
 
-// compile turns the declaration into the objects that realize it.
-// compile returns what a business process needs BEFORE it can run, and the
-// process itself, separately — because applying them together is a race the
-// process loses. A backend waits three minutes for the bucket it authenticates
-// against and then exits; the bucket is created by the provisioning that runs
-// after the apply.
 func (c *compileState) compile() (foundation, workloads k8srender.ObjectSet, routes []infradriver.Route, err error) {
 	var objs k8srender.ObjectSet
 
-	// Decided before any workload is rendered, because a workload in a
-	// firewalled group carries the rule installer that points at its proxy.
 	c.fw = c.firewallScope()
 
-	// Infra a business process asks for, once per stage rather than once per
-	// process: two processes on the same stage share one Postgres and one
-	// object store, each with its own database and bucket, exactly as they do on
-	// Docker.
 	realms := map[string]map[string]bool{}
 
 	depIDs := make([]string, 0, len(c.bs.Deployments))
@@ -223,18 +164,11 @@ func (c *compileState) compile() (foundation, workloads k8srender.ObjectSet, rou
 		stage := conf.StageOrProduction()
 		realm := core.RealmForStage(stage)
 
-		// A slept automation keeps its route and loses its workload. The route
-		// is what the gate needs in order to notice a request for something
-		// that is not running and wake it; without it the hostname is simply
-		// not served, and waking on demand stops working.
 		if conf.Active != nil && !*conf.Active {
 			routes = append(routes, c.routesKeptWhileAsleep(id, conf)...)
 			continue
 		}
 
-		// Production is blue/green: one workload per slot, both running, only
-		// one routed. A promote pins the new version onto the idle slot and the
-		// ingress flip is what cuts over — so both have to exist at once.
 		for _, sd := range core.SlotDBPairs(c.bs, conf) {
 			slotConf := core.EffectiveSlotConf(id, conf, sd.Slot, c.bs.Deployments)
 			w, extra, route, emit, err := c.workload(id, slotConf, sd.Slot, sd.DB)
@@ -259,16 +193,9 @@ func (c *compileState) compile() (foundation, workloads k8srender.ObjectSet, rou
 		}
 	}
 
-	// Rendered after the workloads so the set reads in dependency order, but
-	// prepended so it is APPLIED first: a workload that starts before its
-	// database exists spends its first seconds crash-looping for no reason.
 	var infra k8srender.ObjectSet
 	for _, realm := range sortedKeys(realms) {
 		for _, svc := range sortedBoolKeys(realms[realm]) {
-			// Saying so beats standing nothing up: a workload whose declared
-			// service silently never appears fails much later, as a connection
-			// refused with no indication that the thing it was connecting to
-			// was never asked for.
 			rendered, ierr := c.infraService(svc, realm)
 			if ierr != nil {
 				return nil, nil, nil, ierr
@@ -276,15 +203,9 @@ func (c *compileState) compile() (foundation, workloads k8srender.ObjectSet, rou
 			infra = append(infra, rendered...)
 		}
 	}
-	// The firewall proxy belongs to the foundation too: a workload's rule
-	// installer resolves it by name at pod start, and in monitor mode every
-	// outbound request is redirected to it the moment the workload runs.
 	return append(infra, c.firewallObjects()...), objs, routes, nil
 }
 
-// workload renders one automation. The bool reports whether it should be
-// emitted at all: a live-dev deployment with nothing to run is skipped rather
-// than being an error, exactly as the Docker compiler skips it.
 func (c *compileState) workload(depID string, conf *core.Deployment, slot string, db int) (k8srender.Workload, k8srender.ObjectSet, *infradriver.Route, bool, error) {
 	stage := conf.StageOrProduction()
 	realm := core.RealmForStage(stage)
@@ -294,18 +215,11 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		bpSlug = conf.Context
 	}
 
-	// The name a route points at. Derived exactly as the Docker driver derives a
-	// container name, so an upstream written by either backend resolves.
 	svcName := core.MakeHostnameLabel(c.workspace, automation, conf.Context, stage, slot)
 
 	rel := conf.RelativePath
 	source := core.FirstNonEmpty(core.FirstNonEmpty(conf.Source, conf.Checksum), depID)
 
-	// CONTAINMENT (#134): the checksum and the relative path come from the
-	// tenant-writable deployment record, and both end up as subPath values the
-	// kubelet joins onto a volume root. A "../.." in either would mount
-	// something else's directory into a tenant's pod, so the same lexical
-	// containment the Docker compiler applies to its bind sources applies here.
 	if _, err := core.ContainedJoin(c.ctx.GitopsDir, source); err != nil {
 		return k8srender.Workload{}, nil, nil, false, fmt.Errorf("deployment %s: %w", depID, err)
 	}
@@ -324,16 +238,6 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		return k8srender.Workload{}, nil, nil, false, fmt.Errorf("live-dev deployment %s is missing relative_path", depID)
 	}
 
-	// The image, and where the code inside it comes from. Three cases, the same
-	// three the Docker compiler has: live-dev runs a base image over the
-	// author's working tree, a built deployment runs an image with the source
-	// baked in, and anything else runs a base image over the checksum tree.
-	//
-	// Whichever of the three it is, an image this driver built has to be named
-	// by its place in the registry rather than by its bare tag — see
-	// resolveImage. A live-dev automation that ships its own Dockerfile gets a
-	// built image too, which is why that is decided after the switch and not
-	// inside one arm of it.
 	image := cfg.Image
 	var mounts []k8srender.Mount
 	switch {
@@ -366,13 +270,6 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		port = 8080
 	}
 
-	// The live slot carries the BARE identifier and a standby carries
-	// "<id>@<slot>". That asymmetry is not cosmetic: gitops overlays a bare id
-	// onto the automation's base entry, and treats a slotted one as a separate
-	// automation with no base — which is how the DR stage shows the standby's
-	// container without ever showing the live one. Slotting both left
-	// production's base entry with no container at all, so the dashboard showed
-	// a stage with nothing running while five pods were running.
 	isLiveSlot := slot == "" || slot == core.LiveSlotFor(c.bs, conf)
 	slotDepID := depID
 	if !isLiveSlot {
@@ -392,13 +289,8 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 			core.MakeHostnameLabel(c.workspace, automation, conf.Context, stage, "") + "." + c.domain
 	}
 
-	// What the Docker driver hands a worker as a peer address is the firewall
-	// gateway it shares a network namespace with. Nothing shares a namespace
-	// here, so a peer is its own Service — which is also why a worker can be
-	// replicated on Kubernetes and cannot on Docker.
 	env["BITSWAN_WORKER_HOSTS"] = c.workerHosts(conf, bpSlug, stage, slot)
 
-	// What this process authenticates as, and where it finds what it talks to.
 	resources := c.resourceNames(bpSlug, copyName, stage, db)
 	for envName, key := range map[string]string{
 		"POSTGRES_DB":       "postgres_db",
@@ -444,28 +336,12 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 			"gitops.slot":            slot,
 		},
 		Annotations: map[string]string{
-			// A changed credential has to reach the process. Kubernetes does not
-			// restart a pod when a Secret it reads through envFrom changes, so
-			// the content's hash rides in the pod template: a new value is a new
-			// template and the workload rolls. Left off a production slot on
-			// purpose — a live slot must not be recreated in place, and a
-			// production credential is applied with no downtime by the next
-			// promotion, which brings the idle slot up reading the new value.
-			"bitswan.io/credentials": c.credentialsFingerprint(slot, secretContent),
-			// The raw values, because a label cannot hold all of them: an
-			// identifier carries an "@" once a slot is involved, and a content
-			// hash is a character over the limit.
+			"bitswan.io/credentials":          c.credentialsFingerprint(slot, secretContent),
 			"gitops.bitswan.io/deployment_id": slotDepID,
 			"gitops.bitswan.io/checksum":      conf.Checksum,
 		},
-		// Kubernetes ignores an image's own HEALTHCHECK, so without this a
-		// workload counts as ready the moment it starts and the ingress can be
-		// pointed at something still booting.
 		Readiness: &k8srender.Probe{TCPPort: port, PeriodSeconds: 3, Failures: 100},
 	}
-	// Tenant code runs behind the group's egress rules, written by an init
-	// container that has NET_ADMIN and is gone by the time this container
-	// starts — so the workload itself cannot undo them.
 	if g := c.fwGroupFor(conf); g != nil {
 		peers := c.peersFor(realm, bpSlug)
 		w.InitContainers = append(w.InitContainers, ruleInstaller(g, peers))
@@ -474,9 +350,6 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		}
 	}
 	if conf.MemoryReservation != nil && *conf.MemoryReservation > 0 {
-		// A request, never a limit: on Docker a workload over its reservation is
-		// flagged, not killed, and turning that into an OOM kill would be a
-		// behaviour change wearing a port's clothes.
 		w.RequestsMem = strconv.Itoa(*conf.MemoryReservation) + "Mi"
 		w.Labels["gitops.mem_reservation_mb"] = strconv.Itoa(*conf.MemoryReservation)
 	}
@@ -485,10 +358,6 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		return w, extra, nil, true, nil
 	}
 
-	// Which slot answers on the public name. The live one serves the stage's
-	// hostname; the standby serves the "dr" hostname so a rehearsal can be
-	// opened without touching production; an idle slot mid-promote serves
-	// nothing, which is what makes the cutover a single ingress change.
 	isDR := slot != "" && slot == core.DRSlotFor(c.bs, conf)
 	isLive := isLiveSlot
 	hostStage := stage
@@ -511,14 +380,10 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	return w, extra, route, true, nil
 }
 
-// workspaceRepo is where a live-dev deployment's working tree is read from, the
-// same path and the same default the Docker compiler uses.
 func (c *compileState) workspaceRepo() string {
 	return envOr("BITSWAN_WORKSPACE_REPO_DIR", "/workspace-repo")
 }
 
-// volumeClaim is the workspace's volume, the namespace's answer to the named
-// volume the Docker compiler mounts subpaths of.
 func (c *compileState) volumeClaim() string {
 	return c.claim
 }
@@ -530,17 +395,10 @@ func describeClaim(claim string) string {
 	return claim
 }
 
-// volumeSubPath is where inside that volume a workspace's directory lives. The
-// layout is byte-identical to the Docker named volume's, so the same path means
-// the same directory whichever backend wrote it.
 func (c *compileState) volumeSubPath(rel string) string {
 	return path.Join("workspaces", c.workspace, rel)
 }
 
-// resolveAutomationConfig reads automation.toml from wherever this deployment's
-// canonical source is: the working tree for live-dev, the checksum tree
-// otherwise, falling back to the working tree when the source is baked into an
-// image and no checksum tree was ever written.
 func (c *compileState) resolveAutomationConfig(conf *core.Deployment) core.AutomationConfig {
 	stage := conf.StageOrProduction()
 	rel := conf.RelativePath
@@ -566,9 +424,6 @@ func (c *compileState) resolveAutomationConfig(conf *core.Deployment) core.Autom
 	return core.DefaultAutomationConfig()
 }
 
-// workerHosts lists the peers an automation can reach, as name=host:port,
-// within its own slot: a blue backend talks to the blue worker, not whichever
-// one a promote happens to be replacing.
 func (c *compileState) workerHosts(conf *core.Deployment, bpSlug, stage, slot string) string {
 	var parts []string
 	ids := make([]string, 0, len(c.bs.Deployments))
@@ -639,17 +494,10 @@ func sortedBoolKeys(m map[string]bool) []string {
 	return out
 }
 
-// builtImagePullPolicy is always IfNotPresent, whatever the platform images
-// use. The suite pins those to Never so a mistyped tag fails loudly instead of
-// quietly pulling a published image — but an image this driver just built lives
-// in the registry and nowhere else, so refusing to pull would mean refusing to
-// run anything it builds.
 func builtImagePullPolicy() string {
 	return "IfNotPresent"
 }
 
-// appliedNames keys the objects just applied as "<lowercase kind>/<name>", the
-// shape PruneRetired asks "did the caller mean to keep this?" with.
 func appliedNames(objs k8srender.ObjectSet) map[string]bool {
 	keep := map[string]bool{}
 	for _, obj := range objs {
@@ -664,13 +512,6 @@ func appliedNames(objs k8srender.ObjectSet) map[string]bool {
 	return keep
 }
 
-// runningInfos is what the provisioner needs to know about what is already up:
-// which deployments have a container, and which of those are running.
-//
-// Every one of them is reported as pre-existing — the nil set the caller passes
-// is the "nothing was just created" case — because on Kubernetes an apply does
-// not tell you which pods it replaced, and the provisioner's guard is
-// idempotent: it creates a database that is missing and leaves one that is not.
 func runningInfos(ctx context.Context, d *K8sDriver) []core.ContainerInfo {
 	pods, err := d.pods(ctx, infradriver.ContainerFilter{})
 	if err != nil {
@@ -685,12 +526,6 @@ func runningInfos(ctx context.Context, d *K8sDriver) []core.ContainerInfo {
 
 type pruneScope struct{ bp, stage string }
 
-// prunableScopes reads the sweep's scope off the objects just applied rather
-// than off the request. The two disagree: a request names the business process
-// the way the caller spells it, while a workload is labelled with the slug
-// derived from its path, and where those differ a selector built from the
-// request matches nothing and every retired workload survives. Reading the
-// labels back is also the only way the selector cannot drift from them.
 func prunableScopes(objs k8srender.ObjectSet) []pruneScope {
 	seen := map[pruneScope]bool{}
 	for _, obj := range objs {
@@ -716,12 +551,6 @@ func prunableScopes(objs k8srender.ObjectSet) []pruneScope {
 	return out
 }
 
-// waitForRouted blocks until each routed workload has a ready replica.
-//
-// The Deployment behind a route is looked up in what was just applied rather
-// than re-derived from the Service name: the two names are shortened to
-// different budgets, so shortening one again does not reliably produce the
-// other.
 func waitForRouted(ctx context.Context, objs k8srender.ObjectSet, routes []infradriver.Route, report func(step, msg string)) error {
 	deploymentFor := map[string]string{}
 	for _, obj := range objs {
@@ -752,22 +581,8 @@ func waitForRouted(ctx context.Context, objs k8srender.ObjectSet, routes []infra
 	return nil
 }
 
-// routeReadyTimeout is how long a workload has to start answering before the
-// deploy gives up. Generous, because a first pull of a freshly built image on a
-// cold node is minutes, and reporting a deploy failed because an image was
-// still downloading would be a lie.
 const routeReadyTimeout = 10 * time.Minute
 
-// resolveImage names an image the way the kubelet can find it.
-//
-// A build here is a push: the tag bitswan.yaml records lives in the namespace's
-// registry and nowhere else, so the kubelet asked for the bare tag would go
-// looking on Docker Hub and get a 404 it reports as ImagePullBackOff. Published
-// base images are left exactly as written, because they are already resolvable
-// and rewriting them would break the one case that works everywhere.
-//
-// The distinction is the repository prefix the driver builds into, which is the
-// same prefix that scopes image listing and removal.
 func resolveImage(image string) string {
 	if strings.HasPrefix(image, builtImagePrefix) {
 		return registryRef(image)
@@ -775,11 +590,8 @@ func resolveImage(image string) string {
 	return image
 }
 
-// builtImagePrefix is the repository namespace every image this driver builds
-// is tagged under.
 const builtImagePrefix = "internal/"
 
-// routesKeptWhileAsleep is the routes a slept automation still answers on.
 func (c *compileState) routesKeptWhileAsleep(depID string, conf *core.Deployment) []infradriver.Route {
 	automation := conf.AutomationNameOr(depID)
 	stage := conf.StageOrProduction()
@@ -811,11 +623,6 @@ func (c *compileState) routesKeptWhileAsleep(depID string, conf *core.Deployment
 	return out
 }
 
-// credentialsFingerprint is what makes a credential change roll a workload, and
-// empty for a production slot, which must not be recreated in place. It is the
-// same workspace-keyed digest the Docker driver folds into a service label, so
-// a pod annotation — readable by anyone who can list pods, which is a weaker
-// right than reading the Secret — never carries a bare hash of secret values.
 func (c *compileState) credentialsFingerprint(slot string, content map[string]string) string {
 	if slot != "" {
 		return "none"

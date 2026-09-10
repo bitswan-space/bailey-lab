@@ -1,22 +1,3 @@
-# The builder and the registry: how a source tree becomes an image the kubelet
-# can pull.
-#
-# On a Docker host the driver builds into the daemon's own image store, and the
-# store a workload is started from is the same one. Here they are two different
-# things, so a build is a push and a workload names a registry reference.
-#
-# The registry is published on a NodePort and the cluster is configured to mirror
-# its Service name to that port (see e2e/local-vm/provision-k8s.sh), because the
-# kubelet resolves image names through the NODE's resolver, where a Service name
-# means nothing. One reference for both push and pull; the alternative bakes a
-# node-local address into a tag recorded in bitswan.yaml.
-#
-# A CONSTRAINT worth stating: a builder in the namespace needs a PodSecurity
-# profile above baseline. Rootless buildkit needs an unconfined seccomp profile,
-# which baseline forbids, and a non-rootless one needs privileged, which baseline
-# also forbids. A cluster that enforces baseline has to build somewhere else —
-# which is the argument for the driver pushing to a registry the customer already
-# has, rather than for weakening the namespace.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -56,7 +37,6 @@ spec:
           image: ${REGISTRY_IMAGE}
           imagePullPolicy: IfNotPresent
           env:
-            # Deleting a tag has to be possible, or the store only ever grows.
             - name: REGISTRY_STORAGE_DELETE_ENABLED
               value: "true"
           ports:
@@ -125,8 +105,6 @@ spec:
             - tcp://0.0.0.0:1234
             - --addr
             - unix:///run/user/1000/buildkit/buildkitd.sock
-            # Rootless without a process sandbox: the sandbox is what needs
-            # privileges this pod does not have.
             - --oci-worker-no-process-sandbox
             - --config
             - /etc/buildkit/buildkitd.toml
@@ -163,11 +141,6 @@ metadata:
     app.kubernetes.io/name: bitswan-buildkit
     app.kubernetes.io/managed-by: bitswan
 data:
-  # The registry in this namespace speaks plain HTTP. buildkit needs to be told
-  # so for PULLS as well as pushes: a source bake often builds FROM an image
-  # this driver built earlier, and without this the builder tries HTTPS, fails,
-  # falls back to Docker Hub, and reports "pull access denied" for a repository
-  # that exists here and nowhere else.
   buildkitd.toml: |
     [registry."bitswan-registry:5000"]
       http = true

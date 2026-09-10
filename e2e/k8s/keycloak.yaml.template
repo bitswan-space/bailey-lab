@@ -1,10 +1,3 @@
-# Keycloak: the identity provider a real install gets from the AOC.
-#
-# It lives in its own namespace because it needs a hostPort — the browser on the
-# node and every pod must reach the issuer at the SAME url or the iss claim
-# mismatches on one leg — and hostPort is forbidden by the PodSecurity baseline
-# profile the Bailey's namespace enforces for the egress firewall's NET_ADMIN.
-# Nothing is lost: both legs reach it by hostname, not by Service DNS.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -51,9 +44,6 @@ spec:
             - name: KC_PROXY_HEADERS
               value: xforwarded
           ports:
-            # hostPort, not a NodePort: the browser on the node and every pod
-            # must reach the issuer at the SAME url or the iss claim mismatches
-            # on one of the two legs. This is the Docker suite's `-p 8088:8088`.
             - containerPort: ${KC_PORT}
               hostPort: ${KC_PORT}
           volumeMounts:

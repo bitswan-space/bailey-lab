@@ -247,9 +247,6 @@ func (c *compileState) workspaceRoute(automationName, depContext, depStage strin
 	}
 }
 
-// The blue/green slot questions are answered by core, so the two drivers cannot
-// disagree about which slot is live, which is the standby, or which version a
-// promote pinned onto the idle one.
 type slotDB = core.SlotDB
 
 func (c *compileState) slotDBPairs(conf *Deployment) []slotDB {

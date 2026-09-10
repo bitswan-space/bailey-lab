@@ -1,13 +1,3 @@
-// Package k8sctl applies objects to the namespace this process runs in.
-//
-// It shells out to kubectl, which is the same choice the Docker driver makes
-// about the docker CLI: the image carries the tool, the tool carries the
-// protocol version, and this module's dependency list stays fifteen lines long.
-// The alternative is an API client library whose transitive dependencies would
-// outnumber everything else in the repository put together.
-//
-// Everything here is namespace-scoped and takes the namespace from the pod's own
-// service account, so there is no call that can act outside it by accident.
 package k8sctl
 
 import (
@@ -26,7 +16,6 @@ import (
 
 const namespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
-// Namespace is the namespace this process runs in.
 func Namespace() (string, error) {
 	if ns := strings.TrimSpace(os.Getenv("BITSWAN_K8S_NAMESPACE")); ns != "" {
 		return ns, nil
@@ -42,8 +31,6 @@ func Namespace() (string, error) {
 	return ns, nil
 }
 
-// Apply creates or updates every object, and prunes nothing: a caller that wants
-// something gone says so.
 func Apply(ctx context.Context, objs k8srender.ObjectSet) error {
 	if len(objs) == 0 {
 		return nil
@@ -66,13 +53,6 @@ func Apply(ctx context.Context, objs k8srender.ObjectSet) error {
 	return nil
 }
 
-// WaitAvailable blocks until a Deployment has the replicas it asked for, or the
-// timeout passes.
-//
-// The error carries the object's recent events, because "timed out waiting" on
-// its own sends the reader to a terminal, and the reason is almost always in
-// there: an image that cannot be pulled, a volume that will not bind, a pod no
-// node will take.
 func WaitAvailable(ctx context.Context, deployment string, timeout time.Duration) error {
 	ns, err := Namespace()
 	if err != nil {
@@ -89,7 +69,6 @@ func WaitAvailable(ctx context.Context, deployment string, timeout time.Duration
 	return nil
 }
 
-// Delete removes an object, and treats "already gone" as success.
 func Delete(ctx context.Context, kind, name string) error {
 	ns, err := Namespace()
 	if err != nil {
@@ -105,8 +84,6 @@ func Delete(ctx context.Context, kind, name string) error {
 	return nil
 }
 
-// Available reports whether a Deployment has at least one ready replica. This is
-// the namespace's answer to "is that container running?".
 func Available(ctx context.Context, deployment string) bool {
 	ns, err := Namespace()
 	if err != nil {
@@ -131,13 +108,6 @@ func describe(ctx context.Context, ns, deployment string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// PruneRetired deletes the workloads carrying `selector` that the caller did not
-// just apply.
-//
-// This is what `compose up --remove-orphans` does for the Docker driver, scoped
-// the same way: to one business process, so a deploy of one cannot reap a
-// sibling's. Only Deployments and their Services are considered — a StatefulSet
-// owns a volume, and nothing that owns data is removed by a deploy.
 func PruneRetired(ctx context.Context, selector string, keep map[string]bool) error {
 	ns, err := Namespace()
 	if err != nil {
@@ -162,11 +132,6 @@ func PruneRetired(ctx context.Context, selector string, keep map[string]bool) er
 	return nil
 }
 
-// WaitRollout blocks until an object of any kind has finished rolling out.
-//
-// WaitAvailable's Deployment-only shape does not cover a StatefulSet, and a
-// database is always a StatefulSet — so the one wait a deploy most needs before
-// it provisions was the one that could not be expressed.
 func WaitRollout(ctx context.Context, kind, name string, timeout time.Duration) error {
 	ns, err := Namespace()
 	if err != nil {
@@ -183,13 +148,6 @@ func WaitRollout(ctx context.Context, kind, name string, timeout time.Duration) 
 	return nil
 }
 
-// WaitJob blocks until a Job completes, and fails on the Job's own terms.
-//
-// `kubectl wait` has to be told which end it is waiting for, and waiting only
-// for "complete" hangs for the whole timeout on a Job that already failed. Both
-// conditions are watched, and the first to fire decides — cancelling the other,
-// so a success returns at once instead of waiting out the timeout that the
-// losing watcher is still holding.
 func WaitJob(ctx context.Context, name string, timeout time.Duration) error {
 	ns, err := Namespace()
 	if err != nil {
@@ -227,7 +185,6 @@ func WaitJob(ctx context.Context, name string, timeout time.Duration) error {
 	return fmt.Errorf("job %s neither completed nor failed within %s", name, timeout)
 }
 
-// jobLog is what the Job said, which is the only useful part of "it failed".
 func jobLog(ctx context.Context, ns, name string) string {
 	out, err := exec.CommandContext(ctx, "kubectl", "-n", ns, "logs",
 		"job/"+name, "--tail=20").Output()
@@ -237,8 +194,6 @@ func jobLog(ctx context.Context, ns, name string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// PodInfo is what a caller outside this package needs to know about a pod
-// without learning the API's shape.
 type PodInfo struct {
 	Name        string
 	Labels      map[string]string
@@ -247,11 +202,6 @@ type PodInfo struct {
 	Running     bool
 }
 
-// ListPods reports the bitswan-managed pods in this namespace.
-//
-// Scoped to what this Bailey manages, deliberately: a namespace can hold things
-// that are none of its business, and counting them would make its memory budget
-// somebody else's.
 func ListPods(ctx context.Context) ([]PodInfo, error) {
 	ns, err := Namespace()
 	if err != nil {
@@ -291,9 +241,6 @@ func ListPods(ctx context.Context) ([]PodInfo, error) {
 	return pods, nil
 }
 
-// PodMemoryUsage is live memory per pod, or nothing when the metrics API is
-// absent. Nothing rather than zeroes: a zero reads as "this uses no memory",
-// which would make the budget confidently wrong.
 func ServiceClusterIPs(ctx context.Context) (map[string]string, error) {
 	ns, err := Namespace()
 	if err != nil {
@@ -347,7 +294,6 @@ func PodMemoryUsage(ctx context.Context) (map[string]int64, error) {
 	return usage, nil
 }
 
-// Get returns an object, or every object of a kind when name is empty.
 func Get(ctx context.Context, kind, name string) ([]byte, error) {
 	ns, err := Namespace()
 	if err != nil {
@@ -365,9 +311,6 @@ func Get(ctx context.Context, kind, name string) ([]byte, error) {
 	return out, nil
 }
 
-// MemoryQuantityBytes reads a Kubernetes memory quantity, and reports zero for
-// anything it does not recognise so a caller can tell "no answer" from a number
-// this invented.
 func MemoryQuantityBytes(v string) int64 {
 	v = strings.TrimSpace(v)
 	for _, u := range []struct {

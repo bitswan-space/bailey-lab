@@ -433,19 +433,7 @@ func (s *Server) Run() error {
 	}
 	s.docsListener = docsListener
 
-	// In a namespace a workspace's services are their own pods and cannot share
-	// this daemon's socket, so the routes they may call are served over TCP
-	// behind the workspace's token — and only those routes are registered there.
 	if onKubernetes() {
-		// Fatal. This was a warning once, on the reasoning that a Bailey with a
-		// console is better than no Bailey — but what it actually produced was a
-		// Bailey that looked healthy and could not converge an ingress or answer
-		// what role a person holds, which surfaces much later as a deploy that
-		// times out and an auditor who appears to have no rights.
-		//
-		// It fails for one reason: no token to guard it with. Starting anyway
-		// would mean either an unguarded listener or none at all, and refusing
-		// names the missing setting at the moment it is missing.
 		if err := s.startWorkspaceAPI(); err != nil {
 			return fmt.Errorf("the workspace API cannot serve: %w", err)
 		}
@@ -527,15 +515,6 @@ func (s *Server) Run() error {
 		if err := startProtectedGate(); err != nil {
 			fmt.Printf("Warning: protected gate failed to start: %v\n", err)
 		}
-		// setupBaileyRoutes registers nothing while the auth proxy is down,
-		// because a Bailey hostname without the proxy in front of it is a
-		// hostname with no authentication. It used to run once, three seconds
-		// after boot, and stay silent — so a proxy that finished starting a
-		// moment later left the console 404ing until someone restarted the
-		// daemon. In a pod that is the normal case: the proxy has to complete
-		// OIDC discovery first, which takes longer than three seconds.
-		//
-		// So it retries until it takes. Idempotent: it rewrites the same routes.
 		if !registerBaileyRoutesWhenProxyUp(2*time.Minute, 3*time.Second) {
 			fmt.Println("Warning: Bailey routes not registered — the auth proxy never came up.")
 		}
@@ -604,18 +583,6 @@ func (s *Server) Run() error {
 	// once now, then resync periodically. Backgrounded so startup never blocks
 	// on Docker; idempotent for anything already running (see
 	// service_reconcile.go).
-	// These three own Docker objects on the host: sidecar containers, a shared
-	// volume for the vulnerability database, and the read-through build proxies.
-	// A namespace has none of them — its equivalents are declared, not created —
-	// so running them there would only retry and log.
-	//
-	// The build proxies are the same story. The grype DB refresher is NOT: it
-	// has a namespace implementation now — a Job in place of the throwaway
-	// container, writing to the volume this pod already carries — so gating it
-	// off here left every workspace scanning against a database that was never
-	// downloaded, which the supply-chain panel reports and no chapter fails on.
-	// The backup scheduler runs everywhere for the same reason: its
-	// server-state paths are all inside that same volume.
 	if !onKubernetes() {
 		go startServiceReconciler()
 	}

@@ -8,14 +8,8 @@ import (
 	"testing"
 )
 
-// readsEnv finds every BITSWAN_ setting a package reads at runtime.
 var readsEnv = regexp.MustCompile(`(?:os\.Getenv|envOr|envOrDefault|imageOr|storageSizeOr)\(\s*"(BITSWAN_[A-Z0-9_]+)"`)
 
-// TestHookInheritsEverythingTheCompilersRead guards the failure mode that has
-// now happened twice: a compiler reads a setting from the environment, the
-// serve process has it, and the post-receive hook — a CGI grandchild with a
-// scrubbed environment — does not. Everything works until a push, and then the
-// apply refuses over configuration that is in fact correct.
 func TestHookInheritsEverythingTheCompilersRead(t *testing.T) {
 	inherited := map[string]bool{}
 	for _, name := range hookInheritedEnv() {
