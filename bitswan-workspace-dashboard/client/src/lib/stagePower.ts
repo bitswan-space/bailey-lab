@@ -9,10 +9,14 @@
 
 /** One member, reduced to what the power row cares about. */
 export interface PowerMember {
+  /** Is it ASLEEP — the reading, not "nothing is up"? See below. */
+  asleep: boolean;
   /** Is a container up for it right now (running / restarting / building)? */
   up: boolean;
   /** Does it have a deployment record at all? A never-deployed member is not asleep. */
   present: boolean;
+  /** Is it reachable through the ingress? Only an exposed host can wake on access. */
+  expose: boolean;
 }
 
 export interface StagePower {
@@ -34,7 +38,19 @@ const services = (n: number) => `${n} service${n === 1 ? '' : 's'}`;
  */
 export function stagePower(members: PowerMember[], asleepReason?: string): StagePower {
   const running = members.filter((m) => m.up).length;
-  const sleeping = members.filter((m) => !m.up && m.present).length;
+  // Sleeping is the READING, not "not up". "Not up" also covers a container
+  // that exited, failed, or could not be read at all, and offering to wake
+  // those — under a sentence promising they wake on access — is the same false
+  // comfort this branch removes elsewhere (see lib/stageHealth.ts).
+  const sleeping = members.filter((m) => m.asleep && m.present).length;
+  // Denominator: what could be asleep. A member with no deploy record is not
+  // part of that count, or the row says "1 of 3" about two deployments.
+  const deployed = members.filter((m) => m.present).length;
+  // Wake-on-access needs a request to arrive at a dehydrated INGRESS host. A
+  // sleeping worker behind a frontend that is still serving has nothing
+  // routing to it — nobody will ever knock — so it is only true to mention
+  // when an exposed member is among the sleepers.
+  const wakesOnAccess = members.some((m) => m.asleep && m.expose);
   const canWake = sleeping > 0;
   const canSleep = running > 0;
   let label: string;
@@ -50,13 +66,13 @@ export function stagePower(members: PowerMember[], asleepReason?: string): Stage
   } else {
     // The case that had no way out: part of the stage is asleep and part of it
     // is serving, so the stage as a whole is neither.
-    label = `${services(sleeping)} of ${members.length} asleep${
+    label = `${services(sleeping)} of ${deployed} asleep${
       asleepReason === 'manual'
         ? ' — put to sleep manually'
         : asleepReason === 'memory-pressure'
           ? ' — evicted under memory pressure'
           : ''
-    }. Wake now, or leave them to wake on access.`;
+    }. ${wakesOnAccess ? 'Wake now, or leave them to wake on access.' : 'Wake now.'}`;
   }
   return { running, sleeping, canWake, canSleep, label };
 }

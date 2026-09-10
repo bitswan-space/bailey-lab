@@ -5837,8 +5837,19 @@ class AutomationService:
     async def start_automation(self, deployment_id: str):
         """Start all containers for a deployment using async Docker client.
 
-        If no container exists for the deployment, re-runs the full deploy
-        flow (regenerate compose, docker compose up) to create it fresh.
+        With no container, what "start" means depends on WHY there is none:
+
+          * asleep (`active: false` — the memory sweep or an operator's Sleep):
+            re-activate it and apply the compose for THIS deployment, the same
+            path the stage-level Wake takes. Not the whole-workspace deploy:
+            an unrelated broken business process must not be able to fail the
+            attempt to bring back one sleeping container.
+          * otherwise: the full deploy flow, as before.
+
+        Either way it then checks that a container really came up, and raises
+        500 when none did — callers (the dashboard's Start button, the CLI)
+        must not be told "created and started" about a deploy that produced
+        nothing.
         """
         containers = await self.get_container(deployment_id)
 
@@ -5868,7 +5879,21 @@ class AutomationService:
                 # business process, while the scoped Wake succeeded).
                 logger.info("%s is asleep, waking it", deployment_id)
                 await self.mark_as_active(deployment_id)
-                await self.apply_compose_for_deployments([deployment_id], report=None)
+                try:
+                    await self.apply_compose_for_deployments(
+                        [deployment_id], report=None
+                    )
+                except Exception as e:  # noqa: BLE001
+                    # It is still asleep. Leaving it flagged active would be a
+                    # lie in the file everything else reads — and would send the
+                    # NEXT Start down the whole-workspace branch this one exists
+                    # to avoid, where the same unrelated failure awaits it.
+                    logger.warning("wake of %s failed to redeploy: %s", deployment_id, e)
+                    await self.mark_as_inactive(deployment_id)
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Waking {deployment_id} failed to redeploy: {e}",
+                    ) from e
             else:
                 logger.info(
                     "No container for %s, running deploy to create it", deployment_id
@@ -6809,30 +6834,17 @@ class AutomationService:
     async def restart_automation(self, deployment_id: str):
         """Restart all containers for a deployment using async Docker client.
 
-        If no container exists for the deployment, re-runs the full deploy
-        flow (regenerate compose, docker compose up) to create it fresh.
+        With no container there is nothing to restart, and "bring it back" is
+        exactly what start_automation means — including waking a slept
+        deployment. Restart is offered on every member the dashboard shows,
+        asleep ones included, so it carried the same bug Start had: a
+        whole-workspace deploy that skipped the sleeping entry and then
+        reported it "created and started".
         """
         containers = await self.get_container(deployment_id)
 
         if not containers:
-            # No container found — check if the deployment exists in bitswan.yaml
-            bs_yaml = read_bitswan_yaml(self.gitops_dir)
-            deployments = bs_yaml.get("deployments", {}) if bs_yaml else {}
-            if deployment_id not in deployments:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Deployment '{deployment_id}' not found in bitswan.yaml",
-                )
-
-            # Deployment exists but container is missing — start it fresh
-            logger.info(
-                "No container for %s, running deploy to create it", deployment_id
-            )
-            await self.deploy_automations()
-            return {
-                "status": "success",
-                "message": f"Container for deployment {deployment_id} created and started",
-            }
+            return await self.start_automation(deployment_id)
 
         ctx = self._workspace_ctx()
         for container in containers:
