@@ -166,7 +166,13 @@ echo "=== [5b/5] every pod is Ready ==="
 # the thing they exercise never appearing, so the suite went green with the infra
 # driver dead on "unknown flag". This is the cheap assertion that would have
 # caught it, and it belongs in the bring-up rather than in a chapter.
-notready="$($KUBECTL -n "$NAMESPACE" get pods --no-headers 2>/dev/null \
+# Pods that have finished are not pods that failed. A Job's pod sits at 0/1
+# Completed for as long as it is kept, so counting it here turned the
+# vulnerability-database refresh — best-effort by contract, and asynchronous —
+# into a fatal bring-up error, and would have done so on every run even when it
+# worked. Terminal phases are excluded; anything still trying is not.
+notready="$($KUBECTL -n "$NAMESPACE" get pods --no-headers \
+  --field-selector=status.phase!=Succeeded 2>/dev/null \
   | awk '$2 != "1/1" && $2 != "4/4" && $2 != "2/2" && $2 != "3/3" { print }')"
 if [ -n "$notready" ]; then
   echo "ERROR: not every pod is Ready after bring-up:" >&2
