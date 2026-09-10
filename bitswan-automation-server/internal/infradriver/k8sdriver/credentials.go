@@ -151,10 +151,10 @@ func mergeEnvFile(dst map[string]string, path string) {
 
 // credentialSecret renders the merged content as a Secret named for the
 // workload, or nothing when there is nothing to deliver.
-func credentialSecret(workload string, content map[string]string) (string, k8srender.ObjectSet) {
+func credentialSecret(workload string, content map[string]string, labels map[string]interface{}) (string, k8srender.ObjectSet) {
 	if len(content) == 0 {
 		return "", nil
 	}
 	name := k8srender.Name(workload+"-env", k8srender.ServiceNameMax)
-	return name, k8srender.ObjectSet{k8srender.Secret(name, content)}
+	return name, k8srender.ObjectSet{k8srender.Secret(name, content, labels)}
 }

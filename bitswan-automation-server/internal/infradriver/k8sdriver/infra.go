@@ -58,7 +58,7 @@ func (c *compileState) postgres(container, realm string) (k8srender.ObjectSet, e
 				"and inventing one here would be a password nobody chose", container)
 	}
 	secretName := objName + "-superuser"
-	objs := k8srender.ObjectSet{k8srender.Secret(secretName, creds)}
+	objs := k8srender.ObjectSet{k8srender.Secret(secretName, creds, c.infraSecretLabels(realm))}
 	objs = append(objs, statefulSet(statefulSetSpec{
 		Name:      objName,
 		Service:   svcName,
@@ -155,7 +155,7 @@ func garageServiceSecret(c *compileState, realm, objName string) k8srender.Objec
 	if len(values) == 0 {
 		return nil
 	}
-	return k8srender.ObjectSet{k8srender.Secret(objName+"-service", values)}
+	return k8srender.ObjectSet{k8srender.Secret(objName+"-service", values, c.infraSecretLabels(realm))}
 }
 
 func garageServiceEnv(c *compileState, realm, objName string) []string {
@@ -163,6 +163,16 @@ func garageServiceEnv(c *compileState, realm, objName string) []string {
 		return nil
 	}
 	return []string{objName + "-service"}
+}
+
+// infraSecretLabels deliberately omits gitops.bp: a stage's Postgres and object
+// store are shared by every business process on that stage, so a per-process
+// sweep must never be able to select their credentials.
+func (c *compileState) infraSecretLabels(realm string) map[string]interface{} {
+	return map[string]interface{}{
+		k8srender.WorkspaceLabel: k8srender.LabelValue(c.workspace),
+		"gitops.realm":           realm,
+	}
 }
 
 func (c *compileState) infraLabels(svcName, container, realm string) map[string]interface{} {

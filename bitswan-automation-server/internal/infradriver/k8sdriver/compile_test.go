@@ -416,6 +416,115 @@ func TestEveryEnvFromExists(t *testing.T) {
 	}
 }
 
+// TestThePruneScopeMatchesTheLabelsItSweeps is the property a retirement
+// depends on: the sweep is a label selector, so anything it is meant to be able
+// to delete has to be selectable by it. If a scope and a workload's labels
+// disagree the selector matches nothing, the apply reports success, and the
+// retired slot goes on serving beside its replacement.
+func TestThePruneScopeMatchesTheLabelsItSweeps(t *testing.T) {
+	for _, name := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			objs, _, _ := compileScenario(t, name)
+			scopes := map[pruneScope]bool{}
+			for _, s := range prunableScopes(objs) {
+				scopes[s] = true
+			}
+			for _, o := range objs {
+				if k := kindOf(o); k != "Deployment" && k != "Secret" {
+					continue
+				}
+				labels := labelsOf(o)
+				bp, _ := labels["gitops.bp"].(string)
+				stage, _ := labels["gitops.stage"].(string)
+				if bp == "" || stage == "" {
+					continue
+				}
+				if !scopes[pruneScope{bp: bp, stage: stage}] {
+					t.Errorf("%s %q is labelled bp=%q stage=%q, which no prune scope selects",
+						kindOf(o), nameOf(o), bp, stage)
+				}
+			}
+		})
+	}
+}
+
+// TestACopyIsSweptByItsBusinessProcessNotItsContext pins the case the two
+// spellings actually diverge in. A live-dev copy declares context
+// "copy-<user>-<bp>" while its workloads are labelled with the business process
+// the copy is of, so a sweep keyed on the context selects nothing at all.
+func TestACopyIsSweptByItsBusinessProcessNotItsContext(t *testing.T) {
+	objs, _, _ := compileScenario(t, "livedev")
+	scopes := prunableScopes(objs)
+	if len(scopes) == 0 {
+		t.Fatal("a live-dev compile produced no prune scope at all")
+	}
+	byBP := false
+	for _, s := range scopes {
+		if strings.HasPrefix(s.bp, "copy-") {
+			t.Errorf("prune scope %q is the declaration's context, not its business process", s.bp)
+		}
+		if s.bp == "acme" {
+			byBP = true
+		}
+	}
+	if !byBP {
+		t.Errorf("no prune scope for business process \"acme\"; got %v", scopes)
+	}
+}
+
+// TestCredentialSecretsAreSweptWithTheirWorkload closes the leak the sweep
+// otherwise has: a retired slot's Secret outlives the workload that mounted it,
+// so a namespace accumulates the credentials of every process ever deployed
+// into it. The Secret has to be selectable by the same scope as its reader.
+func TestCredentialSecretsAreSweptWithTheirWorkload(t *testing.T) {
+	for _, name := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			objs, _, _ := compileScenario(t, name)
+			byName := map[string]k8srender.Object{}
+			for _, o := range objs {
+				if kindOf(o) == "Secret" {
+					byName[nameOf(o)] = o
+				}
+			}
+			checked := 0
+			for _, o := range objs {
+				if kindOf(o) != "Deployment" {
+					continue
+				}
+				owner := labelsOf(o)
+				bp, _ := owner["gitops.bp"].(string)
+				if bp == "" {
+					continue
+				}
+				spec := podSpecOf(o)
+				for _, c := range asSlice(spec["containers"]) {
+					cm, _ := c.(map[string]interface{})
+					for _, ef := range asSlice(cm["envFrom"]) {
+						efm, _ := ef.(map[string]interface{})
+						ref, _ := efm["secretRef"].(map[string]interface{})
+						n, _ := ref["name"].(string)
+						sec, ok := byName[n]
+						if !ok {
+							continue
+						}
+						checked++
+						got := labelsOf(sec)
+						for _, key := range []string{"gitops.bp", "gitops.stage", k8srender.WorkspaceLabel} {
+							if got[key] != owner[key] {
+								t.Errorf("Secret %q has %s=%v but its reader %q has %v; the sweep cannot see it",
+									n, key, got[key], nameOf(o), owner[key])
+							}
+						}
+					}
+				}
+			}
+			if checked == 0 {
+				t.Skip("no credential Secret in this scenario")
+			}
+		})
+	}
+}
+
 // TestAScopedBackendGetsItsCredentials states the point of the whole
 // credentials pass: a process with a database of its own must actually be told
 // how to reach it.

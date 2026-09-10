@@ -143,7 +143,7 @@ func PruneRetired(ctx context.Context, selector string, keep map[string]bool) er
 	if err != nil {
 		return err
 	}
-	for _, kind := range []string{"deployment", "service"} {
+	for _, kind := range []string{"deployment", "service", "secret"} {
 		out, err := exec.CommandContext(ctx, "kubectl", "-n", ns, "get", kind,
 			"-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}").Output()
 		if err != nil {

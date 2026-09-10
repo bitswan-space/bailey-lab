@@ -177,6 +177,32 @@ else
   fail "no Postgres statefulset — the business process has no database"
 fi
 
+echo "=== a retired business process leaves no credentials behind ==="
+orphans=$($KUBECTL -n "$NS" get secret,deploy -o json |
+  python3 -c '
+import json,sys
+items=json.load(sys.stdin)["items"]
+mounted=set()
+for o in items:
+    if o["kind"] != "Deployment":
+        continue
+    spec=o["spec"]["template"]["spec"]
+    for c in (spec.get("containers") or []) + (spec.get("initContainers") or []):
+        for ef in c.get("envFrom") or []:
+            n=(ef.get("secretRef") or {}).get("name")
+            if n:
+                mounted.add(n)
+orphans=[o["metadata"]["name"] for o in items
+         if o["kind"] == "Secret"
+         and (o["metadata"].get("labels") or {}).get("gitops.bp")
+         and o["metadata"]["name"] not in mounted]
+print("\n".join(sorted(orphans)))')
+if [ -n "$orphans" ]; then
+  fail "credential secrets outliving the workload that read them:"$'\n'"$orphans"
+else
+  pass "no credential secret outlives its workload"
+fi
+
 echo "=== the egress firewall actually intercepts ==="
 # Behaviour, not object existence. In monitor mode the proxy records what was
 # reached for, so a request from inside a firewalled pod has to show up in its

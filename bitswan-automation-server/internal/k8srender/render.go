@@ -432,20 +432,24 @@ func PVC(name, size, storageClass string) Object {
 // workload cannot be handed an environment after it starts, so anything derived
 // at runtime becomes a Secret the workload envFroms, and changing it rolls the
 // workload rather than leaving it on a stale value.
-func Secret(name string, values map[string]string) Object {
+func Secret(name string, values map[string]string, labels map[string]interface{}) Object {
 	data := map[string]interface{}{}
 	for _, k := range sortedKeys(values) {
 		data[k] = values[k]
+	}
+	meta := map[string]interface{}{
+		NameLabel:      name,
+		ManagedByLabel: ManagedBy,
+	}
+	for k, v := range labels {
+		meta[k] = v
 	}
 	return Object{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata": map[string]interface{}{
-			"name": name,
-			"labels": map[string]interface{}{
-				NameLabel:      name,
-				ManagedByLabel: ManagedBy,
-			},
+			"name":   name,
+			"labels": meta,
 		},
 		"type":       "Opaque",
 		"stringData": data,

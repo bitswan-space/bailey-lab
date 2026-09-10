@@ -108,11 +108,10 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 	// "retired" are different things, and only the second is a reason to
 	// delete something.
 	if req.Ctx.BP != "" {
-		base := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
-			",gitops.bp=" + k8srender.LabelValue(req.Ctx.BP)
 		keep := appliedNames(applied)
-		for _, stage := range stagesIn(applied) {
-			selector := base + ",gitops.stage=" + k8srender.LabelValue(stage)
+		for _, scope := range prunableScopes(applied) {
+			selector := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
+				",gitops.bp=" + scope.bp + ",gitops.stage=" + scope.stage
 			if err := k8sctl.PruneRetired(ctx, selector, keep); err != nil {
 				return nil, fmt.Errorf("prune retired workloads: %w", err)
 			}
@@ -406,7 +405,11 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	for k, v := range inline {
 		env[k] = v
 	}
-	secretName, extra := credentialSecret(svcName, secretContent)
+	secretName, extra := credentialSecret(svcName, secretContent, map[string]interface{}{
+		k8srender.WorkspaceLabel: k8srender.LabelValue(c.workspace),
+		"gitops.bp":              k8srender.LabelValue(bpSlug),
+		"gitops.stage":           k8srender.LabelValue(stage),
+	})
 	var envFrom []string
 	if secretName != "" {
 		envFrom = append(envFrom, secretName)
@@ -668,18 +671,37 @@ func runningInfos(ctx context.Context, d *K8sDriver) []core.ContainerInfo {
 	return out
 }
 
-// stagesIn is the stages this compile describes, which bounds what a prune may
-// consider retired.
-func stagesIn(objs k8srender.ObjectSet) []string {
-	seen := map[string]bool{}
+type pruneScope struct{ bp, stage string }
+
+// prunableScopes reads the sweep's scope off the objects just applied rather
+// than off the request. The two disagree: a request names the business process
+// the way the caller spells it, while a workload is labelled with the slug
+// derived from its path, and where those differ a selector built from the
+// request matches nothing and every retired workload survives. Reading the
+// labels back is also the only way the selector cannot drift from them.
+func prunableScopes(objs k8srender.ObjectSet) []pruneScope {
+	seen := map[pruneScope]bool{}
 	for _, obj := range objs {
 		meta, _ := obj["metadata"].(map[string]interface{})
 		labels, _ := meta["labels"].(map[string]interface{})
-		if stage, _ := labels["gitops.stage"].(string); stage != "" {
-			seen[stage] = true
+		bp, _ := labels["gitops.bp"].(string)
+		stage, _ := labels["gitops.stage"].(string)
+		if bp == "" || stage == "" {
+			continue
 		}
+		seen[pruneScope{bp: bp, stage: stage}] = true
 	}
-	return sortedBoolKeys(seen)
+	out := make([]pruneScope, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].bp != out[j].bp {
+			return out[i].bp < out[j].bp
+		}
+		return out[i].stage < out[j].stage
+	})
+	return out
 }
 
 // waitForRouted blocks until each routed workload has a ready replica.
