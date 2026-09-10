@@ -70,7 +70,7 @@ import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import type { ServiceType, StagingGate, StagingLogEntry, StagingSignoff } from '@/lib/api';
 import { promoteBpWithToast, watchDeployTask } from '@/lib/deployBp';
 import { useLastDeploy } from '@/hooks/useLastDeploy';
-import { isUpStatus, STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
+import { displayFor, isUpStatus, STATUS_META, type DisplayStatus } from '@/lib/status';
 import { stageHealth, type StageHealthKind } from '@/lib/stageHealth';
 import {
   api,
@@ -299,6 +299,7 @@ const STAGE_BADGE: Record<StageHealthKind, { dot: string; title: string }> = {
   restarting: { dot: 'bg-violet-500', title: 'Deployed — a container keeps restarting' },
   failing: { dot: 'bg-red-500', title: 'Deployed — a container is not running' },
   asleep: { dot: 'bg-sky-500', title: 'Deployed, asleep — it wakes on access' },
+  'partly-asleep': { dot: 'bg-sky-500', title: 'Deployed — some of its services are asleep' },
   unknown: { dot: 'bg-zinc-300', title: 'Deployed — open the stage to see its containers' },
   'not-deployed': { dot: 'bg-zinc-300', title: 'Nothing deployed here yet' },
 };
@@ -2558,7 +2559,11 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         id: lookupId,
         name: a?.automation_name ?? id,
         present: !!a?.deployment_id,
-        display: a?.deployment_id ? stateToDisplay(a.state) : 'not-deployed',
+        // gitops marks a slept deployment `active: false` and sends no container
+        // state for it. Reading only the state made it 'unknown' — a shrug —
+        // which the stage summary then counted as nothing at all and called the
+        // stage Healthy (bailey-lab #463).
+        display: displayFor(a),
         replicas: a?.replicas ?? 0,
         url: a?.automation_url ?? null,
         publicUrl: publicUrlFor(a?.automation_url ?? null),
@@ -2728,8 +2733,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
       if (!cur) return undefined;
       return Object.keys(cur.members ?? {}).map((mid) => {
         const lookupId = id === 'dr' && drSlot ? `${mid}@${drSlot}` : mid;
-        const a = automations.find((x) => x.deployment_id === lookupId);
-        return a?.deployment_id ? stateToDisplay(a.state) : 'not-deployed';
+        return displayFor(automations.find((x) => x.deployment_id === lookupId));
       });
     },
     [byStage, automations, drSlot],

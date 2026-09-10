@@ -3,7 +3,7 @@
 // standalone-label text color. Previously these were duplicated across three
 // records in different components.
 
-import type { AutomationState } from '@/types';
+import type { AutomationState, DeployedAutomation } from '@/types';
 
 export type DisplayStatus =
   | 'running'
@@ -11,6 +11,7 @@ export type DisplayStatus =
   | 'stopped'
   | 'failed'
   | 'not-deployed'
+  | 'asleep'
   | 'building'
   | 'deployed'
   | 'unknown';
@@ -62,6 +63,16 @@ export const STATUS_META: Record<DisplayStatus, StatusMeta> = {
     dot: 'bg-red-500',
     badge: 'border-transparent bg-red-100 text-red-700',
     labelColor: 'text-red-600',
+  },
+  // Deliberately not running: the on-demand memory sweep evicted it, or an
+  // operator put it to sleep. It has a deployment record and no container, and
+  // gitops marks it `active: false` — so it is neither a failure nor an absence
+  // of information, and must not be shown as either.
+  asleep: {
+    label: 'Asleep',
+    dot: 'bg-sky-500',
+    badge: 'border-transparent bg-sky-100 text-sky-700',
+    labelColor: 'text-sky-600',
   },
   'not-deployed': {
     label: 'Not deployed',
@@ -122,9 +133,12 @@ export function isUpStatus(status: DisplayStatus): boolean {
  * of an observation: they must never outrank something actually seen.
  */
 const STATUS_SEVERITY: Record<DisplayStatus, number> = {
-  failed: 6,
-  stopped: 5,
-  restarting: 4,
+  failed: 7,
+  stopped: 6,
+  restarting: 5,
+  // Asleep outranks a healthy reading — a row that merges a sleeping container
+  // with a running one is not simply "running" — but never outranks a fault.
+  asleep: 4,
   building: 3,
   running: 2,
   deployed: 2,
@@ -138,4 +152,21 @@ export function worstStatus(...statuses: DisplayStatus[]): DisplayStatus {
     (worst, s) => (STATUS_SEVERITY[s] > STATUS_SEVERITY[worst] ? s : worst),
     'not-deployed',
   );
+}
+
+/**
+ * What one automation record says its container is doing — the single reading
+ * every view should use, because there are three different "not running"s and
+ * they are not interchangeable:
+ *
+ *   - no deployment at all            → 'not-deployed'
+ *   - deployed but SLEPT              → 'asleep'   (gitops sets active: false
+ *     and sends no container state; reading only the state made this 'unknown',
+ *     i.e. no observation, which summaries then counted as fine)
+ *   - deployed and running/failed/…   → whatever Docker says
+ */
+export function displayFor(a?: DeployedAutomation): DisplayStatus {
+  if (!a?.deployment_id) return 'not-deployed';
+  if (a.active === false) return 'asleep';
+  return stateToDisplay(a.state);
 }
