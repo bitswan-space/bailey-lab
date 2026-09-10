@@ -998,8 +998,13 @@ class AutomationService:
             if not a.deployment_id:
                 continue
             conf = live_deployments.get(a.deployment_id)
-            if conf is not None:
-                a.active = bool(conf.get("active", False))
+            if conf is not None and "active" in conf:
+                # Only when the yaml SAYS something. An entry that predates
+                # normalization carries no `active` key, and the rest of the
+                # codebase reads that absence as active (`… is not False`) —
+                # inventing a default here would stamp a running deployment
+                # asleep. Refreshing a value that exists is the whole point.
+                a.active = bool(conf["active"])
             if a.container_id:
                 self._clear_sleep_reason(a.deployment_id)
             else:

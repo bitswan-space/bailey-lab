@@ -14,7 +14,7 @@
 // BADGE means observed health, and a ✓ appears only when the containers were
 // seen and every one of them is fine.
 
-import { isUpStatus, type DisplayStatus } from '@/lib/status';
+import type { DisplayStatus } from '@/lib/status';
 
 export type StageHealthKind =
   | 'not-deployed'
@@ -113,20 +113,24 @@ export function stageHealth({
 }): StageHealth {
   if (!deployed) return HEALTH['not-deployed'];
   if (!statuses) return HEALTH.unknown;
-  // Nothing up at all = intentionally asleep (an operator's Sleep, or the
-  // on-demand memory sweep evicting it). Distinct from a failure; it wakes on
-  // access. Checked first, because every member reads 'stopped' then.
-  if (statuses.length > 0 && !statuses.some(isUpStatus)) return HEALTH.asleep;
+  // Intentionally asleep — an operator's Sleep, or the on-demand sweep — and
+  // ONLY that. This used to be "nothing is up", which was right back when a
+  // slept member read as 'stopped' like any other stopped container; now that
+  // sleeping has its own reading, "nothing is up" also covers a stage whose
+  // containers all DIED, and calling that "Asleep — it wakes on access" is a
+  // promise nothing will keep. It has to be the members actually reading
+  // asleep.
+  const asleep = statuses.filter((s) => s === 'asleep').length;
+  if (statuses.length > 0 && asleep === statuses.length) return HEALTH.asleep;
   const failing = statuses.filter((s) => s === 'failed' || s === 'stopped').length;
   if (failing > 0) return { ...HEALTH.failing, label: `${services(failing)} not running` };
   // Up, but not healthy: a container in a restart loop keeps being started, so
   // it passes every "is it up?" test and used to be counted as healthy.
   const restarting = statuses.filter((s) => s === 'restarting').length;
   if (restarting > 0) return { ...HEALTH.restarting, label: `${services(restarting)} restarting` };
-  // Something is up, so the stage is not asleep — but a member that IS asleep
-  // still has to be named, or the stage reads "Healthy" while one of its
-  // services is not running at all.
-  const asleep = statuses.filter((s) => s === 'asleep').length;
+  // Not all asleep, and nothing failing — but a member that IS asleep still
+  // has to be named, or the stage reads "Healthy" while one of its services is
+  // not running at all.
   if (asleep > 0)
     return {
       ...HEALTH['partly-asleep'],

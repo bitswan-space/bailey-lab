@@ -142,7 +142,9 @@ test('a slept automation reads as asleep, not as an unknown state', () => {
   // The live-dev cap evicts previews the same way the memory sweep evicts a
   // stage's members: the record stays, `active` goes false and no container
   // state comes with it.
-  const c = only(bpContainers([rec({ active: false, state: null })], COPY, BP));
+  const c = only(
+    bpContainers([rec({ active: false, state: null, container_id: null })], COPY, BP),
+  );
   assert.equal(c.status, 'asleep');
 });
 
@@ -151,7 +153,12 @@ test('asleep outranks running when a name collapses several records', () => {
     bpContainers(
       [
         rec({ deployment_id: 'backend-7622-production', state: 'running' }),
-        rec({ deployment_id: 'backend-7622-production@green', active: false, state: null }),
+        rec({
+          deployment_id: 'backend-7622-production@green',
+          active: false,
+          state: null,
+          container_id: null,
+        }),
       ],
       COPY,
       BP,
@@ -166,7 +173,27 @@ test('a sleep gitops attributed is asleep even if `active` still says true', () 
   // Reading only `active` would have shown it as "unknown" — and the stage it
   // belongs to as Healthy.
   const c = only(
-    bpContainers([rec({ active: true, state: null, asleep_reason: 'manual' })], COPY, BP),
+    bpContainers(
+      [rec({ active: true, state: null, container_id: null, asleep_reason: 'manual' })],
+      COPY,
+      BP,
+    ),
   );
   assert.equal(c.status, 'asleep');
+});
+
+test('a RUNNING container never reads as asleep, whatever the flags say', () => {
+  // Both signs of sleep can be stale: a yaml entry that predates
+  // normalization carries no `active` key (and one reader defaulted that to
+  // false), and a sleep marker can outlive the sleep it described. A live
+  // container state overrules them — nothing that is running may be shown as
+  // asleep, which is the same wrong claim as the reverse.
+  assert.equal(
+    only(bpContainers([rec({ active: false, state: 'running' })], COPY, BP)).status,
+    'running',
+  );
+  assert.equal(
+    only(bpContainers([rec({ asleep_reason: 'manual', state: 'running' })], COPY, BP)).status,
+    'running',
+  );
 });

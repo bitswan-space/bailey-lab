@@ -175,6 +175,11 @@ export function displayFor(a?: DeployedAutomation): DisplayStatus {
   // only rewrites bitswan.yaml. The reason was the only thing that gave it
   // away. (That staleness is fixed in gitops too — this reads both so a
   // dashboard in front of an older gitops still tells the truth.)
-  if (a.active === false || a.asleep_reason) return 'asleep';
+  // Asleep means the container is GONE. Both signs of sleep can be stale — a
+  // yaml entry that predates normalization carries no `active` key, a sleep
+  // marker outlives the sleep it described — so a live container state
+  // overrules them. Nothing that is running may read as asleep.
+  const gone = !a.container_id && !a.state;
+  if (gone && (a.active === false || a.asleep_reason)) return 'asleep';
   return stateToDisplay(a.state);
 }

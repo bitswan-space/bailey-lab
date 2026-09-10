@@ -36,13 +36,21 @@ test('nothing deployed reads as nothing deployed, whatever the containers say', 
   assert.equal(stageHealth({ deployed: false }).label, 'Not deployed yet');
 });
 
-test('a stage with nothing up is asleep, not failing', () => {
-  // Every member reads `stopped` when a stage is asleep (an operator's Sleep,
-  // or the on-demand memory sweep), so this has to be decided before the
-  // failing count — it wakes on access and is not a fault.
+test('a stage whose containers all DIED is not asleep', () => {
+  // "Asleep — it wakes on access" is a promise. A stage that is down because
+  // every container stopped or failed will not wake on access, and saying so
+  // is the same false comfort this module exists to remove. (This test
+  // replaces one that asserted the opposite: back when a slept member read as
+  // 'stopped', "nothing is up" was a fair proxy for asleep. It no longer is.)
   const h = stageHealth({ deployed: true, statuses: ['stopped', 'stopped'] });
-  assert.equal(h.kind, 'asleep');
-  assert.equal(h.label, 'Asleep');
+  assert.equal(h.kind, 'failing');
+  assert.equal(h.label, '2 services not running');
+});
+
+test('a stage that is part asleep and part dead reports the death', () => {
+  const h = stageHealth({ deployed: true, statuses: ['asleep', 'failed'] });
+  assert.equal(h.kind, 'failing');
+  assert.equal(h.label, '1 service not running');
 });
 
 test('a real failure outranks a restart loop, and both are counted', () => {
