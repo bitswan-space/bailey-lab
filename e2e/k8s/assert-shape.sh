@@ -309,6 +309,31 @@ else
   pass "the memory governor is taking inventories"
 fi
 
+proxies_missing=""
+for proxy in bitswan-goproxy bitswan-npmproxy; do
+  ready=$($KUBECTL -n "$NS" get deploy "$proxy" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+  [ -n "$ready" ] && [ "$ready" != "0" ] || proxies_missing="$proxies_missing $proxy"
+done
+if [ -n "$proxies_missing" ]; then
+  fail "build proxies not serving:$proxies_missing — every image build fetches packages from the internet"
+else
+  pass "the shared read-through package proxies are serving"
+fi
+driver_env=$($KUBECTL -n "$NS" get deploy -l app.kubernetes.io/managed-by=bitswan -o json |
+  python3 -c '
+import json,sys
+for d in json.load(sys.stdin)["items"]:
+    if not d["metadata"]["name"].endswith("-infra-driver"):
+        continue
+    for c in d["spec"]["template"]["spec"]["containers"]:
+        env={e["name"]: e.get("value","") for e in c.get("env") or []}
+        print(env.get("BITSWAN_NPM_REGISTRY",""))')
+if echo "$driver_env" | grep -q 'bitswan-npmproxy'; then
+  pass "the driver builds through the npm proxy"
+else
+  fail "the driver has no npm registry pinned; builds bypass the cache"
+fi
+
 echo "=== nothing crash-looped ==="
 restarts=$($KUBECTL -n "$NS" get pods \
   -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.containerStatuses[*]}{.restartCount}{" "}{end}{"\n"}{end}' |

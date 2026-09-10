@@ -630,7 +630,9 @@ func (s *Server) Run() error {
 	// Own the shared read-through build proxies (Go module + npm) so per-BP image
 	// builds pull common packages from a warm, persistent, cross-workspace cache
 	// instead of the internet (see build_proxy.go). No-op if externally managed.
-	if !onKubernetes() {
+	if onKubernetes() {
+		startBuildProxiesK8s()
+	} else {
 		startBuildProxies()
 	}
 

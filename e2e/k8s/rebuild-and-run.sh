@@ -70,6 +70,8 @@ BASE_IMAGES=(
   docker.io/rclone/rclone:1.68
   docker.io/library/registry:2
   docker.io/moby/buildkit:v0.19.0-rootless
+  docker.io/gomods/athens:latest
+  docker.io/verdaccio/verdaccio:6
 )
 for image in "${BASE_IMAGES[@]}"; do
   sudo k3s ctr images pull --platform linux/amd64 "$image" >/dev/null 2>&1 \

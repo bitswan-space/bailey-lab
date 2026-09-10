@@ -27,6 +27,7 @@ import (
 // topology a Docker host has, and a cluster that wants them spread needs a
 // volume class that allows it.
 func bringUpWorkspaceK8s(ctx context.Context, cfg workspaceK8sConfig) error {
+	adoptBuildProxyEnvK8s(ctx)
 	objs := workspaceObjects(cfg)
 	if err := k8sctl.Apply(ctx, objs); err != nil {
 		return fmt.Errorf("apply workspace objects: %w", err)
@@ -207,6 +208,8 @@ func workspaceObjects(cfg workspaceK8sConfig) k8srender.ObjectSet {
 			// credentials baked into some of them, in the clear.
 			"BITSWAN_K8S_REGISTRY_INSECURE": os.Getenv("BITSWAN_K8S_REGISTRY_INSECURE"),
 			"BITSWAN_BUILDKIT_ADDR":         envOrDefault("BITSWAN_BUILDKIT_ADDR", "tcp://bitswan-buildkit:1234"),
+			"BITSWAN_GOPROXY":               os.Getenv("BITSWAN_GOPROXY"),
+			"BITSWAN_NPM_REGISTRY":          os.Getenv("BITSWAN_NPM_REGISTRY"),
 		},
 		Mounts: []k8srender.Mount{
 			{Path: "/git/deploy-repos", SubPath: sub("deploy-repos")},
