@@ -136,11 +136,16 @@ async def test_automations_list_reports_a_slept_deployment_as_inactive(
     async def _no_containers():
         return []
 
-    async def _no_mem():
-        return {}
+    class _FakeDriver:
+        async def container_stats(self, ctx, **kwargs):
+            return []
 
+    # Patch the DRIVER, not a method that does not exist: the previous version
+    # patched `_container_mem_usage` with raising=False, which silently added an
+    # attribute nothing calls and left the test making a real HTTP request to
+    # the infra-driver on every run.
     monkeypatch.setattr(svc, "get_containers", _no_containers)
-    monkeypatch.setattr(svc, "_container_mem_usage", _no_mem, raising=False)
+    svc._infra_driver = _FakeDriver()  # the backing field the property reads
 
     result = await svc.get_automations()
     entry = next(a for a in result if a.deployment_id == "frontend-bp-staging")

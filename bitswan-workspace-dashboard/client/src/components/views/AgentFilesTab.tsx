@@ -213,7 +213,14 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
           setLaunchState('refused');
           return;
         }
-        if (Date.now() - s.startedAt >= HEALTHY_SESSION_MS) {
+        // A session that RAN for a while and then ended is a normal end: start
+        // the next one with a clean budget. Age alone is not enough to say it
+        // ran — a handshake that hangs and is dropped by the proxy after 20s+
+        // is old and never connected, and treating that as healthy resets the
+        // budget every time, so the backoff never engages and the user never
+        // reaches the error with its Retry. Now that the session records
+        // whether its socket ever opened, ask that.
+        if (s.connected && Date.now() - s.startedAt >= HEALTHY_SESSION_MS) {
           failedAttempts.current = 0;
           setLaunchGen((g) => g + 1);
           return;
