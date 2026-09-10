@@ -29,7 +29,85 @@ func newBaileyCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newDevicesCmd())
 	cmd.AddCommand(newAccessCmd())
+	cmd.AddCommand(newSSOCmd())
 	return cmd
+}
+
+func newSSOCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "sso",
+		Short: "Inspect or switch off external single sign-on (operator-only)",
+		Long: "Report or undo the login topology from the host shell.\n\n" +
+			"'sso only' mode removes the Bitswan-account button entirely, so if the\n" +
+			"customer's provider stops answering there is no way to sign in to the admin\n" +
+			"UI and undo it from a browser. 'bitswan bailey sso disable' is that way back:\n" +
+			"it points sign-in at the AOC again and rebuilds the proxy.",
+	}
+	cmd.AddCommand(newSSOStatusCmd())
+	cmd.AddCommand(newSSODisableCmd())
+	return cmd
+}
+
+func newSSOStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "status",
+		Aliases: []string{"show"},
+		Short:   "Show which provider currently fronts sign-in",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := mustDaemonClient()
+
+			st, err := client.SSOStatus()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if !st.Enabled {
+				fmt.Println("External single sign-on is off. People sign in with their Bitswan account.")
+				return nil
+			}
+			fmt.Printf("External single sign-on is ON: %s (%s)\n", st.DisplayName, st.IssuerURL)
+			if st.SSOOnly {
+				fmt.Println("Bitswan-account sign-in is DISABLED — this provider is the only way in.")
+			} else {
+				fmt.Println("Bitswan-account sign-in is still offered alongside it.")
+			}
+			if st.UpdatedAt != "" {
+				fmt.Printf("Last changed by %s on %s\n", st.UpdatedBy, st.UpdatedAt)
+			}
+			return nil
+		},
+	}
+}
+
+func newSSODisableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "disable",
+		Aliases: []string{"off"},
+		Short:   "Turn external single sign-on off and restore Bitswan-account sign-in",
+		Long: "Point sign-in back at the AOC and rebuild the protected proxy. Use this when\n" +
+			"the customer's provider is down or misconfigured and nobody can get in.\n" +
+			"Everyone signed in through the broker has to sign in again.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := mustDaemonClient()
+
+			changed, err := client.DisableSSO()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if !changed {
+				fmt.Println("External single sign-on was already off. Nothing to do.")
+				return nil
+			}
+			fmt.Println("External single sign-on is off. Sign-in is back on Bitswan accounts;")
+			fmt.Println("everyone signed in through the provider has to sign in again.")
+			return nil
+		},
+	}
 }
 
 // newAccessCmd groups endpoint access-grant operations. This is an

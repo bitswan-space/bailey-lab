@@ -342,6 +342,9 @@ export const Api = {
   // link would make a mailbox enough to earn device trust (#369).
   invite: (email, role) => postJSON('/bailey/api/people/invite', { email, role }),
   orgInvite: (email, role) => postJSON('/bailey/api/people/org-invite', { email, role }),
+  ssoGet: () => getJSON('/bailey/api/admin/sso'),
+  ssoSet: (cfg) => postJSON('/bailey/api/admin/sso', cfg),
+  ssoTest: (issuerUrl) => postJSON('/bailey/api/admin/sso/test', { issuer_url: issuerUrl }),
   // Outstanding (unconsumed) invites, expired ones included (flagged).
   invites: () => getJSON('/bailey/api/people/invites'),
   revokeInvite: (email) => postJSON('/bailey/api/people/invites/revoke', { email }),

@@ -14,7 +14,7 @@ func TestCreateProtectedProxyDockerComposeFile(t *testing.T) {
 		"OAUTH2_PROXY_HTTP_ADDRESS": "0.0.0.0:80",
 	}
 
-	out, err := CreateProtectedProxyDockerComposeFile(env)
+	out, err := CreateProtectedProxyDockerComposeFile(env, nil)
 	if err != nil {
 		t.Fatalf("CreateProtectedProxyDockerComposeFile: %v", err)
 	}
@@ -130,5 +130,37 @@ func TestCreateProtectedProxyDockerComposeFile(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("environment missing %q; got:\n%s", want, joined)
 		}
+	}
+}
+
+func TestCreateProtectedProxyDockerComposeFile_CarriesExplicitHostMappings(t *testing.T) {
+	env := map[string]string{"OAUTH2_PROXY_PROVIDER": "oidc"}
+
+	out, err := CreateProtectedProxyDockerComposeFile(env, []string{"auth.bs-e2e.localhost:host-gateway"})
+	if err != nil {
+		t.Fatalf("CreateProtectedProxyDockerComposeFile: %v", err)
+	}
+
+	var parsed struct {
+		Services struct {
+			Proxy struct {
+				ExtraHosts []string `yaml:"extra_hosts"`
+			} `yaml:"bitswan-protected-proxy"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("rendered compose is not valid YAML: %v", err)
+	}
+	got := parsed.Services.Proxy.ExtraHosts
+	if len(got) != 1 || got[0] != "auth.bs-e2e.localhost:host-gateway" {
+		t.Errorf("extra_hosts = %v — a proxy that cannot resolve the broker never finishes discovery", got)
+	}
+
+	bare, err := CreateProtectedProxyDockerComposeFile(env, nil)
+	if err != nil {
+		t.Fatalf("CreateProtectedProxyDockerComposeFile: %v", err)
+	}
+	if strings.Contains(bare, "extra_hosts") {
+		t.Error("no mappings configured must render no extra_hosts at all")
 	}
 }

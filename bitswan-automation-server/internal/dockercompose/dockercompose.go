@@ -550,7 +550,50 @@ const protectedProxyTemplatesSubpath = "protected-proxy/templates"
 //
 // env is the full OAUTH2_PROXY_* map; it's rendered sorted for deterministic
 // output so the daemon can compare against the on-disk file to detect drift.
-func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error) {
+func CreateDexDockerComposeFile(port, configHash string, extraHosts []string) (string, error) {
+	service := map[string]interface{}{
+		"image":          "ghcr.io/dexidp/dex:v2.41.1",
+		"restart":        "always",
+		"container_name": "bitswan-dex",
+		"networks":       []string{"bitswan_network"},
+		"entrypoint":     []string{"/usr/local/bin/dex"},
+		"command":        []string{"serve", "/etc/dex/config.yaml"},
+		"volumes": []interface{}{
+			map[string]interface{}{
+				"type":      "volume",
+				"source":    "bitswan",
+				"target":    "/etc/dex",
+				"read_only": true,
+				"volume":    map[string]interface{}{"subpath": "dex"},
+			},
+			"bitswan-dex-data:/var/dex",
+		},
+		"expose":      []string{port},
+		"environment": []string{"BITSWAN_DEX_CONFIG_HASH=" + configHash},
+	}
+	if len(extraHosts) > 0 {
+		service["extra_hosts"] = extraHosts
+	}
+
+	compose := map[string]interface{}{
+		"services": map[string]interface{}{"bitswan-dex": service},
+		"networks": map[string]interface{}{
+			"bitswan_network": map[string]interface{}{"external": true},
+		},
+		"volumes": map[string]interface{}{
+			"bitswan-dex-data": map[string]interface{}{},
+			"bitswan":          map[string]interface{}{"external": true},
+		},
+	}
+
+	out, err := yaml.Marshal(compose)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func CreateProtectedProxyDockerComposeFile(env map[string]string, extraHosts []string) (string, error) {
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -592,6 +635,10 @@ func CreateProtectedProxyDockerComposeFile(env map[string]string) (string, error
 				},
 			},
 		},
+	}
+
+	if len(extraHosts) > 0 {
+		proxyService["extra_hosts"] = extraHosts
 	}
 
 	// Redis session store. oauth2-proxy holds a per-session refresh LOCK in

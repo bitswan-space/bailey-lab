@@ -333,6 +333,8 @@ func TestSocketPrivilegedRoutes(t *testing.T) {
 			body: map[string]string{"host": "h.example.com", "principal": "x@example.com"}},
 		"/bailey/access/list": {method: http.MethodGet, handler: s.handleAccessList,
 			query: "?host=h.example.com"},
+		"/bailey/sso/status":  {method: http.MethodGet, handler: s.handleSSOStatus},
+		"/bailey/sso/disable": {method: http.MethodPost, handler: s.handleSSODisable},
 	}
 
 	// The table and the declared list must not drift: a route added to

@@ -30,6 +30,13 @@ func reconcileProtectedProxyConfig() {
 	if err != nil {
 		return // not running / not found → nothing to reconcile here
 	}
+	if ssoActive() || loginTopologyDrifted(env) {
+		fmt.Println("protected-proxy: reconciling the login topology against the configured providers")
+		if err := reconcileLoginTopology(); err != nil {
+			fmt.Printf("protected-proxy: login topology reconcile failed: %v\n", err)
+		}
+		return
+	}
 	if !proxyConfigNeedsUpdate(env) {
 		return // already current
 	}
@@ -37,6 +44,18 @@ func reconcileProtectedProxyConfig() {
 	if err := provisionProtectedProxy(); err != nil {
 		fmt.Printf("protected-proxy: reconcile re-provision failed: %v\n", err)
 	}
+}
+
+func loginTopologyDrifted(env string) bool {
+	domain := protectedHostnameDomain()
+	if domain == "" {
+		return false
+	}
+	onBroker := strings.Contains(env, "OAUTH2_PROXY_OIDC_ISSUER_URL="+dexIssuerURL(domain))
+	if ssoActive() != onBroker {
+		return true
+	}
+	return onBroker && !containerRunning(dexContainerName)
 }
 
 // runningProxyEnv returns the environment of the running bitswan-protected-proxy

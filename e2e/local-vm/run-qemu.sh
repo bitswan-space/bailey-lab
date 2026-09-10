@@ -293,6 +293,8 @@ SEED_IMAGES=(
   golang:1.25-alpine
   # SIEM target — registry-only, historically the 429 canary (see bringup.sh)
   otel/opentelemetry-collector:0.115.1
+  # the AOC stub's runtime (see e2e/aoc-stub/README.md)
+  python:3.12-alpine
 )
 if [ ! -f "$WORK/base-images.tar" ] || [ "${BITSWAN_E2E_RESEED:-}" = "1" ]; then
   echo "--- building base-image seed tarball (${#SEED_IMAGES[@]} images) ---"

@@ -292,6 +292,23 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleSetRegion(w, r, email)
 			return
 		}
+	case "/bailey/api/admin/sso":
+		switch r.Method {
+		case http.MethodGet:
+			handleSSOGet(w, r)
+			return
+		case http.MethodPost:
+			handleSSOSet(w, r, email)
+			return
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	case "/bailey/api/admin/sso/test":
+		if r.Method == http.MethodPost {
+			handleSSOTest(w, r)
+			return
+		}
 	case "/bailey/api/admin/siem":
 		switch r.Method {
 		case http.MethodGet:
