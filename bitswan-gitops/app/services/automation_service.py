@@ -5852,10 +5852,41 @@ class AutomationService:
                     detail=f"Deployment '{deployment_id}' not found in bitswan.yaml",
                 )
 
-            logger.info(
-                "No container for %s, running deploy to create it", deployment_id
-            )
-            await self.deploy_automations()
+            # A SLEPT deployment (evicted by the memory sweep or an operator's
+            # Sleep) is inactive, and both the deploy and the compiler skip
+            # inactive entries by design — so starting one without re-activating
+            # it first deployed nothing at all and still reported success. Wake
+            # it: that is what the caller asked for by pressing Start on a
+            # container that isn't there.
+            if (deployments.get(deployment_id) or {}).get("active") is False:
+                # Wake it the way the stage-level Wake does: re-activate, then
+                # apply the compose for THIS deployment only. Not
+                # deploy_automations() — that redeploys the whole workspace, so
+                # any unrelated broken service in it fails the attempt to bring
+                # back one sleeping container (measured: Start died on
+                # "docker compose up failed: exit status 1" from a different
+                # business process, while the scoped Wake succeeded).
+                logger.info("%s is asleep, waking it", deployment_id)
+                await self.mark_as_active(deployment_id)
+                await self.apply_compose_for_deployments([deployment_id], report=None)
+            else:
+                logger.info(
+                    "No container for %s, running deploy to create it", deployment_id
+                )
+                await self.deploy_automations()
+
+            # Say what actually happened. The deploy can legitimately produce no
+            # container (a member the compiler still skips, a build that failed),
+            # and reporting "created and started" for that left the operator
+            # pressing a button that never did anything.
+            if not await self.get_container(deployment_id):
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Deploy ran for '{deployment_id}' but no container came up. "
+                        "Check the deploy log for this business process."
+                    ),
+                )
             return {
                 "status": "success",
                 "message": f"Container for deployment {deployment_id} created and started",
