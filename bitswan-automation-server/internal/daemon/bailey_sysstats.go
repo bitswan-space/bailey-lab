@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -21,6 +22,7 @@ type systemStats struct {
 	MemUsedBytes  uint64  `json:"mem_used_bytes"`
 	MemFreeBytes  uint64  `json:"mem_free_bytes"`
 	MemUsedPct    float64 `json:"mem_used_pct"`
+	MemNote       string  `json:"mem_note,omitempty"`
 
 	DiskTotalBytes uint64  `json:"disk_total_bytes"`
 	DiskUsedBytes  uint64  `json:"disk_used_bytes"`
@@ -40,6 +42,14 @@ func sysStatsDiskPath() string {
 	if _, err := os.Stat("/host"); err == nil {
 		return "/host"
 	}
+	if onKubernetes() {
+		if home := os.Getenv("HOME"); home != "" {
+			cfg := home + "/.config/bitswan"
+			if _, err := os.Stat(cfg); err == nil {
+				return cfg
+			}
+		}
+	}
 	return "/"
 }
 
@@ -49,10 +59,11 @@ func sysStatsDiskPath() string {
 func gatherSystemStats() (*systemStats, error) {
 	s := &systemStats{CPUCount: runtime.NumCPU()}
 
-	memTotal, memAvail, err := readMemInfo()
+	memTotal, memAvail, memNote, err := serverMemory()
 	if err != nil {
 		return nil, err
 	}
+	s.MemNote = memNote
 	s.MemTotalBytes = memTotal
 	s.MemFreeBytes = memAvail
 	if memTotal >= memAvail {
@@ -200,4 +211,13 @@ func readCPUSample() (idle, total uint64, err error) {
 		return 0, 0, err
 	}
 	return 0, 0, fmt.Errorf("no aggregate cpu line in /proc/stat")
+}
+
+func serverMemory() (total, avail uint64, note string, err error) {
+	if !onKubernetes() {
+		total, avail, err = readMemInfo()
+		return total, avail, "", err
+	}
+	total, avail, warning := namespaceMemoryBudget(context.Background(), nil)
+	return total, avail, warning, nil
 }

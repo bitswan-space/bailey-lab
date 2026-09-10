@@ -1,6 +1,7 @@
 package dockerdriver
 
 import (
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,12 +19,7 @@ import (
 // A service is emitted only when is_enabled() — its secrets file exists on the
 // secrets volume.
 
-func serviceSuffix(stage string) string {
-	if stage == "production" || stage == "" {
-		return ""
-	}
-	return "-" + stage
-}
+var serviceSuffix = core.ServiceSuffix
 
 type infraNames struct {
 	suffix        string
@@ -61,21 +57,9 @@ func infraEnabled(secretsDir, svcType, stage string) bool {
 	return err == nil
 }
 
-// infraServiceSecretsName is the secrets file name a service dependency injects
-// (InfraService.secrets_file_name) — used by _resolve_service_secrets.
-func infraServiceSecretsName(svcType, stage string) string {
-	return svcType + serviceSuffix(stage)
-}
+var infraServiceSecretsName = core.InfraServiceSecretsName
 
-// isKnownInfraType reports whether svcType is a service the driver can
-// generate compose for (the set generateInfraCompose dispatches on).
-func isKnownInfraType(svcType string) bool {
-	switch svcType {
-	case "couchdb", "garage", "postgres", "kafka":
-		return true
-	}
-	return false
-}
+var isKnownInfraType = core.IsKnownInfraType
 
 // generateInfraCompose returns the {services, volumes, networks} compose dict
 // for one (svc_type, stage) infra service. networks are left as the template's

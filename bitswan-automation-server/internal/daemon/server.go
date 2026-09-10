@@ -438,6 +438,12 @@ func (s *Server) Run() error {
 	}
 	s.docsListener = docsListener
 
+	if onKubernetes() {
+		if err := s.startWorkspaceAPI(); err != nil {
+			return fmt.Errorf("the workspace API cannot serve: %w", err)
+		}
+	}
+
 	// Loopback-only listener for the identity-trusting Bailey management + gate
 	// handlers (issue #183 / BSY-05): reachable solely by the in-process gate,
 	// never by another container on the shared bitswan_network.
@@ -514,7 +520,9 @@ func (s *Server) Run() error {
 		if err := startProtectedGate(); err != nil {
 			fmt.Printf("Warning: protected gate failed to start: %v\n", err)
 		}
-		setupBaileyRoutes()
+		if !registerBaileyRoutesWhenProxyUp(2*time.Minute, 3*time.Second) {
+			fmt.Println("Warning: Bailey routes not registered — the auth proxy never came up.")
+		}
 		// Bailey's own hostnames are registered above; every other
 		// protected host this server ever created is reconciled here,
 		// so a Keycloak allowlist that drifted (a callback without its
@@ -580,11 +588,9 @@ func (s *Server) Run() error {
 	// once now, then resync periodically. Backgrounded so startup never blocks
 	// on Docker; idempotent for anything already running (see
 	// service_reconcile.go).
-	go startServiceReconciler()
-
-	// Own the shared grype vulnerability DB: create its volume now, download it
-	// in the background, and refresh daily. Keeps the ~40s DB download off every
-	// workspace's first interactive CVE scan (see grype_db.go).
+	if !onKubernetes() {
+		go startServiceReconciler()
+	}
 	startGrypeDBRefresher()
 
 	// Nightly server-level backups (whole workspace trees incl. secrets +
@@ -596,7 +602,11 @@ func (s *Server) Run() error {
 	// Own the shared read-through build proxies (Go module + npm) so per-BP image
 	// builds pull common packages from a warm, persistent, cross-workspace cache
 	// instead of the internet (see build_proxy.go). No-op if externally managed.
-	startBuildProxies()
+	if onKubernetes() {
+		startBuildProxiesK8s()
+	} else {
+		startBuildProxies()
+	}
 
 	// Re-assert published public endpoints (issue #220): warm the gate's
 	// public-host cache and re-register each public host's traefik route so a

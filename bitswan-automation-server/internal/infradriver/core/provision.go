@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"bufio"
@@ -34,10 +34,10 @@ const bpPostgresROConnLimit = 3
 // the driver, via `docker exec` into the running service containers.
 //
 // Two layers, matching the Python:
-//   - ensureLivePostgresDBs: FAIL-FAST guard for the live Postgres DB each
+//   - EnsureLivePostgresDBs: FAIL-FAST guard for the live Postgres DB each
 //     backend connects to (per-copy clone / per-BP / blue-green). Raises so a
 //     deploy reports a clear error instead of crash-looping on a missing DB.
-//   - provisionForDeployments: best-effort namespaces (Garage bucket + the
+//   - ProvisionForDeployments: best-effort namespaces (Garage bucket + the
 //     standby blue-green DB); never fails a deploy.
 //
 // _post_deploy_infra_services is intentionally NOT ported: no concrete infra
@@ -73,9 +73,9 @@ var containerRunning = func(ctx context.Context, name string) bool {
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
-// serviceContainerName mirrors bp_databases._container_name /
+// ServiceContainerName mirrors bp_databases._container_name /
 // infra.containerName: <workspace>__<service>[-<realm>] (production has no suffix).
-func serviceContainerName(workspace, serviceType, realm string) string {
+func ServiceContainerName(workspace, serviceType, realm string) string {
 	suffix := ""
 	if realm != "production" {
 		suffix = "-" + realm
@@ -83,10 +83,10 @@ func serviceContainerName(workspace, serviceType, realm string) string {
 	return workspace + "__" + serviceType + suffix
 }
 
-// serviceSecrets reads a service's KEY=VALUE env file from the secrets dir, or
+// ServiceSecrets reads a service's KEY=VALUE env file from the secrets dir, or
 // nil when the file is absent (service not enabled at that realm). Port of
 // bp_databases.get_service_secrets.
-func serviceSecrets(secretsDir, serviceType, realm string) map[string]string {
+func ServiceSecrets(secretsDir, serviceType, realm string) map[string]string {
 	suffix := ""
 	if realm != "production" {
 		suffix = "-" + realm
@@ -113,130 +113,33 @@ func serviceSecrets(secretsDir, serviceType, realm string) map[string]string {
 	return info
 }
 
-// waitForHealthy blocks until the container reports a healthy healthcheck,
-// consuming Docker's health-status EVENT stream — never a poll loop or a sleep.
-// It subscribes to `docker events` first, then does ONE inspect to catch a
-// container that was already healthy (the event can fire before we subscribe);
-// thereafter it blocks on the stream. Fails loudly on timeout, and on a
-// container that declares no healthcheck (a misconfig we must not silently wait
-// out — the infra services now all declare one, see infra.go).
-func waitForHealthy(ctx context.Context, container string, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// Fast path: already healthy (the common warm-service case) → skip the
-	// `docker events` subscription entirely. Forking + connecting a `docker
-	// events` stream is real overhead on a busy daemon, and provisioning waits
-	// on already-running Postgres/Garage several times per deploy. If NOT yet
-	// healthy we fall through to the race-safe subscribe-first-then-inspect path
-	// below (an event could fire between this check and the subscription).
-	if containerHealth(ctx, container) == "healthy" {
-		return nil
-	}
-
-	ev := exec.CommandContext(ctx, "docker", "events",
-		"--filter", "type=container",
-		"--filter", "container="+container,
-		"--filter", "event=health_status",
-		"--format", "{{.Status}}")
-	stdout, err := ev.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("docker events pipe for %s: %w", container, err)
-	}
-	if err := ev.Start(); err != nil {
-		return fmt.Errorf("docker events for %s: %w", container, err)
-	}
-	defer func() { _ = ev.Process.Kill(); _ = ev.Wait() }()
-
-	switch containerHealth(ctx, container) {
-	case "healthy":
-		return nil
-	case "none":
-		return fmt.Errorf("container %s declares no healthcheck — cannot wait on a readiness event", container)
-	}
-
-	lines := make(chan string, 1)
-	go func() {
-		sc := bufio.NewScanner(stdout)
-		for sc.Scan() {
-			lines <- strings.TrimSpace(sc.Text())
-		}
-		close(lines)
-	}()
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("container %s not healthy within %s: %w", container, timeout, ctx.Err())
-		case line, ok := <-lines:
-			if !ok {
-				// `docker events` exited before we saw a healthy event (a daemon
-				// hiccup, or the container being recreated mid-wait closes the
-				// stream bound to the old instance). Don't fail on a single
-				// re-check — fall back to polling the container's health until the
-				// same deadline, so a container that becomes healthy moments later
-				// still passes.
-				tick := time.NewTicker(500 * time.Millisecond)
-				defer tick.Stop()
-				for {
-					switch containerHealth(context.Background(), container) {
-					case "healthy":
-						return nil
-					case "none":
-						return fmt.Errorf("container %s declares no healthcheck — cannot wait on a readiness event", container)
-					}
-					select {
-					case <-ctx.Done():
-						return fmt.Errorf("container %s not healthy within %s: %w", container, timeout, ctx.Err())
-					case <-tick.C:
-					}
-				}
-			}
-			// Status is "health_status: healthy" | "health_status: unhealthy".
-			if strings.Contains(line, "healthy") && !strings.Contains(line, "unhealthy") {
-				return nil
-			}
-		}
-	}
-}
-
-// containerHealth returns "healthy" | "starting" | "unhealthy" | "none" (no
-// healthcheck declared) | "unknown" (inspect failed).
-func containerHealth(ctx context.Context, container string) string {
-	out, err := exec.CommandContext(ctx, "docker", "inspect", "-f",
-		"{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", container).Output()
-	if err != nil {
-		return "unknown"
-	}
-	return strings.TrimSpace(string(out))
-}
-
 // waitForPostgres blocks until a freshly-started Postgres is healthy (its
 // pg_isready healthcheck passes) so a cold-start deploy's first CREATE DATABASE
-// doesn't race initdb. Event-driven via waitForHealthy — no poll. The user arg
+// doesn't race initdb. Readiness is the backend's own — no poll. The user arg
 // is retained for call-site compatibility; readiness is now the container's own
 // healthcheck.
-func waitForPostgres(ctx context.Context, container, _ string) error {
-	return waitForHealthy(ctx, container, 60*time.Second)
+func waitForPostgres(x Execer, ctx context.Context, container, _ string) error {
+	return x.WaitReady(ctx, container, 60*time.Second)
 }
 
-func postgresDBExists(ctx context.Context, container, user, dbName string) (bool, error) {
+func postgresDBExists(x Execer, ctx context.Context, container, user, dbName string) (bool, error) {
 	sql := fmt.Sprintf("SELECT 1 FROM pg_database WHERE datname = '%s';", dbName)
-	stdout, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-t", "-A", "-c", sql)
+	stdout, stderr, rc := x.Exec(ctx, container, "psql", "-U", user, "-d", "postgres", "-t", "-A", "-c", sql)
 	if rc != 0 {
 		return false, fmt.Errorf("psql existence check failed: %s", strings.TrimSpace(stderr))
 	}
 	return strings.TrimSpace(stdout) == "1", nil
 }
 
-func createPostgresDB(ctx context.Context, container, user, dbName string) error {
-	exists, err := postgresDBExists(ctx, container, user, dbName)
+func createPostgresDB(x Execer, ctx context.Context, container, user, dbName string) error {
+	exists, err := postgresDBExists(x, ctx, container, user, dbName)
 	if err != nil {
 		return err
 	}
 	if exists {
 		return nil
 	}
-	_, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
+	_, stderr, rc := x.Exec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
 		fmt.Sprintf("CREATE DATABASE %q;", dbName))
 	if rc != 0 && !strings.Contains(stderr, "already exists") {
 		return fmt.Errorf("CREATE DATABASE %s failed: %s", dbName, strings.TrimSpace(stderr))
@@ -249,8 +152,8 @@ func createPostgresDB(ctx context.Context, container, user, dbName string) error
 // caller must ensure Postgres is ready and sourceDB exists. Used to give a
 // non-main copy's live-dev a per-(copy, BP) database seeded from the BP's dev
 // data. Port of bp_databases.clone_postgres_db_as.
-func clonePostgresDBAs(ctx context.Context, container, user, targetDB, sourceDB string) error {
-	exists, err := postgresDBExists(ctx, container, user, targetDB)
+func clonePostgresDBAs(x Execer, ctx context.Context, container, user, targetDB, sourceDB string) error {
+	exists, err := postgresDBExists(x, ctx, container, user, targetDB)
 	if err != nil {
 		return err
 	}
@@ -262,8 +165,8 @@ func clonePostgresDBAs(ctx context.Context, container, user, targetDB, sourceDB 
 	terminate := fmt.Sprintf(
 		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid();",
 		sourceDB)
-	_, _, _ = dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c", terminate)
-	_, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
+	_, _, _ = x.Exec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c", terminate)
+	_, stderr, rc := x.Exec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
 		fmt.Sprintf("CREATE DATABASE %q WITH TEMPLATE %q;", targetDB, sourceDB))
 	if rc != 0 && !strings.Contains(stderr, "already exists") {
 		return fmt.Errorf("clone CREATE DATABASE %s (template %s) failed: %s", targetDB, sourceDB, strings.TrimSpace(stderr))
@@ -271,15 +174,15 @@ func clonePostgresDBAs(ctx context.Context, container, user, targetDB, sourceDB 
 	return nil
 }
 
-// ensureBPRole creates (or password-syncs) the scoped Postgres LOGIN role a BP
+// EnsureBPRole creates (or password-syncs) the scoped Postgres LOGIN role a BP
 // backend authenticates as, and scopes it to exactly its own database: it gets
 // full use of the public schema and its objects but NOT ownership (so it can't
 // drop the database/schema), and CONNECT is locked to it (the superuser bypasses
 // CONNECT, so admin/provisioning still works). Idempotent. adminUser is the
 // shared superuser the driver connects as; the scoped password comes from the
 // per-resource cred store (the same value the compiler injected into the env).
-func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, dbName string) error {
-	role, pass, err := getOrCreateDBCreds(secretsDir, realm, dbName)
+func EnsureBPRole(x Execer, ctx context.Context, container, adminUser, secretsDir, realm, dbName string) error {
+	role, pass, err := GetOrCreateDBCreds(secretsDir, realm, dbName)
 	if err != nil {
 		return err
 	}
@@ -293,7 +196,7 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 	createOrAlter := fmt.Sprintf(
 		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %q LOGIN CONNECTION LIMIT %d PASSWORD '%s'; ELSE ALTER ROLE %q WITH LOGIN CONNECTION LIMIT %d PASSWORD '%s'; END IF; END $$;",
 		role, role, bpPostgresConnLimit, pass, role, bpPostgresConnLimit, pass)
-	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", createOrAlter); rc != 0 {
+	if _, stderr, rc := x.Exec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", createOrAlter); rc != 0 {
 		return fmt.Errorf("ensure role %s: %s", role, strings.TrimSpace(stderr))
 	}
 	// Full use of the public schema + its existing objects, and default privileges
@@ -305,7 +208,7 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 		fmt.Sprintf("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %q;", role),
 		fmt.Sprintf("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %q;", role),
 	}, " ")
-	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", grants); rc != 0 {
+	if _, stderr, rc := x.Exec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", grants); rc != 0 {
 		return fmt.Errorf("grant on %s to %s: %s", dbName, role, strings.TrimSpace(stderr))
 	}
 	// Make the role OWN its tables/sequences/views. Backends run arbitrary
@@ -328,12 +231,12 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 			"EXECUTE format('ALTER VIEW public.%%I OWNER TO %q', r.table_name); END LOOP; "+
 			"END $$;",
 		role, role, role)
-	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", reassign); rc != 0 {
+	if _, stderr, rc := x.Exec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", reassign); rc != 0 {
 		return fmt.Errorf("reassign ownership in %s to %s: %s", dbName, role, strings.TrimSpace(stderr))
 	}
 	// Lock CONNECT to this role so no other BP role can reach this database.
 	lock := fmt.Sprintf("REVOKE CONNECT ON DATABASE %q FROM PUBLIC; GRANT CONNECT ON DATABASE %q TO %q;", dbName, dbName, role)
-	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", lock); rc != 0 {
+	if _, stderr, rc := x.Exec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", lock); rc != 0 {
 		return fmt.Errorf("lock connect on %s: %s", dbName, strings.TrimSpace(stderr))
 	}
 	// Read-only explorer role: SELECT-only twin of the backend role, used by the
@@ -341,11 +244,11 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 	// purpose (local-socket trust auth only; PASSWORD NULL also strips anything a
 	// previous version may have set), so it cannot be used over TCP at all.
 	// gitops mirrors this name derivation in app/services/data_explorer.py.
-	ro := scopedROPGRole(dbName)
+	ro := ScopedROPGRole(dbName)
 	ensureRO := fmt.Sprintf(
 		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '%s') THEN CREATE ROLE %q LOGIN CONNECTION LIMIT %d; ELSE ALTER ROLE %q WITH LOGIN CONNECTION LIMIT %d PASSWORD NULL; END IF; END $$; GRANT CONNECT ON DATABASE %q TO %q;",
 		ro, ro, bpPostgresROConnLimit, ro, bpPostgresROConnLimit, dbName, ro)
-	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", ensureRO); rc != 0 {
+	if _, stderr, rc := x.Exec(ctx, container, "psql", "-U", adminUser, "-d", "postgres", "-c", ensureRO); rc != 0 {
 		return fmt.Errorf("ensure ro role %s: %s", ro, strings.TrimSpace(stderr))
 	}
 	// SELECT on everything in public, now and in the future. Future objects are
@@ -356,15 +259,15 @@ func ensureBPRole(ctx context.Context, container, adminUser, secretsDir, realm, 
 		fmt.Sprintf("GRANT SELECT ON ALL TABLES IN SCHEMA public TO %q;", ro),
 		fmt.Sprintf("ALTER DEFAULT PRIVILEGES FOR ROLE %q IN SCHEMA public GRANT SELECT ON TABLES TO %q;", role, ro),
 	}, " ")
-	if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", roGrants); rc != 0 {
+	if _, stderr, rc := x.Exec(ctx, container, "psql", "-U", adminUser, "-d", dbName, "-c", roGrants); rc != 0 {
 		return fmt.Errorf("grant read-only on %s to %s: %s", dbName, ro, strings.TrimSpace(stderr))
 	}
 	return nil
 }
 
-// productionDBNumbers is the blue-green db numbers a production BP's slots use
+// ProductionDBNumbers is the blue-green db numbers a production BP's slots use
 // (default [1,2]). Port of bp_databases._production_db_numbers.
-func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
+func ProductionDBNumbers(bs *Bitswan, bpSlug string) []int {
 	var slots map[string]*SlotRec
 	if bs.Backups != nil {
 		if rec := bs.Backups[bpSlug]; rec != nil && len(rec.Slots) > 0 {
@@ -392,7 +295,7 @@ func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
 	return nums
 }
 
-// ensureLivePostgresDBs is the FAIL-FAST guard: it creates the live Postgres DB
+// EnsureLivePostgresDBs is the FAIL-FAST guard: it creates the live Postgres DB
 // each deploying backend connects to before the backend's connect-retry, and
 // raises when Postgres is enabled but the DB can't be created. Port of
 // bp_databases.ensure_live_postgres_dbs.
@@ -400,23 +303,23 @@ func productionDBNumbers(bs *Bitswan, bpSlug string) []int {
 // (re)created in this apply (its id wasn't in preExistingIDs), keyed by the
 // gitops.deployment_id label. Returns nil — meaning "couldn't scope, treat all
 // as fresh" — when there's no pre-snapshot or the container list can't be read.
-func freshDeploymentIDs(preExistingIDs map[string]bool, infos []containerInfo) map[string]bool {
+func freshDeploymentIDs(preExistingIDs map[string]bool, infos []ContainerInfo) map[string]bool {
 	if len(preExistingIDs) == 0 {
 		return nil
 	}
 	fresh := map[string]bool{}
 	for _, c := range infos {
-		if preExistingIDs[c.id] {
+		if preExistingIDs[c.ID] {
 			continue
 		}
-		if dep := c.labels["gitops.deployment_id"]; dep != "" {
+		if dep := c.Labels["gitops.deployment_id"]; dep != "" {
 			fresh[dep] = true
 		}
 	}
 	return fresh
 }
 
-func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, preExistingIDs map[string]bool, infos []containerInfo, report func(step, msg string)) error {
+func EnsureLivePostgresDBs(x Execer, ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, preExistingIDs map[string]bool, infos []ContainerInfo, report func(step, msg string)) error {
 	// Match a deployment to its container by the gitops.deployment_id label; a
 	// container whose id wasn't present before this apply is fresh. fresh==nil
 	// means we couldn't scope (no pre-snapshot, or the container list failed) →
@@ -426,23 +329,23 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 	databaseAlreadyExists := func(realm, container, user, dbName string) bool {
 		set, listed := dbsByRealm[realm]
 		if !listed {
-			set, _ = listPostgresDBs(ctx, container, user)
+			set, _ = listPostgresDBs(x, ctx, container, user)
 			dbsByRealm[realm] = set
 		}
 		return set[dbName]
 	}
 
-	reg := loadRegistry(wctx.SecretsDir)
+	reg := LoadRegistry(wctx.SecretsDir)
 	seen := map[string]bool{}
-	for _, depID := range sortedDepIDs(bs.Deployments) {
+	for _, depID := range SortedDepIDs(bs.Deployments) {
 		conf := bs.Deployments[depID]
 		if conf == nil {
 			continue
 		}
 		unchangedSinceLastApply := fresh != nil && !fresh[depID]
-		bpSlug, copyName := deriveBPAndCopy(conf.RelativePath)
+		bpSlug, copyName := DeriveBPAndCopy(conf.RelativePath)
 		stage := conf.StageOrProduction()
-		realm := realmForStage(stage)
+		realm := RealmForStage(stage)
 		if realm != "dev" && realm != "staging" && realm != "production" {
 			continue
 		}
@@ -452,21 +355,21 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 		//    the shared dev default. Per (copy, BP) — isolated from other BPs in
 		//    the copy and from other copies.
 		if stage == "live-dev" && copyName != "" && bpSlug != "" {
-			target := copyBPResourceNames(copyName, bpSlug)["postgres_db"]
+			target := CopyBPResourceNames(copyName, bpSlug)["postgres_db"]
 			if seen["copybp:"+target] {
 				continue
 			}
 			seen["copybp:"+target] = true
-			secrets := serviceSecrets(wctx.SecretsDir, "postgres", realm)
+			secrets := ServiceSecrets(wctx.SecretsDir, "postgres", realm)
 			if secrets == nil || secrets["POSTGRES_USER"] == "" {
 				continue // Postgres not enabled — can't create a server
 			}
 			user := secrets["POSTGRES_USER"]
-			container := serviceContainerName(wctx.WorkspaceName, "postgres", realm)
+			container := ServiceContainerName(wctx.WorkspaceName, "postgres", realm)
 			if unchangedSinceLastApply && databaseAlreadyExists(realm, container, user, target) {
 				continue
 			}
-			if err := waitForPostgres(ctx, container, user); err != nil {
+			if err := waitForPostgres(x, ctx, container, user); err != nil {
 				return err
 			}
 			// Seed from the BP's dev DB if it exists, else the shared dev default.
@@ -474,17 +377,17 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 			if source == "" {
 				source = "postgres"
 			}
-			devBPDB := bpResourceNames(bpSlug, 0)["postgres_db"]
-			if ex, err := postgresDBExists(ctx, container, user, devBPDB); err == nil && ex {
+			devBPDB := BPResourceNames(bpSlug, 0)["postgres_db"]
+			if ex, err := postgresDBExists(x, ctx, container, user, devBPDB); err == nil && ex {
 				source = devBPDB
 			}
 			report("provision", "Cloning live-dev database "+target+" from "+source)
-			if err := clonePostgresDBAs(ctx, container, user, target, source); err != nil {
+			if err := clonePostgresDBAs(x, ctx, container, user, target, source); err != nil {
 				return err
 			}
 			// Scope a per-DB login role NOW (fail-fast): the backend was injected
 			// scoped creds and can't fall back to the superuser.
-			if err := ensureBPRole(ctx, container, user, wctx.SecretsDir, realm, target); err != nil {
+			if err := EnsureBPRole(x, ctx, container, user, wctx.SecretsDir, realm, target); err != nil {
 				return err
 			}
 			continue
@@ -492,21 +395,21 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 
 		// 2) A registered BP's per-stage database(s). Unregistered BPs use the
 		//    shared default DB — nothing to create.
-		if bpSlug == "" || !reg.isRegistered(bpSlug, realm) {
+		if bpSlug == "" || !reg.IsRegistered(bpSlug, realm) {
 			continue
 		}
-		secrets := serviceSecrets(wctx.SecretsDir, "postgres", realm)
+		secrets := ServiceSecrets(wctx.SecretsDir, "postgres", realm)
 		if secrets == nil || secrets["POSTGRES_USER"] == "" {
 			continue
 		}
 		user := secrets["POSTGRES_USER"]
-		container := serviceContainerName(wctx.WorkspaceName, "postgres", realm)
+		container := ServiceContainerName(wctx.WorkspaceName, "postgres", realm)
 		dbs := []int{0} // single-backend (Python None)
 		if realm == "production" {
-			dbs = productionDBNumbers(bs, bpSlug)
+			dbs = ProductionDBNumbers(bs, bpSlug)
 		}
 		for _, db := range dbs {
-			dbName := bpResourceNames(bpSlug, db)["postgres_db"]
+			dbName := BPResourceNames(bpSlug, db)["postgres_db"]
 			if seen["bp:"+dbName] {
 				continue
 			}
@@ -515,15 +418,15 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 				continue
 			}
 			report("provision", "Ensuring Postgres database "+dbName)
-			if err := waitForPostgres(ctx, container, user); err != nil {
+			if err := waitForPostgres(x, ctx, container, user); err != nil {
 				return err
 			}
-			if err := createPostgresDB(ctx, container, user, dbName); err != nil {
+			if err := createPostgresDB(x, ctx, container, user, dbName); err != nil {
 				return err
 			}
 			// Scope a per-DB login role NOW (fail-fast): the backend was injected
 			// scoped creds and can't fall back to the superuser.
-			if err := ensureBPRole(ctx, container, user, wctx.SecretsDir, realm, dbName); err != nil {
+			if err := EnsureBPRole(x, ctx, container, user, wctx.SecretsDir, realm, dbName); err != nil {
 				return err
 			}
 		}
@@ -533,32 +436,32 @@ func ensureLivePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContex
 
 // wantedBPResources collects the DESIRED per-BP resource names grouped by
 // realm — the single source of truth shared by the post-up provisioner and
-// the pre-compile Garage key minting (ensureGarageKeysPrecompile), so "which
+// the pre-compile Garage key minting (EnsureGarageKeysPrecompile), so "which
 // buckets should exist" can never diverge between the two.
 func wantedBPResources(wctx infradriver.WorkspaceContext, bs *Bitswan) (pgWant, s3Want map[string]map[string]bool) {
-	reg := loadRegistry(wctx.SecretsDir)
+	reg := LoadRegistry(wctx.SecretsDir)
 	seen := map[string]bool{}
 	pgWant = map[string]map[string]bool{} // realm -> set(db name)
 	s3Want = map[string]map[string]bool{} // realm -> set(bucket name)
-	for _, depID := range sortedDepIDs(bs.Deployments) {
+	for _, depID := range SortedDepIDs(bs.Deployments) {
 		conf := bs.Deployments[depID]
 		if conf == nil {
 			continue
 		}
-		bpSlug, copyName := deriveBPAndCopy(conf.RelativePath)
+		bpSlug, copyName := DeriveBPAndCopy(conf.RelativePath)
 		if bpSlug == "" {
 			continue
 		}
-		realm := realmForStage(conf.StageOrProduction())
+		realm := RealmForStage(conf.StageOrProduction())
 		if realm != "dev" && realm != "staging" && realm != "production" {
 			continue
 		}
 
 		// A non-main copy's live-dev backend gets its own per-(copy, BP) bucket
-		// (its Postgres DB is created fail-fast in ensureLivePostgresDBs).
+		// (its Postgres DB is created fail-fast in EnsureLivePostgresDBs).
 		// Unconditional — every BP in the copy is isolated.
 		if conf.StageOrProduction() == "live-dev" && copyName != "" {
-			bucket := copyBPResourceNames(copyName, bpSlug)["s3_bucket"]
+			bucket := CopyBPResourceNames(copyName, bpSlug)["s3_bucket"]
 			if seen["copybucket:"+bucket] {
 				continue
 			}
@@ -573,17 +476,17 @@ func wantedBPResources(wctx infradriver.WorkspaceContext, bs *Bitswan) (pgWant, 
 			continue // other copy stages have no per-BP namespaces
 		}
 		key := bpSlug + ":" + realm
-		if seen[key] || !reg.isRegistered(bpSlug, realm) {
+		if seen[key] || !reg.IsRegistered(bpSlug, realm) {
 			continue
 		}
 		seen[key] = true
 
 		dbs := []int{0}
 		if realm == "production" {
-			dbs = productionDBNumbers(bs, bpSlug)
+			dbs = ProductionDBNumbers(bs, bpSlug)
 		}
 		for _, db := range dbs {
-			names := bpResourceNames(bpSlug, db)
+			names := BPResourceNames(bpSlug, db)
 			if pgWant[realm] == nil {
 				pgWant[realm] = map[string]bool{}
 			}
@@ -597,21 +500,21 @@ func wantedBPResources(wctx infradriver.WorkspaceContext, bs *Bitswan) (pgWant, 
 	return pgWant, s3Want
 }
 
-// ensureGarageKeysPrecompile mints Garage access keys BEFORE compile for every
+// EnsureGarageKeysPrecompile mints Garage access keys BEFORE compile for every
 // wanted bucket whose creds file is absent/placeholder — or names a key Garage
 // no longer has — so the compiler bakes real values into the backend env_files.
 // Only possible when the realm's garage container is already RUNNING (i.e.
 // every apply after the first) — on a first-ever apply the compiler writes
 // placeholders and the post-up provisioner mints + converges instead.
 // Best-effort: never fails the apply.
-func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) {
+func EnsureGarageKeysPrecompile(x Execer, ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) {
 	_, s3Want := wantedBPResources(wctx, bs)
 	for realm, want := range s3Want {
-		if serviceSecrets(wctx.SecretsDir, "garage", realm) == nil {
+		if ServiceSecrets(wctx.SecretsDir, "garage", realm) == nil {
 			continue // service not enabled at this realm
 		}
-		container := serviceContainerName(wctx.WorkspaceName, "garage", realm)
-		if !containerRunning(ctx, container) {
+		container := ServiceContainerName(wctx.WorkspaceName, "garage", realm)
+		if !x.Running(ctx, container) {
 			continue
 		}
 		// A creds file can name a key Garage doesn't have: restoring a
@@ -619,23 +522,23 @@ func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceC
 		// buckets AND keys) leaves every BP key dangling. Validate against
 		// ListKeys, exactly as the _system key does, so recovery self-heals
 		// instead of leaving backends permanently AccessDenied.
-		keys, _ := garageListKeys(ctx, container)
-		// Bucket ids for the grant below. reconcileGarageBuckets skips a bucket
+		keys, _ := garageListKeys(x, ctx, container)
+		// Bucket ids for the grant below. ReconcileGarageBuckets skips a bucket
 		// it considers fully provisioned (bucket + key both exist server-side),
 		// so a key minted HERE must be granted HERE too — otherwise the skip
 		// fires on a brand-new key that owns nothing and the backend is
 		// AccessDenied forever.
-		buckets, _ := garageListBuckets(ctx, container)
+		buckets, _ := garageListBuckets(x, ctx, container)
 		for _, bucket := range sortedKeys(want) {
-			if ak, _ := readBucketCreds(wctx.SecretsDir, realm, bucket); ak != "" && keys[ak] {
+			if ak, _ := ReadBucketCreds(wctx.SecretsDir, realm, bucket); ak != "" && keys[ak] {
 				continue
 			}
-			ak, sk, err := garageCreateKey(ctx, container, "bp-"+bucket)
+			ak, sk, err := garageCreateKey(x, ctx, container, "bp-"+bucket)
 			if err != nil {
 				report("provision", fmt.Sprintf("mint garage key for %s deferred: %v", bucket, err))
 				continue
 			}
-			if err := writeBucketCreds(wctx.SecretsDir, realm, bucket, ak, sk); err != nil {
+			if err := WriteBucketCreds(wctx.SecretsDir, realm, bucket, ak, sk); err != nil {
 				report("provision", fmt.Sprintf("persist garage key for %s failed: %v", bucket, err))
 				continue
 			}
@@ -643,7 +546,7 @@ func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceC
 			// reconcile, which creates AND grants it (its skip can't fire while
 			// the bucket is missing).
 			if bucketID := buckets[bucket]; bucketID != "" {
-				if err := garageAllowBucketKey(ctx, container, bucketID, ak); err != nil {
+				if err := garageAllowBucketKey(x, ctx, container, bucketID, ak); err != nil {
 					report("provision", fmt.Sprintf("grant %s on %s deferred: %v", ak, bucket, err))
 				}
 			}
@@ -651,13 +554,13 @@ func ensureGarageKeysPrecompile(ctx context.Context, wctx infradriver.WorkspaceC
 	}
 }
 
-// provisionForDeployments creates the best-effort per-BP namespaces (Garage
+// ProvisionForDeployments creates the best-effort per-BP namespaces (Garage
 // bucket+key grants + standby blue-green Postgres DB) for registered BP×realm
 // touched by the deployments. Never fails the deploy — errors are reported
 // and skipped. Returns the creds-file paths whose key material was minted
 // HERE (i.e. backends compiled against a placeholder), so reconcile can
 // re-up exactly those services with their real credentials.
-func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) []string {
+func ProvisionForDeployments(x Execer, ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitswan, report func(step, msg string)) []string {
 	pgWant, s3Want := wantedBPResources(wctx, bs)
 
 	// One reconcile unit per (realm, service) — a handful at most. Each issues a
@@ -671,14 +574,14 @@ func provisionForDeployments(ctx context.Context, wctx infradriver.WorkspaceCont
 		wg.Add(1)
 		go func(realm string, want map[string]bool) {
 			defer wg.Done()
-			reconcilePostgresDBs(ctx, wctx, realm, want, report)
+			reconcilePostgresDBs(x, ctx, wctx, realm, want, report)
 		}(realm, want)
 	}
 	for realm, want := range s3Want {
 		wg.Add(1)
 		go func(realm string, want map[string]bool) {
 			defer wg.Done()
-			changed := reconcileGarageBuckets(ctx, wctx, realm, want, report)
+			changed := ReconcileGarageBuckets(x, ctx, wctx, realm, want, report)
 			mu.Lock()
 			changedCreds = append(changedCreds, changed...)
 			mu.Unlock()
@@ -704,25 +607,25 @@ func sortedKeys(set map[string]bool) []string {
 // postgres is accepting connections — no separate health probe), then it
 // creates only the missing ones. The 60s health wait is paid ONLY on the cold
 // path (the list failed to connect), never on a normal redeploy.
-func reconcilePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) {
-	secrets := serviceSecrets(wctx.SecretsDir, "postgres", realm)
-	if secrets == nil || !containerRunning(ctx, serviceContainerName(wctx.WorkspaceName, "postgres", realm)) {
+func reconcilePostgresDBs(x Execer, ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) {
+	secrets := ServiceSecrets(wctx.SecretsDir, "postgres", realm)
+	if secrets == nil || !x.Running(ctx, ServiceContainerName(wctx.WorkspaceName, "postgres", realm)) {
 		return
 	}
-	container := serviceContainerName(wctx.WorkspaceName, "postgres", realm)
+	container := ServiceContainerName(wctx.WorkspaceName, "postgres", realm)
 	user := secrets["POSTGRES_USER"]
 	if user == "" {
 		user = "admin"
 	}
-	existing, err := listPostgresDBs(ctx, container, user)
+	existing, err := listPostgresDBs(x, ctx, container, user)
 	if err != nil {
 		// Not accepting connections yet (cold start / just recreated): wait once
 		// on the health-event stream, then retry. Fail loudly if it never comes.
-		if werr := waitForHealthy(ctx, container, 60*time.Second); werr != nil {
+		if werr := x.WaitReady(ctx, container, 60*time.Second); werr != nil {
 			report("provision", fmt.Sprintf("postgres %s not ready: %v", realm, werr))
 			return
 		}
-		if existing, err = listPostgresDBs(ctx, container, user); err != nil {
+		if existing, err = listPostgresDBs(x, ctx, container, user); err != nil {
 			report("provision", fmt.Sprintf("postgres %s list databases deferred: %v", realm, err))
 			return
 		}
@@ -730,21 +633,21 @@ func reconcilePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext
 	for db := range want {
 		if existing[db] {
 			// Already provisioned by an earlier apply — its role/grants/ownership
-			// are in place. Re-running ensureBPRole (several psql execs) for EVERY
+			// are in place. Re-running EnsureBPRole (several psql execs) for EVERY
 			// database on EVERY apply was the dominant deploy cost (tens of seconds
 			// on a large workspace). Skip it for existing DBs; the LIVE DB's role is
-			// re-ensured fail-fast in ensureLivePostgresDBs whenever its backend is
+			// re-ensured fail-fast in EnsureLivePostgresDBs whenever its backend is
 			// (re)created, so ownership repairs still reach live DBs.
 			continue
 		}
-		if _, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
+		if _, stderr, rc := x.Exec(ctx, container, "psql", "-U", user, "-d", "postgres", "-c",
 			fmt.Sprintf("CREATE DATABASE %q;", db)); rc != 0 && !strings.Contains(stderr, "already exists") {
 			report("provision", fmt.Sprintf("create database %s deferred: %s", db, strings.TrimSpace(stderr)))
 			continue
 		}
 		// Scope the per-DB login role for the just-created database (covers standby
 		// blue-green slots created on a promote).
-		if err := ensureBPRole(ctx, container, user, wctx.SecretsDir, realm, db); err != nil {
+		if err := EnsureBPRole(x, ctx, container, user, wctx.SecretsDir, realm, db); err != nil {
 			report("provision", fmt.Sprintf("scope role for %s deferred: %v", db, err))
 		}
 	}
@@ -753,8 +656,8 @@ func reconcilePostgresDBs(ctx context.Context, wctx infradriver.WorkspaceContext
 // listPostgresDBs returns the set of existing database names. A non-zero exit
 // means postgres is not accepting connections — surfaced as an error so the
 // caller takes the cold-start (wait-then-retry) path.
-func listPostgresDBs(ctx context.Context, container, user string) (map[string]bool, error) {
-	stdout, stderr, rc := dockerExec(ctx, container, "psql", "-U", user, "-d", "postgres",
+func listPostgresDBs(x Execer, ctx context.Context, container, user string) (map[string]bool, error) {
+	stdout, stderr, rc := x.Exec(ctx, container, "psql", "-U", user, "-d", "postgres",
 		"-t", "-A", "-c", "SELECT datname FROM pg_database")
 	if rc != 0 {
 		return nil, fmt.Errorf("%s", strings.TrimSpace(stderr))
@@ -768,27 +671,27 @@ func listPostgresDBs(ctx context.Context, container, user string) (map[string]bo
 	return set, nil
 }
 
-// reconcileGarageBuckets ensures every desired bucket exists in the realm's
+// ReconcileGarageBuckets ensures every desired bucket exists in the realm's
 // garage with grants for both its scoped key and the realm's _system key:
 // ONE ListBuckets lists what's there (and proves the node answers — same
 // cold-path-only health wait as postgres), then it creates only the missing
 // pieces. Returns the creds-file paths it minted key material into (backends
 // compiled against a placeholder → reconcile re-ups them).
-func reconcileGarageBuckets(ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) []string {
-	if serviceSecrets(wctx.SecretsDir, "garage", realm) == nil {
+func ReconcileGarageBuckets(x Execer, ctx context.Context, wctx infradriver.WorkspaceContext, realm string, want map[string]bool, report func(step, msg string)) []string {
+	if ServiceSecrets(wctx.SecretsDir, "garage", realm) == nil {
 		return nil
 	}
-	container := serviceContainerName(wctx.WorkspaceName, "garage", realm)
-	if !containerRunning(ctx, container) {
+	container := ServiceContainerName(wctx.WorkspaceName, "garage", realm)
+	if !x.Running(ctx, container) {
 		return nil
 	}
-	existing, err := garageListBuckets(ctx, container)
+	existing, err := garageListBuckets(x, ctx, container)
 	if err != nil {
-		if werr := waitForHealthy(ctx, container, 60*time.Second); werr != nil {
+		if werr := x.WaitReady(ctx, container, 60*time.Second); werr != nil {
 			report("provision", fmt.Sprintf("garage %s not ready: %v", realm, werr))
 			return nil
 		}
-		if existing, err = garageListBuckets(ctx, container); err != nil {
+		if existing, err = garageListBuckets(x, ctx, container); err != nil {
 			report("provision", fmt.Sprintf("garage %s list buckets deferred: %v", realm, err))
 			return nil
 		}
@@ -798,18 +701,18 @@ func reconcileGarageBuckets(ctx context.Context, wctx infradriver.WorkspaceConte
 	// would leave a backend permanently unauthorized after a transient failure
 	// between bucket creation and key grant — the grants are idempotent, so
 	// re-running to heal is safe.
-	keys, _ := garageListKeys(ctx, container)
+	keys, _ := garageListKeys(x, ctx, container)
 
 	// The realm's _system key (backups/snapshots/explorer fallback) is granted
 	// on every bucket. When it was just minted, no existing bucket can be
 	// skipped — each needs the new key's grant.
-	sysAK, _ := readBucketCreds(wctx.SecretsDir, realm, systemKeyName)
+	sysAK, _ := ReadBucketCreds(wctx.SecretsDir, realm, SystemKeyName)
 	sysFresh := false
 	if sysAK == "" || !keys[sysAK] {
-		ak, sk, err := garageCreateKey(ctx, container, systemKeyName)
+		ak, sk, err := garageCreateKey(x, ctx, container, SystemKeyName)
 		if err != nil {
 			report("provision", fmt.Sprintf("mint garage _system key (%s) deferred: %v", realm, err))
-		} else if err := writeBucketCreds(wctx.SecretsDir, realm, systemKeyName, ak, sk); err != nil {
+		} else if err := WriteBucketCreds(wctx.SecretsDir, realm, SystemKeyName, ak, sk); err != nil {
 			report("provision", fmt.Sprintf("persist garage _system key (%s) failed: %v", realm, err))
 		} else {
 			sysAK = ak
@@ -819,7 +722,7 @@ func reconcileGarageBuckets(ctx context.Context, wctx infradriver.WorkspaceConte
 
 	var changed []string
 	for _, b := range sortedKeys(want) {
-		bpAK, _ := readBucketCreds(wctx.SecretsDir, realm, b)
+		bpAK, _ := ReadBucketCreds(wctx.SecretsDir, realm, b)
 		if existing[b] != "" && bpAK != "" && keys[bpAK] && !sysFresh {
 			// Fully provisioned by an earlier apply — skip the execs (a dominant
 			// deploy cost when re-run every time).
@@ -833,32 +736,32 @@ func reconcileGarageBuckets(ctx context.Context, wctx infradriver.WorkspaceConte
 			// record it for the convergence re-up; otherwise the grant below
 			// fails with "No such key" and the backend stays AccessDenied
 			// forever.
-			ak, sk, err := garageCreateKey(ctx, container, "bp-"+b)
+			ak, sk, err := garageCreateKey(x, ctx, container, "bp-"+b)
 			if err != nil {
 				report("provision", fmt.Sprintf("mint garage key for %s deferred: %v", b, err))
 				continue
 			}
-			if err := writeBucketCreds(wctx.SecretsDir, realm, b, ak, sk); err != nil {
+			if err := WriteBucketCreds(wctx.SecretsDir, realm, b, ak, sk); err != nil {
 				report("provision", fmt.Sprintf("persist garage key for %s failed: %v", b, err))
 				continue
 			}
 			bpAK = ak
-			changed = append(changed, bucketCredsPath(wctx.SecretsDir, realm, b))
+			changed = append(changed, BucketCredsPath(wctx.SecretsDir, realm, b))
 		}
 		bucketID := existing[b]
 		if bucketID == "" {
-			id, err := garageCreateBucket(ctx, container, b)
+			id, err := garageCreateBucket(x, ctx, container, b)
 			if err != nil {
 				report("provision", fmt.Sprintf("create bucket %s deferred: %v", b, err))
 				continue
 			}
 			bucketID = id
 		}
-		if err := garageAllowBucketKey(ctx, container, bucketID, bpAK); err != nil {
+		if err := garageAllowBucketKey(x, ctx, container, bucketID, bpAK); err != nil {
 			report("provision", fmt.Sprintf("grant %s on %s deferred: %v", bpAK, b, err))
 		}
 		if sysAK != "" {
-			if err := garageAllowBucketKey(ctx, container, bucketID, sysAK); err != nil {
+			if err := garageAllowBucketKey(x, ctx, container, bucketID, sysAK); err != nil {
 				report("provision", fmt.Sprintf("grant _system on %s deferred: %v", b, err))
 			}
 		}

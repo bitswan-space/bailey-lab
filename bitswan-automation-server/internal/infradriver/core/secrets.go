@@ -1,8 +1,9 @@
-package dockerdriver
+package core
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -30,20 +31,10 @@ const (
 // "Apply" 502s), and a root-owned 0600 file (.aes-key, db/bucket creds) is
 // silently unreadable to gitops. Hand everything the driver creates here to
 // the gitops user.
-const gitopsUID = 1000
 
-// ownForGitops best-effort chowns driver-created secrets paths to the gitops
-// user. Chown is a no-op failure where the driver runs unprivileged (unit
-// tests) — there the paths already belong to the writing uid.
-func ownForGitops(paths ...string) {
-	for _, p := range paths {
-		_ = os.Chown(p, gitopsUID, gitopsUID)
-	}
-}
-
-// bpSecretEnvFilePath is <secrets>/bp/<slug>/<realm> (bp_secrets.env_file_path).
-func bpSecretEnvFilePath(secretsDir, bp, stage string) string {
-	return filepath.Join(secretsDir, "bp", sanitizeAutomationName(bp), realmForStage(stage))
+// BPSecretEnvFilePath is <secrets>/bp/<slug>/<realm> (bp_secrets.env_file_path).
+func BPSecretEnvFilePath(secretsDir, bp, stage string) string {
+	return filepath.Join(secretsDir, "bp", SanitizeAutomationName(bp), RealmForStage(stage))
 }
 
 // loadAESKey reads (or creates) the workspace-local AES key on the secrets
@@ -67,13 +58,13 @@ func loadAESKey(secretsDir string) ([]byte, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return nil, err
 	}
-	ownForGitops(secretsDir, path)
+	OwnForGitops(secretsDir, path)
 	return key, nil
 }
 
-// decryptSecrets decrypts a base64(nonce + GCM ciphertext) blob to {KEY: value}
+// DecryptSecrets decrypts a base64(nonce + GCM ciphertext) blob to {KEY: value}
 // (bp_secrets.decrypt_secrets). Returns nil if the blob is unreadable.
-func decryptSecrets(secretsDir, blob string) map[string]string {
+func DecryptSecrets(secretsDir, blob string) map[string]string {
 	if blob == "" {
 		return nil
 	}
@@ -108,14 +99,14 @@ func decryptSecrets(secretsDir, blob string) map[string]string {
 	return out
 }
 
-// materializeEnv (re)writes the stage's plaintext env file from decrypted
+// MaterializeEnv (re)writes the stage's plaintext env file from decrypted
 // values (non-empty only) and returns its path (bp_secrets.materialize_env).
-func materializeEnv(secretsDir, bp, stage string, values map[string]string) (string, error) {
-	path := bpSecretEnvFilePath(secretsDir, bp, stage)
+func MaterializeEnv(secretsDir, bp, stage string, values map[string]string) (string, error) {
+	path := BPSecretEnvFilePath(secretsDir, bp, stage)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-	ownForGitops(filepath.Join(secretsDir, "bp"), filepath.Dir(path))
+	OwnForGitops(filepath.Join(secretsDir, "bp"), filepath.Dir(path))
 	keys := make([]string, 0, len(values))
 	for k := range values {
 		keys = append(keys, k)
@@ -138,18 +129,36 @@ func materializeEnv(secretsDir, bp, stage string, values map[string]string) (str
 	if err := os.Rename(tmp, path); err != nil {
 		return "", err
 	}
-	ownForGitops(path)
+	OwnForGitops(path)
 	return path, nil
 }
 
-// secretsContentHash is a stable digest of the NON-EMPTY, sorted KEY=VALUE
-// content materialized into the env file — identical inputs → identical hash.
-// It is folded into a service label so a secret-only change (same image, same
-// env_file path) still changes the service config and `docker compose up`
-// recreates the container; without it compose keys recreation off the config
-// alone and never reloads changed env_file CONTENTS. Empty ⇒ "" (no label, so
-// secret-less services never churn).
-func secretsContentHash(values map[string]string) string {
+// SecretsContentHash is a stable, workspace-keyed digest of the NON-EMPTY,
+// sorted KEY=VALUE content materialized into the env file — identical inputs
+// under the same workspace key → identical hash. It is folded into a service
+// label so a secret-only change (same image, same env_file path) still changes
+// the service config and `docker compose up` recreates the container; without
+// it compose keys recreation off the config alone and never reloads changed
+// env_file CONTENTS. The digest is an HMAC under the workspace AES key, never a
+// bare hash of the values: the label is readable by anyone who can list
+// containers, and a bare hash of a short secret is a guess-and-compare oracle.
+// No content, or no key to hash it under, ⇒ "" (no label, so secret-less
+// services never churn).
+func SecretsContentHash(secretsDir string, values map[string]string) string {
+	stream := secretsContentStream(values)
+	if stream == "" {
+		return ""
+	}
+	key, err := loadAESKey(secretsDir)
+	if err != nil || len(key) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(stream))
+	return hex.EncodeToString(mac.Sum(nil))[:16]
+}
+
+func secretsContentStream(values map[string]string) string {
 	if len(values) == 0 {
 		return ""
 	}
@@ -158,23 +167,18 @@ func secretsContentHash(values map[string]string) string {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	h := sha256.New()
-	any := false
+	var b strings.Builder
 	for _, k := range keys {
 		v := values[k]
 		if strings.TrimSpace(v) == "" {
 			continue
 		}
-		any = true
-		h.Write([]byte(k))
-		h.Write([]byte("="))
-		h.Write([]byte(v))
-		h.Write([]byte("\n"))
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(v)
+		b.WriteString("\n")
 	}
-	if !any {
-		return ""
-	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
+	return b.String()
 }
 
 func stringify(v interface{}) string {
@@ -187,4 +191,46 @@ func stringify(v interface{}) string {
 		b, _ := json.Marshal(t)
 		return string(b)
 	}
+}
+
+// ServiceSuffix is what a non-production realm adds to an infra service's name.
+func ServiceSuffix(stage string) string {
+	if stage == "production" || stage == "" {
+		return ""
+	}
+	return "-" + stage
+}
+
+// InfraServiceSecretsName is the secrets file a declared service dependency
+// contributes to a workload's environment.
+func InfraServiceSecretsName(svcType, stage string) string {
+	return svcType + ServiceSuffix(stage)
+}
+
+// IsKnownInfraType reports whether a declared service is one a driver can
+// actually stand up.
+func IsKnownInfraType(svcType string) bool {
+	switch svcType {
+	case "couchdb", "garage", "postgres", "kafka":
+		return true
+	}
+	return false
+}
+
+// ResolveServiceSecrets is the secrets files a workload's declared service
+// dependencies contribute, in declaration order — the order is observable,
+// because a later file overrides an earlier one.
+func ResolveServiceSecrets(cfg AutomationConfig, stage string) []string {
+	if !cfg.HasServices() {
+		return nil
+	}
+	mapped := StageForDeployment(stage)
+	var out []string
+	for _, svc := range cfg.Services {
+		if !svc.Enabled || !IsKnownInfraType(svc.Type) {
+			continue
+		}
+		out = append(out, InfraServiceSecretsName(svc.Type, mapped))
+	}
+	return out
 }

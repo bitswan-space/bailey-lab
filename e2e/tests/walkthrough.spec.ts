@@ -2994,7 +2994,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // "manual" badge + a Restore button appears. This is a LONG op — watch it
     // with the progress rule: the snapshot task streams step labels (Restoring
     // Postgres…/CouchDB…/object storage…) and must not go dark >PROGRESS.
-    const restoreRow = d.getByRole('button', { name: /^Restore$/ }).first();
+    const restoreRow = d.getByText(/^manual$/).first();
     let last = await progressSignature();
     const deadline = Date.now() + 30 * 60_000;
     for (;;) {

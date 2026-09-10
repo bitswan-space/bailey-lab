@@ -155,6 +155,9 @@ func refreshGrypeDB(ctx context.Context) error {
 	if img == "" {
 		return fmt.Errorf("no gitops image available to source grype from")
 	}
+	if onKubernetes() {
+		return refreshGrypeDBK8s(ctx, img, k8sWorkspaceVolumeClaim())
+	}
 	cmd := exec.CommandContext(ctx, "docker", grypeRefreshArgs(img)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("grype db update (%s): %w: %s", img, err, strings.TrimSpace(string(out)))
@@ -167,10 +170,10 @@ func refreshGrypeDB(ctx context.Context) error {
 // finds it), then populates + refreshes the DB in the background. Startup never
 // blocks on the ~40s download.
 func startGrypeDBRefresher() {
-	// Create the volume up front so `docker compose up` (external: true) for a
-	// workspace never fails on a missing volume. Idempotent.
-	if out, err := exec.Command("docker", "volume", "create", dockercompose.GrypeDBVolume).CombinedOutput(); err != nil {
-		fmt.Printf("Warning: could not create shared grype DB volume: %v: %s\n", err, strings.TrimSpace(string(out)))
+	if !onKubernetes() {
+		if out, err := exec.Command("docker", "volume", "create", dockercompose.GrypeDBVolume).CombinedOutput(); err != nil {
+			fmt.Printf("Warning: could not create shared grype DB volume: %v: %s\n", err, strings.TrimSpace(string(out)))
+		}
 	}
 	go grypeDBRefreshLoop(context.Background())
 }

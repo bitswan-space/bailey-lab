@@ -55,10 +55,10 @@ backups:
 		}
 		conf := deployments[depID]
 		for _, sd := range c.slotDBPairs(conf) {
-			slotConf := c.effectiveSlotConf(depID, conf, sd.slot, deployments)
-			entry, name, _, emit, derr := c.buildServiceEntry(depID, slotConf, sd.slot, sd.db, workerHosts, workerPorts, fwScope)
+			slotConf := c.effectiveSlotConf(depID, conf, sd.Slot, deployments)
+			entry, name, _, emit, derr := c.buildServiceEntry(depID, slotConf, sd.Slot, sd.DB, workerHosts, workerPorts, fwScope)
 			if derr != nil {
-				t.Fatalf("buildServiceEntry(%s,%s): %v", depID, sd.slot, derr)
+				t.Fatalf("buildServiceEntry(%s,%s): %v", depID, sd.Slot, derr)
 			}
 			if emit {
 				services[name] = entry

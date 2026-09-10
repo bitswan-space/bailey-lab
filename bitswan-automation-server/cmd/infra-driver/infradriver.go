@@ -14,10 +14,8 @@ import (
 	"syscall"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
-	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/dockerdriver"
 	"github.com/spf13/cobra"
 )
-
 
 // ctxFlags holds the WorkspaceContext supplied to serve and recorded in the
 // bare repo's git config so the post-receive `apply` can read it back.
@@ -27,6 +25,8 @@ type ctxFlags struct {
 	secretsDir string
 	gitopsDir  string
 	wrap       bool
+	driver     string
+	namespace  string
 }
 
 func (f *ctxFlags) bind(cmd *cobra.Command) {
@@ -35,6 +35,8 @@ func (f *ctxFlags) bind(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.secretsDir, "secrets-dir", "", "shared secrets volume path")
 	cmd.Flags().StringVar(&f.gitopsDir, "gitops-dir", "", "gitops volume dir the push is materialized into (the deployed tree the compose binds reference)")
 	cmd.Flags().BoolVar(&f.wrap, "wrap", false, "protected-proxy present (wrap topology)")
+	cmd.Flags().StringVar(&f.driver, "driver", os.Getenv("BITSWAN_INFRA_DRIVER_KIND"), "backend that realizes the declaration: docker (default) or k8s")
+	cmd.Flags().StringVar(&f.namespace, "namespace", os.Getenv("BITSWAN_K8S_NAMESPACE"), "namespace the k8s backend is scoped to (default: this pod's own)")
 }
 
 func newServeCmd() *cobra.Command {
@@ -152,6 +154,8 @@ func ensureDeployRepoAt(gitDir, bp string, cf ctxFlags) error {
 		"bitswan.secretsdir": cf.secretsDir,
 		"bitswan.gitopsdir":  cf.gitopsDir,
 		"bitswan.wrap":       fmt.Sprintf("%t", cf.wrap),
+		"bitswan.driver":     cf.driver,
+		"bitswan.namespace":  cf.namespace,
 		// git-http-backend refuses receive-pack (push) unless this is set.
 		"http.receivepack": "true",
 		// Forbid force-push and ref deletion server-side: the deploy history is
@@ -198,7 +202,11 @@ func serveHTTP(ctx context.Context, listen, gitDir, deployReposDir, token string
 	}
 	// The driver is scoped to its workspace: container primitives refuse any
 	// container not labelled gitops.workspace=<workspace>.
-	server := infradriver.NewServer(dockerdriver.New(cf.workspace))
+	drv, err := newDriver(cf.driver, cf)
+	if err != nil {
+		return err
+	}
+	server := infradriver.NewServer(drv)
 	var label string
 	if deployReposDir != "" {
 		// GIT_PROJECT_ROOT is the parent of the repos dir so every nested

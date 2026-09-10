@@ -1,6 +1,8 @@
 package dockerdriver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,21 +94,30 @@ func TestSecretEnvFileScopedToBackendWorker(t *testing.T) {
 // churn), stable for identical content regardless of map order, and different
 // when any value changes.
 func TestSecretsContentHash(t *testing.T) {
-	if secretsContentHash(nil) != "" {
+	dir := t.TempDir()
+	if secretsContentHash(dir, nil) != "" {
 		t.Error("nil values must hash to empty (no label, no churn)")
 	}
-	if secretsContentHash(map[string]string{"K": "", "J": "  "}) != "" {
+	if secretsContentHash(dir, map[string]string{"K": "", "J": "  "}) != "" {
 		t.Error("all-blank values must hash to empty")
 	}
-	a := secretsContentHash(map[string]string{"K": "v1"})
-	if a == "" || a != secretsContentHash(map[string]string{"K": "v1"}) {
+	a := secretsContentHash(dir, map[string]string{"K": "v1"})
+	if a == "" || a != secretsContentHash(dir, map[string]string{"K": "v1"}) {
 		t.Errorf("identical content must be a stable non-empty hash, got %q", a)
 	}
-	if secretsContentHash(map[string]string{"K": "v2"}) == a {
+	if secretsContentHash(dir, map[string]string{"K": "v2"}) == a {
 		t.Error("a changed value must change the hash (else no recreate)")
 	}
-	if secretsContentHash(map[string]string{"A": "1", "B": "2"}) !=
-		secretsContentHash(map[string]string{"B": "2", "A": "1"}) {
+	if secretsContentHash(dir, map[string]string{"A": "1", "B": "2"}) !=
+		secretsContentHash(dir, map[string]string{"B": "2", "A": "1"}) {
 		t.Error("map iteration order must not affect the hash")
+	}
+	bare := sha256.Sum256([]byte("K=v1\n"))
+	if a == hex.EncodeToString(bare[:])[:16] {
+		t.Error("the label must not be a bare digest of the secret content: " +
+			"anyone who can list containers could then confirm a guessed value offline")
+	}
+	if other := secretsContentHash(t.TempDir(), map[string]string{"K": "v1"}); other == a {
+		t.Error("the digest must be keyed per workspace, so the same content in two workspaces differs")
 	}
 }

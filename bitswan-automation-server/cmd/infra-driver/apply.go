@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
-	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/dockerdriver"
 	"github.com/spf13/cobra"
 )
 
@@ -101,7 +100,15 @@ func runApply(cmd *cobra.Command, gitDir string) error {
 	// The driver configures ingress itself inside Apply (k8s-style: the applier
 	// owns the Ingress), so the returned routes are informational — log a
 	// one-line summary for the push output, not a contract.
-	routes, err := dockerdriver.New(wctx.WorkspaceName).Apply(cmd.Context(),
+	drv, err := newDriver(gitConfig(gitDir, "bitswan.driver"), ctxFlags{
+		workspace: wctx.WorkspaceName,
+		domain:    wctx.Domain,
+		namespace: gitConfig(gitDir, "bitswan.namespace"),
+	})
+	if err != nil {
+		return err
+	}
+	routes, err := drv.Apply(cmd.Context(),
 		infradriver.ApplyRequest{Ctx: wctx, BitswanYAML: string(yamlBytes)},
 		func(p infradriver.Progress) { progress(p.Step, p.Message) })
 	if err != nil {

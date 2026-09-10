@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -160,8 +160,8 @@ func compile(wctx infradriver.WorkspaceContext, bs *Bitswan) (composeYAML string
 			continue
 		}
 		for _, sd := range c.slotDBPairs(conf) {
-			slotConf := c.effectiveSlotConf(depID, conf, sd.slot, deployments)
-			entry, serviceName, route, emit, derr := c.buildServiceEntry(depID, slotConf, sd.slot, sd.db, workerHosts, workerPorts, fwScope)
+			slotConf := c.effectiveSlotConf(depID, conf, sd.Slot, deployments)
+			entry, serviceName, route, emit, derr := c.buildServiceEntry(depID, slotConf, sd.Slot, sd.DB, workerHosts, workerPorts, fwScope)
 			if derr != nil {
 				return "", nil, nil, derr
 			}
@@ -208,149 +208,18 @@ func compile(wctx infradriver.WorkspaceContext, bs *Bitswan) (composeYAML string
 	return string(out), routes, infraServices, nil
 }
 
-type slotDB struct {
-	slot string // "" for single-backend (Python None)
-	db   int    // 0 for single-backend (Python None)
-}
-
-// slotDBPairs ports _slot_db_pairs.
-func (c *compileState) slotDBPairs(conf *Deployment) []slotDB {
-	if conf.StageOrProduction() != "production" {
-		return []slotDB{{"", 0}}
-	}
-	bpSlug, _ := deriveBPAndCopy(conf.RelativePath)
-	if bpSlug == "" {
-		return []slotDB{{"", 0}}
-	}
-	rec := c.backupRec(bpSlug)
-	slots := c.slotsFor(rec)
-	var pairs []slotDB
-	for _, s := range appSlots {
-		if sr, ok := slots[s]; ok && sr != nil && sr.DB != nil {
-			pairs = append(pairs, slotDB{s, *sr.DB})
-		}
-	}
-	if len(pairs) == 0 {
-		return []slotDB{{"", 0}}
-	}
-	return pairs
-}
-
-// effectiveSlotConf returns the deployment config the compiler should use for a
-// given slot. A zero-downtime blue-green promote pins a NEW version onto the
-// idle slot by adding a `<base_id>@<slot>` overlay entry to deployments — same
-// automation, different code. When that overlay exists, the version-bearing
-// fields (checksum/source/relative_path/image/tag) come from it while
-// everything else (automation_name/context/stage/replicas/services) stays from
-// the base — so the live and idle slots can run DIFFERENT versions during the
-// promote, and the driver's health-gated ingress flip then cuts over to the
-// idle slot. Without an overlay (the steady state, and every non-production
-// slot) the base conf is returned unchanged.
-func (c *compileState) effectiveSlotConf(baseID string, base *Deployment, slot string, deployments map[string]*Deployment) *Deployment {
-	if slot == "" {
-		return base
-	}
-	overlay := deployments[baseID+"@"+slot]
-	if overlay == nil {
-		return base
-	}
-	eff := *base
-	if overlay.Checksum != "" {
-		eff.Checksum = overlay.Checksum
-	}
-	if overlay.Source != "" {
-		eff.Source = overlay.Source
-	}
-	if overlay.RelativePath != "" {
-		eff.RelativePath = overlay.RelativePath
-	}
-	if overlay.Image != "" {
-		eff.Image = overlay.Image
-	}
-	if overlay.TagChecksum != "" {
-		eff.TagChecksum = overlay.TagChecksum
-	}
-	return &eff
-}
-
-func (c *compileState) backupRec(bpSlug string) *BackupRec {
-	if c.bs.Backups == nil {
-		return nil
-	}
-	return c.bs.Backups[bpSlug]
-}
-
-func (c *compileState) slotsFor(rec *BackupRec) map[string]*SlotRec {
-	if rec != nil && len(rec.Slots) > 0 {
-		return rec.Slots
-	}
-	one, two := 1, 2
-	return map[string]*SlotRec{"blue": {DB: &one}, "green": {DB: &two}}
-}
-
-// liveSlotFor ports _live_slot_for.
-func (c *compileState) liveSlotFor(conf *Deployment) string {
-	bpSlug, _ := deriveBPAndCopy(conf.RelativePath)
-	rec := c.backupRec(bpSlug)
-	if rec != nil && rec.LiveSlot != "" {
-		return rec.LiveSlot
-	}
-	slots := c.slotsFor(rec)
-	liveDB := 1
-	if rec != nil && rec.LiveDB != nil {
-		liveDB = *rec.LiveDB
-	}
-	for _, s := range appSlots {
-		if sr, ok := slots[s]; ok && sr != nil && sr.DB != nil && *sr.DB == liveDB {
-			return s
-		}
-	}
-	return "blue"
-}
-
-// drSlotFor ports _dr_slot_for.
-func (c *compileState) drSlotFor(conf *Deployment) string {
-	bpSlug, _ := deriveBPAndCopy(conf.RelativePath)
-	rec := c.backupRec(bpSlug)
-	slots := c.slotsFor(rec)
-	liveDB := 1
-	if rec != nil && rec.LiveDB != nil {
-		liveDB = *rec.LiveDB
-	}
-	standbyDB := 1
-	if liveDB == 1 {
-		standbyDB = 2
-	}
-	live := c.liveSlotFor(conf)
-	for _, s := range appSlots {
-		if sr, ok := slots[s]; ok && sr != nil && sr.DB != nil && *sr.DB == standbyDB && s != live {
-			return s
-		}
-	}
-	return ""
-}
-
-func sortedDepIDs(m map[string]*Deployment) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func (c *compileState) routesKeptWhileAsleep(depID string, conf *Deployment, deployments map[string]*Deployment) []infradriver.Route {
 	automationName := conf.AutomationNameOr(depID)
 	depStage := conf.StageOrProduction()
 	var out []infradriver.Route
 	for _, sd := range c.slotDBPairs(conf) {
-		slotConf := c.effectiveSlotConf(depID, conf, sd.slot, deployments)
+		slotConf := c.effectiveSlotConf(depID, conf, sd.Slot, deployments)
 		cfg := c.resolveAutomationConfig(slotConf)
 		if !cfg.Expose || cfg.Port == 0 {
 			continue
 		}
-		isLiveSlot := sd.slot == "" || sd.slot == c.liveSlotFor(slotConf)
-		isDRSlot := sd.slot != "" && sd.slot == c.drSlotFor(slotConf)
+		isLiveSlot := sd.Slot == "" || sd.Slot == c.liveSlotFor(slotConf)
+		isDRSlot := sd.Slot != "" && sd.Slot == c.drSlotFor(slotConf)
 		if !isLiveSlot && !isDRSlot {
 			continue
 		}
@@ -358,7 +227,7 @@ func (c *compileState) routesKeptWhileAsleep(depID string, conf *Deployment, dep
 		if isDRSlot {
 			roleStage = "dr"
 		}
-		out = append(out, c.workspaceRoute(automationName, slotConf.Context, depStage, cfg.Port, sd.slot, roleStage))
+		out = append(out, c.workspaceRoute(automationName, slotConf.Context, depStage, cfg.Port, sd.Slot, roleStage))
 	}
 	return out
 }
@@ -376,4 +245,30 @@ func (c *compileState) workspaceRoute(automationName, depContext, depStage strin
 		ParentEndpoint: c.workspaceName + "-dashboard." + c.domain,
 		Kind:           "frontend",
 	}
+}
+
+type slotDB = core.SlotDB
+
+func (c *compileState) slotDBPairs(conf *Deployment) []slotDB {
+	return core.SlotDBPairs(c.bs, conf)
+}
+
+func (c *compileState) effectiveSlotConf(baseID string, base *Deployment, slot string, deployments map[string]*Deployment) *Deployment {
+	return core.EffectiveSlotConf(baseID, base, slot, deployments)
+}
+
+func (c *compileState) backupRec(bpSlug string) *BackupRec {
+	return core.BackupRecFor(c.bs, bpSlug)
+}
+
+func (c *compileState) slotsFor(rec *BackupRec) map[string]*SlotRec {
+	return core.SlotsFor(rec)
+}
+
+func (c *compileState) liveSlotFor(conf *Deployment) string {
+	return core.LiveSlotFor(c.bs, conf)
+}
+
+func (c *compileState) drSlotFor(conf *Deployment) string {
+	return core.DRSlotFor(c.bs, conf)
 }

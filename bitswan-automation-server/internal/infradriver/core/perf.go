@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"fmt"
@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// perfLogLine appends a one-line per-phase timing summary for a reconcile to a
+// PerfLogLine appends a one-line per-phase timing summary for a reconcile to a
 // perf log, so first-time-to-live-dev can be profiled without guesswork. The
 // path is BITSWAN_PERF_LOG if set, else <gitopsDir>/perf-reconcile.log.
 // Best-effort: never fails a deploy.
-func perfLogLine(gitopsDir, bp string, timings []string, total time.Duration) {
+func PerfLogLine(gitopsDir, bp string, timings []string, total time.Duration) {
 	path := os.Getenv("BITSWAN_PERF_LOG")
 	if path == "" {
 		if gitopsDir == "" {
@@ -31,10 +31,10 @@ func perfLogLine(gitopsDir, bp string, timings []string, total time.Duration) {
 	_, _ = f.WriteString(line)
 }
 
-// phaseTimer wraps a report callback so the wall-clock spent between consecutive
+// PhaseTimer wraps a report callback so the wall-clock spent between consecutive
 // report() calls is attributed to the step that just finished — turning the
 // existing progress steps into a per-phase profile with zero per-phase edits.
-type phaseTimer struct {
+type PhaseTimer struct {
 	base     func(step, msg string)
 	start    time.Time
 	last     time.Time
@@ -42,13 +42,13 @@ type phaseTimer struct {
 	timings  []string
 }
 
-func newPhaseTimer(base func(step, msg string)) *phaseTimer {
+func NewPhaseTimer(base func(step, msg string)) *PhaseTimer {
 	now := time.Now()
-	return &phaseTimer{base: base, start: now, last: now}
+	return &PhaseTimer{base: base, start: now, last: now}
 }
 
-// report records the duration of the previous step, then forwards to base.
-func (p *phaseTimer) report(step, msg string) {
+// Report records the duration of the previous step, then forwards to base.
+func (p *PhaseTimer) Report(step, msg string) {
 	now := time.Now()
 	if p.prevStep != "" {
 		p.timings = append(p.timings,
@@ -61,11 +61,11 @@ func (p *phaseTimer) report(step, msg string) {
 	}
 }
 
-// finish records the final step's duration and writes the perf line.
-func (p *phaseTimer) finish(gitopsDir, bp string) {
+// Finish records the final step's duration and writes the perf line.
+func (p *PhaseTimer) Finish(gitopsDir, bp string) {
 	if p.prevStep != "" {
 		p.timings = append(p.timings,
 			fmt.Sprintf("%s=%dms", p.prevStep, time.Since(p.last).Milliseconds()))
 	}
-	perfLogLine(gitopsDir, bp, p.timings, time.Since(p.start))
+	PerfLogLine(gitopsDir, bp, p.timings, time.Since(p.start))
 }
