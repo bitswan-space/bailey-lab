@@ -1314,17 +1314,24 @@ function ContainersSection({
                   : 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
               : 'Free this stage’s memory now. On-demand stages wake automatically on access.'}
           </span>
-          {asleep ? (
-            <Button variant="outline" size="sm" className="ml-auto h-7" disabled={busy}
-              onClick={() => power('wake')}>
-              <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
-            </Button>
-          ) : (
-            <Button variant="outline" size="sm" className="ml-auto h-7" disabled={busy || !anyRunning}
-              onClick={() => power('sleep')}>
-              <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
-            </Button>
-          )}
+          {/* Wake whenever ANYTHING is asleep, not only when everything is: a
+              stage with one member asleep and another whose container exited
+              hit neither branch and offered no action at all — just a disabled
+              Sleep button. (The stacked wake branch generalises this row.) */}
+          <span className="ml-auto flex items-center gap-2">
+            {members.some((m) => m.display === 'asleep') && (
+              <Button variant="outline" size="sm" className="h-7" disabled={busy}
+                onClick={() => power('wake')}>
+                <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
+              </Button>
+            )}
+            {anyRunning && (
+              <Button variant="outline" size="sm" className="h-7" disabled={busy}
+                onClick={() => power('sleep')}>
+                <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
+              </Button>
+            )}
+          </span>
         </div>
       )}
       {/* CouchDB keeps its console link here — it has no explorer replacement. */}
@@ -2541,6 +2548,12 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // carrying the stable `-dr` URL. The live slot keeps the bare id.
   const members = useMemo(() => {
     if (!currentEntry) return [];
+    // The DR stage's containers are the standby SLOT's (`<id>@<slot>`). Until
+    // that slot name has been fetched, looking them up by the bare id returns
+    // the LIVE slot's containers — the card would report DR healthy on
+    // production's readings, and Restart/Stop on those cards would act on the
+    // live production deployment. Show nothing until we know.
+    if (isDr && !drSlot) return [];
     return Object.keys(currentEntry.members).map((id) => {
       const lookupId = isDr && drSlot ? `${id}@${drSlot}` : id;
       const a = automations.find((x) => x.deployment_id === lookupId);

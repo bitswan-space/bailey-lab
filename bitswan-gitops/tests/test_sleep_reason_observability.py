@@ -162,9 +162,11 @@ def test_worse_state_lets_no_replica_hide_another(tmp_path):
     assert svc._worse_state("restarting", "running") == "restarting"
     assert svc._worse_state("running", "exited") == "exited"
     assert svc._worse_state("exited", "dead") == "dead"
-    # An unrecognised state must not be mistaken for a clean bill.
-    assert svc._worse_state("running", "weird-new-state") == "weird-new-state"
-    assert svc._worse_state("weird-new-state", "running") == "weird-new-state"
+    # An unrecognised state sits at the bottom: it never outranks something we
+    # could actually read — see the dedicated test below for why — and it never
+    # hides a fault either.
+    assert svc._worse_state("running", "weird-new-state") == "running"
+    assert svc._worse_state("weird-new-state", "exited") == "exited"
 
 
 async def test_a_crashlooping_replica_is_not_hidden_by_its_healthy_siblings(
@@ -201,13 +203,48 @@ async def test_a_crashlooping_replica_is_not_hidden_by_its_healthy_siblings(
     assert entry.restart_count == 23032
 
 
-def test_an_unreadable_state_never_hides_a_dead_replica(tmp_path):
+def test_an_unreadable_state_never_outranks_something_seen(tmp_path):
     """`removing` — or whatever Docker adds next — is an observation we cannot
-    read. It must rank above "running" so it is not mistaken for a clean bill,
-    and BELOW every fault so it cannot hide a replica we can read as dead."""
+    read, and it sits at the BOTTOM: it can never hide a replica we can read as
+    dead, and it must not drag a deployment whose other replicas are plainly
+    running into "not accounted for" during a rolling restart. Same principle,
+    and the same ordering, as the dashboard's worstStatus."""
     svc = _svc(tmp_path)
     assert svc._worse_state("exited", "removing") == "exited"
     assert svc._worse_state("removing", "exited") == "exited"  # order must not matter
-    assert svc._worse_state("running", "removing") == "removing"
-    assert svc._worse_state("removing", "running") == "removing"
+    assert svc._worse_state("running", "removing") == "running"
+    assert svc._worse_state("removing", "running") == "running"
     assert svc._worse_state("restarting", "removing") == "restarting"
+
+
+async def test_the_merged_record_describes_one_container(tmp_path, monkeypatch):
+    """Merging the state across replicas while the id, the creation time and the
+    memory reading came from whichever replica was last emitted one record
+    describing two different containers."""
+    svc = _svc(tmp_path)
+    svc.workspace_name = "ws"
+    from app.models import DeployedAutomation
+
+    entry = DeployedAutomation(
+        container_id=None,
+        endpoint_name=None,
+        created_at=None,
+        name="backend-bp-production",
+        state=None,
+        status=None,
+        deployment_id="backend-bp-production",
+        active=True,
+        automation_url=None,
+        relative_path="copies/main/bp/backend",
+        stage="production",
+    )
+    label = {"gitops.deployment_id": "backend-bp-production"}
+    containers = [
+        {"Id": "sick", "State": "restarting", "Status": "", "Labels": label, "RestartCount": 40},
+        {"Id": "healthy", "State": "running", "Status": "healthy", "Labels": label},
+    ]
+    svc._apply_docker_overlay([entry], containers, {"_mem": {"healthy": 999}}, {})
+    assert entry.state == "restarting"
+    assert entry.container_id == "sick", "the record must point at the container it describes"
+    assert entry.status != "healthy", "state and status must not contradict each other"
+    assert entry.mem_usage_bytes is None, "the healthy replica's memory is not this record's"

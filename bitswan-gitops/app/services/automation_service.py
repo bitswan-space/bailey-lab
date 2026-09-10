@@ -857,7 +857,8 @@ class AutomationService:
         Replicas of a deployment share its deployment_id, so several containers
         describe one entry. A dead replica beside a live one is not "running":
         the operator has to see the worst of them, which is the same rule the
-        dashboard applies when it collapses records onto a row.
+        dashboard applies when it collapses records onto a row — including
+        where an unreadable state sits, which is at the bottom.
         """
         # Worst first.
         order = ["dead", "exited", "failed", "restarting", "paused", "created", "starting", "running"]
@@ -867,12 +868,14 @@ class AutomationService:
                 return float(order.index(state))
             except ValueError:
                 # Outside the vocabulary — `removing`, or whatever Docker adds
-                # next. It ranks just above "running" and BELOW every fault: it
-                # is an observation we cannot read, which must not be mistaken
-                # for a clean bill, and must not hide a replica we CAN read as
-                # dead. (Same order as the dashboard's worstStatus, where
-                # 'unknown' sits at the bottom of the observed states.)
-                return order.index("running") - 0.5
+                # next. It sits at the BOTTOM, below even "running", on the same
+                # principle the dashboard's worstStatus states and is tested on:
+                # the absence of an observation never outranks something
+                # actually seen. It still loses to every fault, so it can never
+                # hide a replica we CAN read as dead — but a replica being
+                # removed during a rolling restart no longer drags a deployment
+                # whose other replicas are running into "not accounted for".
+                return float(len(order))
 
         if not current:
             return incoming
@@ -955,9 +958,7 @@ class AutomationService:
                 except (ValueError, TypeError):
                     pass
 
-            a.container_id = container.get("Id")
             a.endpoint_name = info.get("Name")
-            a.created_at = created_at
             # `deploy.replicas > 1` labels every replica with the SAME
             # deployment_id, so this loop visits one entry several times. Taking
             # the last container's word for it meant a 3-replica deployment with
@@ -967,11 +968,17 @@ class AutomationService:
             # observed wins, and a count that WAS read is never overwritten by
             # a replica that carries none.
             merged = self._worse_state(a.state, container.get("State", "unknown"))
-            if merged != a.state or a.status is None:
-                # `status` describes the SAME container as `state`, or the two
-                # fields contradict each other on the wire: a 3-replica
-                # deployment with one crashlooping replica went out as
-                # state="restarting" beside status="healthy".
+            # ONE record, ONE container: everything below describes whichever
+            # replica's state won. Merging `state` while letting the id, the
+            # creation time and the memory reading come from whichever replica
+            # happened to be last would emit a record describing two different
+            # containers — state="restarting" beside the healthy replica's id,
+            # which is the same hazard the dashboard avoids when it collapses
+            # records onto a row.
+            won = a.container_id is None or merged != a.state
+            if won:
+                a.container_id = container.get("Id")
+                a.created_at = created_at
                 a.status = container.get("Status", "")
             a.state = merged
             count = container.get("RestartCount")
@@ -991,8 +998,8 @@ class AutomationService:
             except (TypeError, ValueError):
                 a.mem_reservation_mb = None
             a.mem_policy = labels.get("gitops.mem_policy") or None
-            usage = ((info or {}).get("_mem") or {}).get(container.get("Id"))
-            if usage is not None:
+            usage = ((info or {}).get("_mem") or {}).get(a.container_id)
+            if won and usage is not None:
                 a.mem_usage_bytes = int(usage)
                 if a.mem_reservation_mb:
                     a.mem_over_reservation = (
