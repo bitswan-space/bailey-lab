@@ -294,6 +294,37 @@ func ListPods(ctx context.Context) ([]PodInfo, error) {
 // PodMemoryUsage is live memory per pod, or nothing when the metrics API is
 // absent. Nothing rather than zeroes: a zero reads as "this uses no memory",
 // which would make the budget confidently wrong.
+func ServiceClusterIPs(ctx context.Context) (map[string]string, error) {
+	ns, err := Namespace()
+	if err != nil {
+		return nil, err
+	}
+	out, err := exec.CommandContext(ctx, "kubectl", "-n", ns, "get", "services", "-o", "json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get services: %w", err)
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				ClusterIP string `json:"clusterIP"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parse service list: %w", err)
+	}
+	ips := map[string]string{}
+	for _, it := range list.Items {
+		if ip := it.Spec.ClusterIP; ip != "" && ip != "None" {
+			ips[it.Metadata.Name] = ip
+		}
+	}
+	return ips, nil
+}
+
 func PodMemoryUsage(ctx context.Context) (map[string]int64, error) {
 	ns, err := Namespace()
 	if err != nil {

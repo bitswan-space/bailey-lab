@@ -164,6 +164,20 @@ func ruleInstaller(g *fwGroup, peers []string) k8srender.InitContainer {
 	}
 }
 
+func peerAddresses(peers []string, ips map[string]string) string {
+	if len(ips) == 0 {
+		return ""
+	}
+	var out []string
+	for _, peer := range peers {
+		if ip := ips[peer]; ip != "" {
+			out = append(out, peer+"="+ip)
+		}
+	}
+	sort.Strings(out)
+	return strings.Join(out, ",")
+}
+
 func gatewayImage() string {
 	return envOr("BITSWAN_EGRESS_GATEWAY_IMAGE", "bitswan/egress-gateway:latest")
 }

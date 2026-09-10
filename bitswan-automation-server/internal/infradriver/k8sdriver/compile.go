@@ -46,6 +46,9 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		domain:    req.Ctx.Domain,
 		claim:     os.Getenv("BITSWAN_K8S_VOLUME_CLAIM"),
 	}
+	if ips, err := k8sctl.ServiceClusterIPs(ctx); err == nil {
+		c.peerIPs = ips
+	}
 	report("compile", "workspace volume: "+describeClaim(c.claim))
 	foundation, workloads, routes, err := c.compile()
 	if err != nil {
@@ -174,6 +177,11 @@ type compileState struct {
 	// that takes is a pod with a mount and no volume — which the API server
 	// rejects with a message about a volume name, several steps from the cause.
 	claim string
+	// peerIPs pins what the rule installer will resolve, so a peer Service that
+	// is recreated with a new address changes the pod template and the workload
+	// rolls onto rules that match reality. Empty in a unit test, which keeps the
+	// compile a pure function of the declaration.
+	peerIPs map[string]string
 }
 
 // compile turns the declaration into the objects that realize it.
@@ -459,7 +467,11 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 	// container that has NET_ADMIN and is gone by the time this container
 	// starts — so the workload itself cannot undo them.
 	if g := c.fwGroupFor(conf); g != nil {
-		w.InitContainers = append(w.InitContainers, ruleInstaller(g, c.peersFor(realm, bpSlug)))
+		peers := c.peersFor(realm, bpSlug)
+		w.InitContainers = append(w.InitContainers, ruleInstaller(g, peers))
+		if pinned := peerAddresses(peers, c.peerIPs); pinned != "" {
+			w.Annotations["bitswan.io/fw-peers"] = pinned
+		}
 	}
 	if conf.MemoryReservation != nil && *conf.MemoryReservation > 0 {
 		// A request, never a limit: on Docker a workload over its reservation is
