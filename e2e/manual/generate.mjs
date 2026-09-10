@@ -82,13 +82,75 @@ function attachShots(manual, shots) {
 // only chapter numbers show (ending at the last chapter) and the index has no
 // page numbers, which is exactly what was reported.
 const PAGED_POLYFILL_PATH = join(HERE, '..', 'node_modules', 'pagedjs', 'dist', 'paged.polyfill.js');
-function withPagedjs(html) {
+// The two scripts the saved HTML loads, written beside it rather than inlined.
+// Inlining them was blocked wherever this file is served under a Content
+// Security Policy: the Server Console sends the inner host
+// `script-src 'self' '<hash of the nav-sync script>'`, which matches neither an
+// inline polyfill nor an inline postMessage, so Paged.js never ran and the
+// handbook was an unpaginated scroll in the browser (#451). Same-origin files
+// satisfy `script-src 'self'` with no `unsafe-inline` and no hash to keep in
+// step. They travel beside handbook.html — in the operators-handbook artifact,
+// in the console's public/handbook, and in build/ — so a standalone copy
+// paginates too as long as the files stay together.
+const PAGED_FILENAME = 'paged.polyfill.js';
+const NAVSYNC_FILENAME = 'handbook-navsync.js';
+
+// Tells the Bailey chrome wrap what to put in the browser tab. The wrap shows
+// this document in an iframe on the OUTER host, and the tab's title and icon
+// come from that outer document — so without this the tab reads "Bailey" with
+// no icon while the document inside is titled correctly. The contract
+// ({type:'bailey-nav', path, title, favicon}, honoured only from the paired
+// inner origin, favicon either same-origin or a data: URI) is defined in
+// chrome_wrap.go; the injector that normally sends it (inner_navsync.go) does
+// not reach this file, because serveServerConsole injects only into the SPA
+// shell and serves real files straight from FileServer.
+const NAVSYNC_SOURCE = `(function () {
+  if (window.parent === window) return;
+  function post() {
+    var l = document.querySelector('link[rel="icon"]');
+    try {
+      window.parent.postMessage({
+        type: 'bailey-nav',
+        path: location.pathname + location.search + location.hash,
+        title: document.title,
+        favicon: l && l.href ? l.href : ''
+      }, '*');
+    } catch (e) {}
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', post);
+  } else {
+    post();
+  }
+})();
+`;
+
+// The two sidecars answer different questions and are NOT written together.
+// handbook-navsync.js is generated from the constant above, so every build can
+// have it and every build wants it — #451 is about the browser tab, and a tab
+// reading "Bailey" with no icon is just as wrong on an unpaginated handbook.
+// The polyfill is an e2e dependency, and MANUAL_NO_PAGED is precisely the build
+// that does not have one to copy.
+function writeHandbookScripts({ paginate }) {
+  writeFileSync(join(BUILD, NAVSYNC_FILENAME), NAVSYNC_SOURCE);
+  if (!paginate) return;
   if (!existsSync(PAGED_POLYFILL_PATH)) {
     throw new Error(`Paged.js polyfill not found at ${PAGED_POLYFILL_PATH} — cannot paginate the handbook.`);
   }
-  // Escape any literal </script> so the inlined polyfill can't close its own tag.
-  const polyfill = readFileSync(PAGED_POLYFILL_PATH, 'utf8').replace(/<\/script>/gi, '<\\/script>');
-  return html.replace('</body>', `<script>${polyfill}</script></body>`);
+  copyFileSync(PAGED_POLYFILL_PATH, join(BUILD, PAGED_FILENAME));
+}
+
+// Only ever links what writeHandbookScripts actually wrote: a <script src> for
+// a file that isn't there is a 404 on every open.
+function withHandbookScripts(html, { paginate }) {
+  const tags = [`<script src="${NAVSYNC_FILENAME}"></script>`];
+  if (paginate) tags.push(`<script src="${PAGED_FILENAME}"></script>`);
+  return html.replace('</body>', `${tags.join('')}</body>`);
+}
+
+// The sidecars handbook.html loads, for whichever of them this build produced.
+function handbookScriptFiles({ paginate }) {
+  return paginate ? [NAVSYNC_FILENAME, PAGED_FILENAME] : [NAVSYNC_FILENAME];
 }
 
 /**
@@ -208,6 +270,17 @@ async function main() {
 
   // Write the CLEAN HTML first — it's the source the PDF is rendered from
   // (renderPdf injects + drives Paged.js itself).
+  // The Server Console's icon, inlined rather than linked: this file is also
+  // published standalone, where an absolute /favicon.svg would resolve to
+  // nothing. Inlining is what the screenshots already do. Fails loudly if it
+  // is missing — a handbook tab with no icon beside the console's is the kind
+  // of thing nobody notices until it ships.
+  const faviconPath = join(HERE, '..', '..', 'bitswan-server-console', 'public', 'favicon.svg');
+  if (!existsSync(faviconPath)) {
+    throw new Error(`Favicon not found at ${faviconPath} — cannot build the handbook head.`);
+  }
+  manual.faviconDataUri = `data:image/svg+xml;base64,${readFileSync(faviconPath).toString('base64')}`;
+
   const cleanHtml = renderHandbook(manual);
   const htmlPath = join(BUILD, 'handbook.html');
   writeFileSync(htmlPath, cleanHtml);
@@ -244,13 +317,18 @@ async function main() {
   // fails loudly when the polyfill is missing, so a release can't quietly ship
   // an unpaginated handbook. Either way the saved file is `savedHtml`, so the
   // measured classes are not lost with the pagination.
-  if (process.env.MANUAL_NO_PAGED === '1') {
-    writeFileSync(htmlPath, savedHtml);
-    console.log('MANUAL_NO_PAGED=1 — leaving the handbook unpaginated.');
-  } else {
-    writeFileSync(htmlPath, withPagedjs(savedHtml));
-    console.log('Embedded Paged.js into ' + htmlPath + ' for standalone pagination.');
-  }
+  //
+  // The polyfill is a sidecar file now rather than inlined, so this flag also
+  // decides whether it is written at all: copying it would throw on the very
+  // build the flag exists for (no node_modules, nothing to copy), and linking
+  // it without writing it would serve a document that 404s for its own
+  // pagination. The tab-naming script is unaffected and is always written.
+  const paginate = process.env.MANUAL_NO_PAGED !== '1';
+  writeHandbookScripts({ paginate });
+  writeFileSync(htmlPath, withHandbookScripts(savedHtml, { paginate }));
+  console.log(paginate
+    ? 'Wrote ' + htmlPath + ' with ' + PAGED_FILENAME + ' + ' + NAVSYNC_FILENAME + ' beside it.'
+    : 'MANUAL_NO_PAGED=1 — unpaginated, ' + NAVSYNC_FILENAME + ' beside it.');
 
   // Publish into the Server Console so the manual is built INTO the product:
   // the console serves these as static assets (/handbook/handbook.{html,pdf})
@@ -261,6 +339,11 @@ async function main() {
     mkdirSync(pub, { recursive: true });
     copyFileSync(htmlPath, join(pub, 'handbook.html'));
     if (existsSync(pdfPath)) copyFileSync(pdfPath, join(pub, 'handbook.pdf'));
+    // The scripts handbook.html loads. Without them the console serves an
+    // unpaginated document (#451) and a tab titled "Bailey" with no icon.
+    for (const f of handbookScriptFiles({ paginate })) {
+      copyFileSync(join(BUILD, f), join(pub, f));
+    }
     console.log('Published handbook into the Server Console (' + pub + ').');
   }
 }

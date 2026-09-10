@@ -554,13 +554,36 @@ function renderGuide(g, i) {
   </div></section>`;
 }
 
+// Paged.js's preview presentation — the sheets centred on a ground, with a drop
+// shadow — ships in an interface stylesheet that is separate from paged.polyfill.js,
+// so a document loading only the polyfill lays its sheets flush left on whatever
+// ground the print rules left behind. Nothing noticed until #451, because the
+// polyfill was CSP-blocked and the browser never paginated at all.
+//
+// This CANNOT go in CSS above: the polisher collects every <style> in the document
+// and re-emits it as print CSS, which both drops @media screen and applies our
+// print `html, body{ background:var(--paper) }` to the screen. It skips exactly two
+// kinds of stylesheet — media~="screen" and data-pagedjs-ignore — so the preview
+// gets its own block, marked both ways. Colours are spelled out rather than taken
+// from var(--paper) etc., since :root here is whatever the polisher re-emitted.
+const PREVIEW_CSS = `
+  /* !important because the polisher appends its re-emitted stylesheet AFTER
+     this one, so its print html, body{ background:var(--paper) } would
+     otherwise win on equal specificity and paper the whole ground over. */
+  html, body{ background:#33414f !important }
+  .pagedjs_pages{ padding:8px 0 }
+  .pagedjs_page{ margin:16px auto; box-shadow:0 24px 60px rgba(0,0,0,.35); border-radius:2px }
+`;
+
 /** Build the full handbook HTML from a manifest whose shots already carry dataUri. */
 export function renderHandbook(m) {
   const chapters = (m.chapters || []).map(renderChapter).join('\n');
   return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(m.title || "Bitswan — The Operator's Handbook")}</title>
-<style>${CSS}</style></head><body>
+<title>${esc(m.title || 'Bailey — Handbook')}</title>
+${m.faviconDataUri ? `<link rel="icon" type="image/svg+xml" href="${m.faviconDataUri}">` : ''}
+<style>${CSS}</style>
+<style media="screen" data-pagedjs-ignore>${PREVIEW_CSS}</style></head><body>
 ${renderCover(m)}
 ${renderThesis(m)}
 ${renderToc(m)}

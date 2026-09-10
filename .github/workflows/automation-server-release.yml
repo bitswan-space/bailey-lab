@@ -94,6 +94,15 @@ jobs:
           if gh run download "$run_id" -n operators-handbook -D "$tmp"; then
             cp -f "$tmp/handbook.html" "$dest/handbook.html"
             [ -f "$tmp/handbook.pdf" ] && cp -f "$tmp/handbook.pdf" "$dest/handbook.pdf" || true
+            # handbook.html loads these two; without them the console serves an
+            # unpaginated document and a tab with no title or icon (#451).
+            for js in paged.polyfill.js handbook-navsync.js; do
+              if [ -f "$tmp/$js" ]; then
+                cp -f "$tmp/$js" "$dest/$js"
+              else
+                echo "::warning::$js missing from the handbook artifact — the served handbook will not paginate"
+              fi
+            done
             echo "Baked handbook from bp-lifecycle-e2e run $run_id into $dest"
             ls -la "$dest"
           else
