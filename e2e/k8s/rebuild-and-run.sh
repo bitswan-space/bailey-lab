@@ -109,6 +109,12 @@ bash e2e/k8s/bringup-k8s.sh
 
 cd e2e
 rm -rf test-results
+# And the screenshots. They are the record of THIS run, and comparing them with
+# the Docker baseline is how two dead features were found — but a chapter that
+# does not run leaves the last run's shot in place, and a debug capture from a
+# past failure lingers for ever. Both make the comparison say things about a
+# run that did not happen.
+rm -rf manual/build/shots
 set +e
 npx playwright test --reporter=list
 suite=$?
