@@ -94,3 +94,48 @@ export function stateToDisplay(state: AutomationState | null | undefined): Displ
       return 'unknown';
   }
 }
+
+/**
+ * True when a container carrying this status is meant to be up right now.
+ *
+ * `restarting` belongs here — a crashlooping container is not asleep, it is
+ * trying — which is exactly why "up" and "healthy" are two different
+ * questions, and why nothing may answer the second one with this.
+ */
+export function isUpStatus(status: DisplayStatus): boolean {
+  return (
+    status === 'running' ||
+    status === 'restarting' ||
+    status === 'building' ||
+    status === 'deployed'
+  );
+}
+
+/**
+ * How alarming each status is. Ordering exists for one reason: when several
+ * records collapse onto one row (replicas, the blue/green slots of a
+ * production member), the row must show the WORST state observed, never the
+ * best. Preferring the best is what let a business process whose production
+ * slots were both restarting report itself as running (bailey-lab #463).
+ *
+ * `unknown` and `not-deployed` sit at the bottom because they are the absence
+ * of an observation: they must never outrank something actually seen.
+ */
+const STATUS_SEVERITY: Record<DisplayStatus, number> = {
+  failed: 6,
+  stopped: 5,
+  restarting: 4,
+  building: 3,
+  running: 2,
+  deployed: 2,
+  unknown: 1,
+  'not-deployed': 0,
+};
+
+/** The least healthy of the given statuses — see STATUS_SEVERITY. */
+export function worstStatus(...statuses: DisplayStatus[]): DisplayStatus {
+  return statuses.reduce(
+    (worst, s) => (STATUS_SEVERITY[s] > STATUS_SEVERITY[worst] ? s : worst),
+    'not-deployed',
+  );
+}

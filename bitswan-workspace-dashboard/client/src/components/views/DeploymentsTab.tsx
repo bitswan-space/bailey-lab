@@ -69,7 +69,7 @@ import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import type { ServiceType, StagingGate, StagingLogEntry, StagingSignoff } from '@/lib/api';
 import { promoteBpWithToast, watchDeployTask } from '@/lib/deployBp';
 import { useLastDeploy } from '@/hooks/useLastDeploy';
-import { STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
+import { isUpStatus, STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
 import {
   api,
   errorMessage,
@@ -989,6 +989,10 @@ interface Member {
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
   memReservationMB: number | null;
   memOver: boolean;
+  // Times Docker's restart policy has brought this member's container back up.
+  // Absent when the driver did not read it — never 0 in that case, because a
+  // container that has never died is a different claim (bailey-lab #463).
+  restartCount?: number;
   // Why this member is asleep — 'memory-pressure' | 'manual' — or null when it
   // has a running container. Drives the stage's "Asleep" attribution.
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
@@ -1078,7 +1082,10 @@ function ContainerCard({
 }) {
   const [open, setOpen] = useState<'logs' | 'inspect' | null>(null);
   const meta = STATUS_META[m.display];
-  const running = m.display === 'running';
+  // Up, not healthy: a restarting container is running (over and over), so the
+  // useful action on it is Stop. Offering Start would be answering a question
+  // nobody asked and implying it is down.
+  const running = isUpStatus(m.display);
   const KindIcon = m.expose ? Globe : Boxes;
   const toggle = (p: 'logs' | 'inspect') => setOpen((cur) => (cur === p ? null : p));
   return (
@@ -1102,6 +1109,15 @@ function ContainerCard({
           <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
             <Layers className="size-3" aria-hidden />
             {m.replicas}
+          </span>
+        )}
+        {!!m.restartCount && (
+          <span
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-violet-600"
+            title={`Docker's restart policy has brought this container back up ${m.restartCount.toLocaleString()} times — it keeps dying`}
+          >
+            <RotateCcw className="size-3" aria-hidden />
+            {m.restartCount.toLocaleString()}
           </span>
         )}
         {m.memReservationMB != null && (
@@ -1214,11 +1230,7 @@ function ContainersSection({
   const [busy, setBusy] = useState(false);
   // "Running" is the live container state, NOT whether a deploy record exists —
   // an asleep stage still has its records (present=true) but no running container.
-  const isUp = (m: Member) =>
-    m.display === 'running' ||
-    m.display === 'restarting' ||
-    m.display === 'building' ||
-    m.display === 'deployed';
+  const isUp = (m: Member) => isUpStatus(m.display);
   const anyRunning = members.some(isUp);
   const asleep = members.length > 0 && members.every((m) => !isUp(m));
   // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
@@ -2525,6 +2537,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         memUsageBytes: a?.mem_usage_bytes ?? null,
         memReservationMB: a?.mem_reservation_mb ?? null,
         memOver: a?.mem_over_reservation ?? false,
+        restartCount: a?.restart_count ?? undefined,
         asleepReason: a?.asleep_reason ?? null,
       };
     });
@@ -2661,20 +2674,27 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   );
 
   const friendly = useMemo(() => {
-    const isUp = (m: Member) =>
-      m.display === 'running' ||
-      m.display === 'restarting' ||
-      m.display === 'building' ||
-      m.display === 'deployed';
     const failing = members.filter((m) => m.display === 'failed' || m.display === 'stopped').length;
+    // A container in a restart loop is UP (it keeps being started) but it is
+    // NOT healthy, and this line used to call it healthy: a business process
+    // whose production had been crashlooping 23,032 times over two months read
+    // "Healthy" in green the whole time (bailey-lab #463).
+    const restarting = members.filter((m) => m.display === 'restarting').length;
     if (!currentEntry)
       return { label: 'Not deployed yet', color: 'text-muted-foreground', dot: 'bg-zinc-400', ring: 'ring-zinc-400/10' };
     // Deployed but nothing running = intentionally asleep (manual sleep or the
     // on-demand memory sweep). Distinct from a failure; wakes on access.
-    if (members.length > 0 && !members.some(isUp))
+    if (members.length > 0 && !members.some((m) => isUpStatus(m.display)))
       return { label: 'Asleep', color: 'text-sky-600', dot: 'bg-sky-500', ring: 'ring-sky-500/10' };
     if (failing > 0)
       return { label: `${failing} service${failing === 1 ? '' : 's'} not running`, color: 'text-red-600', dot: 'bg-red-500', ring: 'ring-red-500/10' };
+    if (restarting > 0)
+      return {
+        label: `${restarting} service${restarting === 1 ? '' : 's'} restarting`,
+        color: 'text-violet-600',
+        dot: 'bg-violet-500',
+        ring: 'ring-violet-500/10',
+      };
     return { label: 'Healthy', color: 'text-emerald-600', dot: 'bg-emerald-500', ring: 'ring-emerald-500/10' };
   }, [members, currentEntry]);
 
@@ -3065,10 +3085,15 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   // on-demand host wakes it (loading screen → app). Only when there
                   // is no URL at all is it truly unreachable.
                   const openable = !!f.url;
+                  // "Asleep" is a promise that opening it wakes it. A container
+                  // in a restart loop is not asleep and opening it will not fix
+                  // it, so it says what is actually happening (bailey-lab #463).
                   const subtitle = f.url
                     ? running
                       ? f.url.replace('https://', '')
-                      : 'Asleep — opens with a loading screen'
+                      : f.display === 'restarting'
+                        ? 'Restarting — the container keeps dying'
+                        : 'Asleep — opens with a loading screen'
                     : 'Not deployed';
                   const inner = (
                     <>
