@@ -1,6 +1,7 @@
 import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
+  AlertTriangle,
   Archive,
   ArrowRight,
   Boxes,
@@ -70,6 +71,7 @@ import type { ServiceType, StagingGate, StagingLogEntry, StagingSignoff } from '
 import { promoteBpWithToast, watchDeployTask } from '@/lib/deployBp';
 import { useLastDeploy } from '@/hooks/useLastDeploy';
 import { isUpStatus, STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
+import { stageHealth, type StageHealthKind } from '@/lib/stageHealth';
 import {
   api,
   errorMessage,
@@ -289,17 +291,37 @@ function SectionTab({
   );
 }
 
+// What the badge on a pipeline node says. A ✓ is reserved for a stage whose
+// containers were SEEN and are all fine; every other case gets its own marker
+// or a plain grey dot, so the tick never stands in for "we did not look".
+const STAGE_BADGE: Record<StageHealthKind, { dot: string; title: string }> = {
+  healthy: { dot: 'bg-emerald-500', title: 'Deployed and running' },
+  restarting: { dot: 'bg-violet-500', title: 'Deployed — a container keeps restarting' },
+  failing: { dot: 'bg-red-500', title: 'Deployed — a container is not running' },
+  asleep: { dot: 'bg-sky-500', title: 'Deployed, asleep — it wakes on access' },
+  unknown: { dot: 'bg-zinc-300', title: 'Deployed — open the stage to see its containers' },
+  'not-deployed': { dot: 'bg-zinc-300', title: 'Nothing deployed here yet' },
+};
+
 // ── Pipeline node ───────────────────────────────────────────────────────────
 // Label sits ABOVE the circle; the active stage gets a brand-blue ring and a
 // short vertical "tail" dropping toward the card below (wireframe StageNode).
 function StageNode({
   stage,
   deployed,
+  health,
   active,
   onClick,
 }: {
   stage: { id: StageId; label: string; icon: LucideIcon };
   deployed: boolean;
+  /**
+   * What the stage's containers were observed doing. The badge renders THIS,
+   * while the emerald fill renders `deployed` — the two are different claims,
+   * and the badge used to be a second copy of the first one, so a crashlooping
+   * production wore a green tick (bailey-lab #463).
+   */
+  health: StageHealthKind;
   active: boolean;
   onClick: () => void;
 }) {
@@ -328,11 +350,18 @@ function StageNode({
           )}
         >
           <Icon className="size-[22px]" aria-hidden />
-          <span className="absolute -bottom-0.5 -right-0.5 flex size-[18px] items-center justify-center rounded-full border-2 border-background bg-background shadow-sm">
-            {deployed ? (
+          <span
+            className="absolute -bottom-0.5 -right-0.5 flex size-[18px] items-center justify-center rounded-full border-2 border-background bg-background shadow-sm"
+            title={STAGE_BADGE[health].title}
+          >
+            {health === 'healthy' ? (
               <Check className="size-3 text-emerald-500" aria-hidden />
+            ) : health === 'restarting' ? (
+              <RotateCcw className="size-3 text-violet-500" aria-hidden />
+            ) : health === 'failing' ? (
+              <AlertTriangle className="size-3 text-red-500" aria-hidden />
             ) : (
-              <span className="size-1.5 rounded-full bg-zinc-300" />
+              <span className={cn('size-1.5 rounded-full', STAGE_BADGE[health].dot)} />
             )}
           </span>
         </span>
@@ -2673,30 +2702,38 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     [],
   );
 
-  const friendly = useMemo(() => {
-    const failing = members.filter((m) => m.display === 'failed' || m.display === 'stopped').length;
-    // A container in a restart loop is UP (it keeps being started) but it is
-    // NOT healthy, and this line used to call it healthy: a business process
-    // whose production had been crashlooping 23,032 times over two months read
-    // "Healthy" in green the whole time (bailey-lab #463).
-    const restarting = members.filter((m) => m.display === 'restarting').length;
-    if (!currentEntry)
-      return { label: 'Not deployed yet', color: 'text-muted-foreground', dot: 'bg-zinc-400', ring: 'ring-zinc-400/10' };
-    // Deployed but nothing running = intentionally asleep (manual sleep or the
-    // on-demand memory sweep). Distinct from a failure; wakes on access.
-    if (members.length > 0 && !members.some((m) => isUpStatus(m.display)))
-      return { label: 'Asleep', color: 'text-sky-600', dot: 'bg-sky-500', ring: 'ring-sky-500/10' };
-    if (failing > 0)
-      return { label: `${failing} service${failing === 1 ? '' : 's'} not running`, color: 'text-red-600', dot: 'bg-red-500', ring: 'ring-red-500/10' };
-    if (restarting > 0)
-      return {
-        label: `${restarting} service${restarting === 1 ? '' : 's'} restarting`,
-        color: 'text-violet-600',
-        dot: 'bg-violet-500',
-        ring: 'ring-violet-500/10',
-      };
-    return { label: 'Healthy', color: 'text-emerald-600', dot: 'bg-emerald-500', ring: 'ring-emerald-500/10' };
-  }, [members, currentEntry]);
+  // The card's status line and the pipeline node's badge are the same
+  // question, so they come from the same function — see lib/stageHealth.ts for
+  // why that matters. "Deployed" here means "there is a current deploy entry".
+  const friendly = useMemo(
+    () => stageHealth({ deployed: !!currentEntry, statuses: members.map((m) => m.display) }),
+    [members, currentEntry],
+  );
+
+  // Container statuses per stage, for the pipeline badges. A stage's current
+  // deploy entry names its members; the automations snapshot says what each
+  // member's container is actually doing.
+  //
+  // Returns undefined when that cannot be resolved — see stageHealth: the
+  // badge then claims nothing. Disaster recovery is the case that needs it.
+  // Its containers are the STANDBY slot's (`<id>@<slot>`) and the slot name is
+  // only fetched while DR is the open view, so anywhere else we would be
+  // reading the live slot's containers and calling them DR's.
+  const statusesForStage = useCallback(
+    // eslint-disable-next-line no-restricted-syntax -- undefined IS the answer here: "not resolved", which stageHealth reads as a claim it must not make
+    (id: StageId): DisplayStatus[] | undefined => {
+      if (id === 'dr' && !drSlot) return undefined;
+      const h = byStage[stageDataId(id)];
+      const cur = h?.history.find((e) => e.commit === h.current) ?? h?.history[0];
+      if (!cur) return undefined;
+      return Object.keys(cur.members ?? {}).map((mid) => {
+        const lookupId = id === 'dr' && drSlot ? `${mid}@${drSlot}` : mid;
+        const a = automations.find((x) => x.deployment_id === lookupId);
+        return a?.deployment_id ? stateToDisplay(a.state) : 'not-deployed';
+      });
+    },
+    [byStage, automations, drSlot],
+  );
 
   // "{N} containers promote together" — the BP's container count, stable across
   // stages (max members seen on any stage's current deployment).
@@ -2875,6 +2912,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 <StageNode
                   stage={s}
                   deployed={deployed}
+                  health={stageHealth({ deployed, statuses: statusesForStage(s.id) }).kind}
                   active={isActive}
                   onClick={() => setActiveStage(s.id)}
                 />
