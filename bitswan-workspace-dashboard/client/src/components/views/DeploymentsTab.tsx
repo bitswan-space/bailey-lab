@@ -1281,7 +1281,12 @@ function ContainersSection({
   // this stage is asleep" is the ordinary case — and it used to be the one case
   // with no way back (see lib/stagePower.ts).
   const powerState = stagePower(
-    members.map((m) => ({ up: isUp(m), present: m.present })),
+    members.map((m) => ({
+      asleep: m.display === 'asleep',
+      up: isUp(m),
+      present: m.present,
+      expose: m.expose,
+    })),
     asleepReason ?? undefined,
   );
   // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
