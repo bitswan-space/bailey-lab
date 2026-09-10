@@ -262,13 +262,26 @@ else
   fi
 fi
 
-mem=$($KUBECTL -n "$NS" exec deploy/bailey -c daemon -- \
-  curl -sS -m 10 http://127.0.0.1:9080/bailey/api/admin/resources 2>/dev/null |
-  python3 -c 'import json,sys; print(json.load(sys.stdin).get("host_total_bytes", 0))' 2>/dev/null)
-case "${mem:-0}" in
-  ''|0) fail "resource management reports no memory budget — the admin page is empty or erroring" ;;
-  *)    pass "resource management reports a budget of $mem bytes" ;;
-esac
+# The resources API sits behind the device-trust gate, so this cannot ask it
+# without a session — and faking one to satisfy a check would be worse than not
+# checking. Two things it can observe honestly instead: that the namespace has
+# a budget at all, since without one the page has nothing to report; and that
+# the governor is not failing to take an inventory, which is the symptom that
+# had it erroring every five minutes while every chapter stayed green.
+quota=$($KUBECTL -n "$NS" get resourcequota -o jsonpath='{.items[0].status.hard.requests\.memory}' 2>/dev/null)
+if [ -n "$quota" ]; then
+  pass "the namespace has a memory budget ($quota)"
+else
+  fail "the namespace has no memory quota — the governor has no ceiling and the admin page nothing to show"
+fi
+
+inv=$($KUBECTL -n "$NS" logs deploy/bailey -c daemon --tail=2000 2>/dev/null |
+  grep -cE 'memory sweep: inventory failed|memory admission check failed' || true)
+if [ "${inv:-0}" -gt 0 ]; then
+  fail "the memory governor failed to take an inventory ${inv} time(s) — see the daemon log"
+else
+  pass "the memory governor is taking inventories"
+fi
 
 echo "=== nothing crash-looped ==="
 restarts=$($KUBECTL -n "$NS" get pods \
