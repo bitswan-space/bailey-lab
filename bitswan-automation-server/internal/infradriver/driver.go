@@ -206,6 +206,16 @@ type Container struct {
 	Image   string            `json:"image"`
 	Created int64             `json:"created"` // unix seconds (gitops overlays created_at from this)
 	Labels  map[string]string `json:"labels,omitempty"`
+	// How many times Docker's restart policy has brought this container back
+	// up after it died. NIL means "not read", never zero — a count is only
+	// fetched for containers Docker reports as restarting, and a container can
+	// vanish before it is read. Callers must render nil as unknown, because
+	// "restarted 0 times" is a different (and stronger) claim than silence.
+	//
+	// Only policy-driven restarts count: an operator's `docker restart` leaves
+	// it at 0 (measured), so a non-zero value always means the container died
+	// on its own.
+	RestartCount *int `json:"restart_count,omitempty"`
 }
 
 // ContainerStat is one container's live memory usage (from `docker stats`). Only

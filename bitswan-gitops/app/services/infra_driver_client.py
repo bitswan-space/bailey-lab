@@ -133,6 +133,11 @@ class Container:
     image: str
     created: int = 0
     labels: dict = field(default_factory=dict)
+    # Times Docker's restart policy has brought this container back up. None
+    # means "not read" — the driver only reads it for containers it sees
+    # restarting — and must stay distinct from 0, which is a container that
+    # has never died. `or 0` would erase exactly that difference.
+    restart_count: int | None = None
 
     @classmethod
     def from_json(cls, d: dict) -> "Container":
@@ -144,6 +149,7 @@ class Container:
             image=d.get("image", ""),
             created=d.get("created", 0) or 0,
             labels=d.get("labels") or {},
+            restart_count=d.get("restart_count"),
         )
 
     def to_docker_dict(self) -> dict:
@@ -158,6 +164,7 @@ class Container:
             "Created": self.created,
             "Image": self.image,
             "Labels": self.labels,
+            "RestartCount": self.restart_count,
         }
 
 

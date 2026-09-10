@@ -3,6 +3,8 @@ package dockerdriver
 import (
 	"strings"
 	"testing"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
 )
 
 func TestParseInspect(t *testing.T) {
@@ -87,5 +89,63 @@ func TestParsePS(t *testing.T) {
 	}
 	if got[2].State != "exited" {
 		t.Errorf("state = %q, want exited", got[2].State)
+	}
+}
+
+func TestRestartingIDsIsTheOnlySubsetInspected(t *testing.T) {
+	// The point of the subset: a healthy workspace must cost ZERO extra docker
+	// commands, because the count comes from `docker inspect` — the call
+	// ContainerList deliberately does not make per container.
+	healthy := []infradriver.Container{
+		{ID: "a", State: "running"},
+		{ID: "b", State: "exited"},
+		{ID: "c", State: "created"},
+		{ID: "d", State: "paused"},
+	}
+	if got := restartingIDs(healthy); len(got) != 0 {
+		t.Errorf("healthy workspace would inspect %v, want nothing", got)
+	}
+	mixed := []infradriver.Container{
+		{ID: "a", State: "running"},
+		{ID: "b", State: "restarting"},
+		{ID: "c", State: "exited"},
+		{ID: "d", State: "restarting"},
+	}
+	got := restartingIDs(mixed)
+	if len(got) != 2 || got[0] != "b" || got[1] != "d" {
+		t.Errorf("restartingIDs = %v, want [b d]", got)
+	}
+}
+
+func TestParseRestartCounts(t *testing.T) {
+	raw := []byte("abc123" + psSep + "23032\n" + "def456" + psSep + "0\n")
+	got, err := parseRestartCounts(raw)
+	if err != nil {
+		t.Fatalf("parseRestartCounts: %v", err)
+	}
+	if got["abc123"] != 23032 {
+		t.Errorf("abc123 = %d, want 23032", got["abc123"])
+	}
+	// A container really can report 0 while restarting (the first crash has
+	// not been counted yet); that is a read value, not an absent one.
+	n, ok := got["def456"]
+	if !ok || n != 0 {
+		t.Errorf("def456 = %d (present=%v), want 0 present", n, ok)
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d entries, want 2", len(got))
+	}
+}
+
+func TestParseRestartCountsRefusesGarbageRatherThanGuessing(t *testing.T) {
+	// A count we cannot read must not become 0 — "restarted 0 times" is a
+	// claim, and the whole bug behind #463 was the UI making claims like it.
+	for _, raw := range []string{
+		"abc123" + psSep + "not-a-number\n",
+		"abc123-with-no-separator\n",
+	} {
+		if _, err := parseRestartCounts([]byte(raw)); err == nil {
+			t.Errorf("parseRestartCounts(%q) = no error, want one", raw)
+		}
 	}
 }

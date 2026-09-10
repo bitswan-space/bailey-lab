@@ -912,6 +912,7 @@ class AutomationService:
             a.created_at = created_at
             a.state = container.get("State", "unknown")
             a.status = container.get("Status", "")
+            a.restart_count = container.get("RestartCount")
             a.automation_url = url
 
             # Memory overlay for the Containers tab: reservation + policy from the
