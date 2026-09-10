@@ -167,6 +167,14 @@ export function worstStatus(...statuses: DisplayStatus[]): DisplayStatus {
  */
 export function displayFor(a?: DeployedAutomation): DisplayStatus {
   if (!a?.deployment_id) return 'not-deployed';
-  if (a.active === false) return 'asleep';
+  // TWO independent signs of sleep, because either can arrive without the
+  // other: gitops marks the deployment inactive, and it records WHY it was put
+  // to sleep. Measured on a live workspace: an evicted deployment came back
+  // over the wire as `active: true` with `asleep_reason: "manual"`, because
+  // `active` is baked into the automations cache when it is built and sleeping
+  // only rewrites bitswan.yaml. The reason was the only thing that gave it
+  // away. (That staleness is fixed in gitops too — this reads both so a
+  // dashboard in front of an older gitops still tells the truth.)
+  if (a.active === false || a.asleep_reason) return 'asleep';
   return stateToDisplay(a.state);
 }

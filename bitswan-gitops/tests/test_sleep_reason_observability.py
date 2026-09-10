@@ -85,3 +85,63 @@ def test_default_reason_is_memory_pressure(tmp_path, monkeypatch):
 
     asyncio.run(svc._evict_instance_deployment("d2"))
     assert svc.sleep_reason_for("d2") == "memory-pressure"
+
+
+async def test_automations_list_reports_a_slept_deployment_as_inactive(
+    tmp_path, monkeypatch
+):
+    """`active` must survive the cache.
+
+    The automations list is served from a static cache, and `active` is baked
+    into it when the cache is built. Sleeping a deployment only rewrites
+    bitswan.yaml — so an evicted deployment went on being reported as
+    `active: true` (measured live), and a dashboard reading that field could not
+    tell "asleep" from "no information", which is how a stage with a sleeping
+    service still called itself Healthy.
+    """
+    svc = _svc(tmp_path)
+    (tmp_path / "bitswan.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "deployments": {
+                    "frontend-bp-staging": {
+                        "active": False,  # slept
+                        "automation_name": "frontend",
+                        "context": "bp",
+                        "stage": "staging",
+                        "relative_path": "copies/main/bp/frontend",
+                    }
+                }
+            }
+        )
+    )
+    # The cache still holds the entry as it was when it was built: active.
+    from app.models import DeployedAutomation
+
+    stale = DeployedAutomation(
+        container_id=None,
+        endpoint_name=None,
+        created_at=None,
+        name="frontend-bp-staging",
+        state=None,
+        status=None,
+        deployment_id="frontend-bp-staging",
+        active=True,
+        automation_url=None,
+        relative_path="copies/main/bp/frontend",
+        stage="staging",
+    )
+    svc._cache = {"main": [stale]}
+
+    async def _no_containers():
+        return []
+
+    async def _no_mem():
+        return {}
+
+    monkeypatch.setattr(svc, "get_containers", _no_containers)
+    monkeypatch.setattr(svc, "_container_mem_usage", _no_mem, raising=False)
+
+    result = await svc.get_automations()
+    entry = next(a for a in result if a.deployment_id == "frontend-bp-staging")
+    assert entry.active is False, "the list still claimed a slept deployment was active"
