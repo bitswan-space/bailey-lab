@@ -30,14 +30,31 @@ for attempt in 1 2 3; do
   sleep 5
 done
 mark "e2e: playwright install chromium"
-npm test || true   # always build the manual even if a chapter fails the SLA
+# The walkthrough's verdict IS this run's verdict: run-qemu.sh propagates our
+# exit status, so swallowing it (this was `npm test || true`) threw away every
+# regression the suite exists to catch. It is RECORDED rather than propagated
+# here so the two steps below still run — the handbook built from whatever
+# screenshots the run did capture is the most useful thing a failed run leaves
+# behind, and the timeline profile is how a slow chapter gets found at all.
+test_rc=0
+npm test || test_rc=$?
 # No aggregate mark here — the walkthrough records its OWN per-chapter timings
 # into the same timeline (walkthrough: <chapter>), so the slowest-first profile
 # pinpoints which user-facing step is slow. An aggregate would double-count them.
 
 echo "=== generate the Operator's Handbook from the captured screenshots ==="
-node manual/generate.mjs || true
+# A missing screenshot is not an error here (generate.mjs renders that slot
+# empty), so a failure means the generator itself is broken — a syntax error in
+# content.mjs, or the Paged.js polyfill absent. Nothing else in the tree catches
+# that, so it fails the run too.
+manual_rc=0
+node manual/generate.mjs || manual_rc=$?
 mark "e2e: generate handbook"
 ls -la /repo/e2e/manual/build/ 2>/dev/null || true
 
 tl_profile
+
+[ "$test_rc" = 0 ] || echo "FAILED: the Playwright walkthrough exited $test_rc" >&2
+[ "$manual_rc" = 0 ] || echo "FAILED: handbook generation exited $manual_rc" >&2
+[ "$test_rc" = 0 ] || exit "$test_rc"
+exit "$manual_rc"

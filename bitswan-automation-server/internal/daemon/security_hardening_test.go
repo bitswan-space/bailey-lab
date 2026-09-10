@@ -16,6 +16,12 @@ import (
 // $HOME/.config/bitswan so ProtectedHostnameDomain() resolves a domain
 // (callerOwnsWorkspace needs one to build the gitops host). Returns the
 // configured domain.
+//
+// The domain arrives under [aoc] with no credentials — the shape a server
+// registered with an AOC has, and the shape every real deployment resolves
+// through. It used to be written as the top-level protected_domain, which
+// ProtectedHostnameDomain() consults FIRST: that left the fallback branch
+// untested here, in the same way it left it unexercised in the e2e.
 func writeTestConfig(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(os.Getenv("HOME"), ".config", "bitswan")
@@ -23,7 +29,7 @@ func writeTestConfig(t *testing.T) string {
 		t.Fatal(err)
 	}
 	const domain = "test.example.com"
-	body := "protected_domain = \"" + domain + "\"\n"
+	body := "[aoc]\ndomain = \"" + domain + "\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "automation_server_config.toml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

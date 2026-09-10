@@ -88,6 +88,11 @@ The guest provisioning (`provision.sh` → docker, Go, Node, dnsmasq, mkcert) an
 the in-guest run (`run-e2e.sh` → `bringup.sh` + `npm test` + `manual/generate.mjs`)
 are shared by both runners.
 
+A failing walkthrough fails the run: `run-e2e.sh` exits with the suite's status
+and `run-qemu.sh` propagates it. The handbook is still generated first, from
+whatever screenshots the run did capture, so a red run still leaves the manual
+and the Playwright report behind.
+
 ---
 
 ## Run just the generator (no stack)
