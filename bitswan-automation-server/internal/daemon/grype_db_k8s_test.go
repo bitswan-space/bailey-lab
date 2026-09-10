@@ -27,6 +27,13 @@ func TestTheRefreshJobMatchesTheDockerContract(t *testing.T) {
 		t.Errorf("refresh runs %v, not the pinned gitops image", got)
 	}
 
+	// And under the platform's pull policy. Kubernetes defaults a :latest tag
+	// to Always, which sends a locally built image to a registry that has
+	// never heard of it.
+	if c["imagePullPolicy"] == nil || c["imagePullPolicy"] == "" {
+		t.Error("the refresh declares no imagePullPolicy; :latest would be pulled from a registry")
+	}
+
 	var cacheDir string
 	for _, e := range c["env"].([]interface{}) {
 		em, _ := e.(map[string]interface{})

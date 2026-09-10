@@ -92,9 +92,17 @@ func grypeDBJob(image, claim string) k8srender.Object {
 					"automountServiceAccountToken": false,
 					"containers": []interface{}{
 						map[string]interface{}{
-							"name":    "refresh",
-							"image":   image,
-							"command": []interface{}{"sh", "-c", grypeRefreshScript},
+							"name":  "refresh",
+							"image": image,
+							// The same policy every other workload here runs
+							// under. Without it Kubernetes defaults a :latest
+							// tag to Always and goes to a registry for an image
+							// that was built locally and never published —
+							// which is a refresh stuck on ImagePullBackOff and
+							// a Bailey that never gets a vulnerability
+							// database.
+							"imagePullPolicy": k8sPullPolicy(),
+							"command":         []interface{}{"sh", "-c", grypeRefreshScript},
 							"env": []interface{}{
 								map[string]interface{}{"name": "GRYPE_DB_CACHE_DIR", "value": "/grype-db"},
 							},
