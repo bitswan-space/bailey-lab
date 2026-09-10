@@ -213,6 +213,14 @@ export function Terminal({ wsUrl, onExit, onOpen, onUploadFiles, onInputWriter }
     // the cleanup would fire `onExit` on a session that never actually started,
     // and the parent would mark it ended before the re-mounted WS has a chance.
     let wasOpened = false;
+    // Set by OUR OWN teardown, immediately before we close the socket. That
+    // close is ours, not the far end's, so it is not reported: strict mode's
+    // mount → cleanup → mount would otherwise read as a session that started
+    // and died, and so would switching business process before the socket
+    // opens. Every OTHER close — including one on a socket still in
+    // CONNECTING, which is what a gate-declined handshake looks like — is news
+    // the parent has to act on.
+    let disposing = false;
     // eslint-disable-next-line no-restricted-syntax -- null = no nudge scheduled
     let redrawNudge: ReturnType<typeof setTimeout> | null = null;
 
@@ -284,7 +292,7 @@ export function Terminal({ wsUrl, onExit, onOpen, onUploadFiles, onInputWriter }
       // dot stuck on "Connecting to agent…" for good, with no retry and no
       // error. The parent's relaunch budget handles it from here and lands on
       // an error with a Retry once the attempts run out.
-      onExitRef.current?.({ code: ev.code, reason: ev.reason });
+      if (!disposing) onExitRef.current?.({ code: ev.code, reason: ev.reason });
     });
 
     const encoder = new TextEncoder();
@@ -379,6 +387,7 @@ export function Terminal({ wsUrl, onExit, onOpen, onUploadFiles, onInputWriter }
         observer.disconnect();
         dataDisposable.dispose();
         if (wasOpened) onInputWriterRef.current?.(null);
+        disposing = true;
         ws.close();
         term.dispose();
       };

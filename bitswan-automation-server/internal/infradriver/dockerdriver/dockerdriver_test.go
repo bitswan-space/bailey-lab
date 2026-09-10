@@ -113,10 +113,7 @@ func TestEveryListedContainerIsInspectedInOneExec(t *testing.T) {
 
 func TestParseRestartCounts(t *testing.T) {
 	raw := []byte("abc123" + psSep + "23032\n" + "def456" + psSep + "0\n")
-	got, err := parseRestartCounts(raw)
-	if err != nil {
-		t.Fatalf("parseRestartCounts: %v", err)
-	}
+	got := parseRestartCounts(raw)
 	if got["abc123"] != 23032 {
 		t.Errorf("abc123 = %d, want 23032", got["abc123"])
 	}
@@ -131,15 +128,24 @@ func TestParseRestartCounts(t *testing.T) {
 	}
 }
 
-func TestParseRestartCountsRefusesGarbageRatherThanGuessing(t *testing.T) {
+func TestParseRestartCountsNeverGuessesAndLosesOnlyTheBadLine(t *testing.T) {
 	// A count we cannot read must not become 0 — "restarted 0 times" is a
 	// claim, and the whole bug behind #463 was the UI making claims like it.
-	for _, raw := range []string{
-		"abc123" + psSep + "not-a-number\n",
-		"abc123-with-no-separator\n",
-	} {
-		if _, err := parseRestartCounts([]byte(raw)); err == nil {
-			t.Errorf("parseRestartCounts(%q) = no error, want one", raw)
-		}
+	// But one unreadable line must not cost every OTHER container its count:
+	// the crashlooper this feature exists for would be the one to lose it.
+	raw := []byte(strings.Join([]string{
+		"abc123" + psSep + "not-a-number",
+		"noseparatorhere",
+		"def456" + psSep + "23032",
+	}, "\n") + "\n")
+	got := parseRestartCounts(raw)
+	if _, ok := got["abc123"]; ok {
+		t.Error("a count that could not be read must be absent, not guessed at")
+	}
+	if got["def456"] != 23032 {
+		t.Errorf("def456 = %d, want 23032 — a bad line elsewhere must not cost it", got["def456"])
+	}
+	if len(got) != 1 {
+		t.Errorf("got %d counts, want 1", len(got))
 	}
 }

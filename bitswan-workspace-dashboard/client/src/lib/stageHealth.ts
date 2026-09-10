@@ -136,6 +136,16 @@ export function stageHealth({
       ...HEALTH['partly-asleep'],
       label: `${services(asleep)} of ${statuses.length} asleep`,
     };
+  // A member nobody can account for — its container removed out of band, a
+  // failed `compose up` that never created it, an entry missing from the
+  // snapshot — leaves the stage short of a service while the others run. That
+  // is not Healthy either: the tick is for a stage that was seen whole.
+  const unaccounted = statuses.filter((s) => s === 'unknown' || s === 'not-deployed').length;
+  if (unaccounted > 0 && unaccounted < statuses.length)
+    return {
+      ...HEALTH.unknown,
+      label: `${services(unaccounted)} of ${statuses.length} not accounted for`,
+    };
   // Healthy is a claim, and it needs an observation behind it. Nothing failing
   // and nothing asleep is NOT the same as something running: on the first paint
   // the automations snapshot is still empty, so every member reads

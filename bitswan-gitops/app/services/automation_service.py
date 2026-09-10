@@ -853,17 +853,24 @@ class AutomationService:
         the operator has to see the worst of them, which is the same rule the
         dashboard applies when it collapses records onto a row.
         """
-        # Worst first. An unrecognised state ranks above "running" but below a
-        # known fault: it is an observation we cannot read, not a clean bill.
+        # Worst first.
         order = ["dead", "exited", "failed", "restarting", "paused", "created", "starting", "running"]
+
+        def rank(state: str) -> float:
+            try:
+                return float(order.index(state))
+            except ValueError:
+                # Outside the vocabulary — `removing`, or whatever Docker adds
+                # next. It ranks just above "running" and BELOW every fault: it
+                # is an observation we cannot read, which must not be mistaken
+                # for a clean bill, and must not hide a replica we CAN read as
+                # dead. (Same order as the dashboard's worstStatus, where
+                # 'unknown' sits at the bottom of the observed states.)
+                return order.index("running") - 0.5
+
         if not current:
             return incoming
-        try:
-            return current if order.index(current) <= order.index(incoming) else incoming
-        except ValueError:
-            # Something outside the vocabulary — keep whichever is unknown, so
-            # it cannot be mistaken for a healthy reading.
-            return current if current not in order else incoming
+        return current if rank(current) <= rank(incoming) else incoming
 
     def _apply_docker_overlay(
         self,
@@ -905,6 +912,13 @@ class AutomationService:
                     a.state = None
                     a.container_id = None
                     a.restart_count = None
+                    # …including the memory reading. `docker stats` only reports
+                    # RUNNING containers, so a standby slot that is down would
+                    # otherwise keep showing the live slot's usage — and its red
+                    # over-reservation flag — attributed to a container that is
+                    # not even up.
+                    a.mem_usage_bytes = None
+                    a.mem_over_reservation = False
                     entries.append(a)
                     by_id[deployment_id] = a
                 else:

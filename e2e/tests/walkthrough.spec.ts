@@ -598,7 +598,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const btn = await d.getByRole('button', { name: /Working|^Deploy$|Promote|Switching|Starting/i }).first().textContent({ timeout: 1500 }).catch(() => '');
     if (btn && btn.trim()) parts.push('btn:' + btn.trim());
     // The stage card status line + version (changes when a deploy lands).
-    const status = await d.getByText(/Healthy|services? not running|services? restarting|services? of \d+ asleep|Asleep|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent({ timeout: 1500 }).catch(() => '');
+    const status = await d.getByText(/Healthy|services? not running|services? restarting|services? of \d+ asleep|services? of \d+ not accounted for|Asleep|^Deployed$|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent({ timeout: 1500 }).catch(() => '');
     if (status && status.trim()) parts.push('status:' + status.trim());
     return parts.join(' | ');
   };

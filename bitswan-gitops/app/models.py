@@ -29,9 +29,9 @@ class DeployedAutomation(BaseModel):
     # How many times Docker's restart policy has brought the container back up
     # after it died — the durable evidence a status dot cannot carry (a
     # container crashlooping for two months looks the same as one that came up
-    # fine, bailey-lab #463). None means the driver did not read it (it reads
-    # it only for containers it sees restarting), which is NOT the same claim
-    # as 0; the dashboard renders None as nothing at all.
+    # fine, bailey-lab #463). None means the driver could not read it — the
+    # container vanished under the inspect, or its line came back unreadable —
+    # which is NOT the same claim as 0; the dashboard renders None as nothing.
     restart_count: int | None = None
     mem_usage_bytes: int | None = None
     mem_reservation_mb: int | None = None

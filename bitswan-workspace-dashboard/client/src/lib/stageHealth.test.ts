@@ -103,6 +103,33 @@ test('a stage nobody has heard anything about is not Healthy', () => {
   assert.equal(stageHealth({ deployed: true, statuses: [] }).kind, 'unknown');
 });
 
-test('Healthy needs at least one container actually seen running', () => {
-  assert.equal(stageHealth({ deployed: true, statuses: ['running', 'unknown'] }).kind, 'healthy');
+test('Healthy is for a stage seen WHOLE', () => {
+  // Every member observed up. (An earlier version of this test accepted
+  // 'running' + 'unknown' as healthy — that is the very gap the
+  // not-accounted-for case below closes: one running service does not vouch
+  // for the one nobody can find.)
+  assert.equal(stageHealth({ deployed: true, statuses: ['running', 'running'] }).kind, 'healthy');
+  assert.equal(
+    stageHealth({ deployed: true, statuses: ['running', 'restarting'] }).kind,
+    'restarting',
+  );
+});
+
+test('a stage missing one of its services is not Healthy either', () => {
+  // A container removed out of band, a `compose up` that never created it, an
+  // entry missing from the snapshot: the member reads 'unknown', and counting
+  // it as neither failing nor up left the stage with a green tick while one of
+  // its services was entirely absent.
+  const h = stageHealth({ deployed: true, statuses: ['running', 'running', 'unknown'] });
+  assert.equal(h.kind, 'unknown');
+  assert.equal(h.label, '1 service of 3 not accounted for');
+  const g = stageHealth({ deployed: true, statuses: ['running', 'not-deployed'] });
+  assert.equal(g.kind, 'unknown');
+});
+
+test('a real fault still outranks a member nobody can account for', () => {
+  assert.equal(
+    stageHealth({ deployed: true, statuses: ['running', 'unknown', 'failed'] }).kind,
+    'failing',
+  );
 });
