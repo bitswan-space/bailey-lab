@@ -21,6 +21,7 @@ KC_DOMAIN="${E2E_KC_DOMAIN:-$DOMAIN}"
 export KC_HOST="keycloak.${KC_DOMAIN}"
 export KC_PORT="8088"
 export STORAGE_SIZE="${E2E_K8S_STORAGE:-20Gi}"
+export NAMESPACE_MEMORY="${E2E_K8S_MEMORY:-10Gi}"
 export PULL_POLICY="${E2E_K8S_PULL_POLICY:-Never}"
 
 export DAEMON_IMAGE="${E2E_DAEMON_IMAGE:-bitswan/automation-server:dev}"
@@ -57,7 +58,7 @@ fi
 
 # Only the names below are substituted, so the shell fragments inside the
 # manifests ($CFG, $(cat …)) survive envsubst untouched.
-SUBST='${NAMESPACE} ${DOMAIN} ${STORAGE_SIZE} ${PULL_POLICY} ${DAEMON_IMAGE}
+SUBST='${NAMESPACE} ${DOMAIN} ${STORAGE_SIZE} ${NAMESPACE_MEMORY} ${PULL_POLICY} ${DAEMON_IMAGE}
 ${TRAEFIK_IMAGE} ${PROXY_IMAGE} ${REDIS_IMAGE} ${KEYCLOAK_IMAGE} ${OTEL_IMAGE}
 ${KC_HOST} ${KC_PORT} ${OIDC_ISSUER} ${OIDC_HOST} ${OIDC_CLIENT_ID}
 ${OIDC_CLIENT_SECRET} ${OIDC_COOKIE_SECRET} ${REALM_JSON_INDENTED}

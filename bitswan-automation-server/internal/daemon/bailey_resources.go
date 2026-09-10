@@ -19,10 +19,19 @@ import (
 // runs the pure admit check. Used by the workspace-create gate (in-process) and
 // the /memory/admit endpoint (gitops promote gate).
 // admitInventory gathers the reservation-only inventory for admission. A package
-// var so tests can stub the docker dependency.
+// var so tests can stub the backend dependency.
+//
+// It goes through the governor rather than straight to Docker. Reaching past
+// the seam is how this path kept calling docker ps in a namespace, where it
+// fails every time and the gate then admits everything with a warning nobody
+// reads — a memory gate that always says yes.
 var admitInventory = func(ctx context.Context) ([]memContainer, error) {
-	// Admission only needs RESERVATIONS (from labels via docker ps), never live
-	// usage — so skip the slow docker stats sample to keep the gate fast.
+	// Admission only needs RESERVATIONS, never live usage. On Docker that means
+	// skipping the slow stats sample; on Kubernetes the inventory carries both
+	// and the usage is simply unused.
+	if onKubernetes() {
+		return baileyMemGovernor.Inventory(ctx)
+	}
 	return dockerGlobalInventory(ctx, false)
 }
 

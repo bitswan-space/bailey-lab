@@ -154,6 +154,37 @@ subjects:
     namespace: ${NAMESPACE}
 ---
 apiVersion: v1
+kind: LimitRange
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  limits:
+    # A default request for anything that does not ask for one. Without this the
+    # quota below rejects every pod that declares no memory request, which is
+    # most of them — the compiler only sets a request where the declaration
+    # asked for a reservation.
+    - type: Container
+      defaultRequest:
+        memory: 64Mi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  hard:
+    # What this Bailey is allowed. It is also the only honest answer to "how
+    # much memory does this server have": /proc/meminfo in a pod reports the
+    # NODE's, which is somebody else's machine. A namespace with no quota has
+    # no budget to divide, and the overview says so rather than showing the
+    # node's figures.
+    requests.memory: ${NAMESPACE_MEMORY}
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: bailey-config

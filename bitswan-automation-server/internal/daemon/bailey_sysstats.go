@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"runtime"
@@ -55,13 +56,13 @@ func sysStatsDiskPath() string {
 	return "/"
 }
 
-// gatherSystemStats reads the live host stats. It returns the first error
+// gatherSystemStats reads the live server stats. It returns the first error
 // it hits rather than fabricating a value — a missing /proc must surface as
 // an honest error on the overview, not as a fake "0 bytes free".
 func gatherSystemStats() (*systemStats, error) {
 	s := &systemStats{CPUCount: runtime.NumCPU()}
 
-	memTotal, memAvail, err := readMemInfo()
+	memTotal, memAvail, err := serverMemory()
 	if err != nil {
 		return nil, err
 	}
@@ -212,4 +213,23 @@ func readCPUSample() (idle, total uint64, err error) {
 		return 0, 0, err
 	}
 	return 0, 0, fmt.Errorf("no aggregate cpu line in /proc/stat")
+}
+
+// serverMemory is what this server has, which is not the same question on the
+// two platforms.
+//
+// On a host it is the host's memory. In a pod /proc/meminfo still reports the
+// NODE's, and a Bailey with a four-gigabyte quota on a large node would show
+// the node's memory as its own — an overview page confidently describing
+// somebody else's machine. The namespace's quota is the honest answer, and
+// where there is no quota there is no answer to give.
+func serverMemory() (total, avail uint64, err error) {
+	if !onKubernetes() {
+		return readMemInfo()
+	}
+	total, avail, warning := namespaceMemoryBudget(context.Background(), nil)
+	if warning != "" {
+		return 0, 0, fmt.Errorf("this namespace has no memory quota, so it has no memory budget to report")
+	}
+	return total, avail, nil
 }
