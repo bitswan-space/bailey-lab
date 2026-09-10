@@ -84,7 +84,8 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		keep := appliedNames(applied)
 		for _, scope := range prunableScopes(applied) {
 			selector := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
-				",gitops.bp=" + scope.bp + ",gitops.stage=" + scope.stage
+				",gitops.bp=" + scope.bp + ",gitops.stage=" + scope.stage +
+				",gitops.context=" + scope.context
 			if err := k8sctl.PruneRetired(ctx, selector, keep); err != nil {
 				return nil, fmt.Errorf("prune retired workloads: %w", err)
 			}
@@ -309,6 +310,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 		k8srender.WorkspaceLabel: k8srender.LabelValue(c.workspace),
 		"gitops.bp":              k8srender.LabelValue(bpSlug),
 		"gitops.stage":           k8srender.LabelValue(stage),
+		"gitops.context":         k8srender.LabelValue(conf.Context),
 	})
 	var envFrom []string
 	if secretName != "" {
@@ -524,7 +526,7 @@ func runningInfos(ctx context.Context, d *K8sDriver) []core.ContainerInfo {
 	return out
 }
 
-type pruneScope struct{ bp, stage string }
+type pruneScope struct{ bp, stage, context string }
 
 func prunableScopes(objs k8srender.ObjectSet) []pruneScope {
 	seen := map[pruneScope]bool{}
@@ -533,10 +535,11 @@ func prunableScopes(objs k8srender.ObjectSet) []pruneScope {
 		labels, _ := meta["labels"].(map[string]interface{})
 		bp, _ := labels["gitops.bp"].(string)
 		stage, _ := labels["gitops.stage"].(string)
-		if bp == "" || stage == "" {
+		context, _ := labels["gitops.context"].(string)
+		if bp == "" || stage == "" || context == "" {
 			continue
 		}
-		seen[pruneScope{bp: bp, stage: stage}] = true
+		seen[pruneScope{bp: bp, stage: stage, context: context}] = true
 	}
 	out := make([]pruneScope, 0, len(seen))
 	for k := range seen {
@@ -546,7 +549,10 @@ func prunableScopes(objs k8srender.ObjectSet) []pruneScope {
 		if out[i].bp != out[j].bp {
 			return out[i].bp < out[j].bp
 		}
-		return out[i].stage < out[j].stage
+		if out[i].stage != out[j].stage {
+			return out[i].stage < out[j].stage
+		}
+		return out[i].context < out[j].context
 	})
 	return out
 }

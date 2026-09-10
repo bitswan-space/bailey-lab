@@ -392,12 +392,13 @@ func TestThePruneScopeMatchesTheLabelsItSweeps(t *testing.T) {
 				labels := labelsOf(o)
 				bp, _ := labels["gitops.bp"].(string)
 				stage, _ := labels["gitops.stage"].(string)
+				context, _ := labels["gitops.context"].(string)
 				if bp == "" || stage == "" {
 					continue
 				}
-				if !scopes[pruneScope{bp: bp, stage: stage}] {
-					t.Errorf("%s %q is labelled bp=%q stage=%q, which no prune scope selects",
-						kindOf(o), nameOf(o), bp, stage)
+				if !scopes[pruneScope{bp: bp, stage: stage, context: context}] {
+					t.Errorf("%s %q is labelled bp=%q stage=%q context=%q, which no prune scope selects",
+						kindOf(o), nameOf(o), bp, stage, context)
 				}
 			}
 		})
@@ -421,6 +422,36 @@ func TestACopyIsSweptByItsBusinessProcessNotItsContext(t *testing.T) {
 	}
 	if !byBP {
 		t.Errorf("no prune scope for business process \"acme\"; got %v", scopes)
+	}
+}
+
+func TestOneCopyIsNotSweptByAnother(t *testing.T) {
+	labelled := func(name, bp, stage, context string) k8srender.Object {
+		return k8srender.Object{
+			"kind": "Deployment",
+			"metadata": map[string]interface{}{
+				"name": name,
+				"labels": map[string]interface{}{
+					"gitops.bp": bp, "gitops.stage": stage, "gitops.context": context,
+				},
+			},
+		}
+	}
+	scopes := prunableScopes(k8srender.ObjectSet{
+		labelled("bar-backend", "acme", "live-dev", "copy-bar-acme"),
+	})
+	if len(scopes) != 1 {
+		t.Fatalf("one copy produced %d scopes: %v", len(scopes), scopes)
+	}
+	if scopes[0].context != "copy-bar-acme" {
+		t.Fatalf("scope %v does not name the copy it came from", scopes[0])
+	}
+	other := prunableScopes(k8srender.ObjectSet{
+		labelled("baz-backend", "acme", "live-dev", "copy-baz-acme"),
+	})
+	if other[0] == scopes[0] {
+		t.Error("two developers' live-dev sessions share a prune scope; " +
+			"a push by one would delete the other's workloads")
 	}
 }
 
@@ -457,7 +488,7 @@ func TestCredentialSecretsAreSweptWithTheirWorkload(t *testing.T) {
 						}
 						checked++
 						got := labelsOf(sec)
-						for _, key := range []string{"gitops.bp", "gitops.stage", k8srender.WorkspaceLabel} {
+						for _, key := range []string{"gitops.bp", "gitops.stage", "gitops.context", k8srender.WorkspaceLabel} {
 							if got[key] != owner[key] {
 								t.Errorf("Secret %q has %s=%v but its reader %q has %v; the sweep cannot see it",
 									n, key, got[key], nameOf(o), owner[key])
