@@ -81,7 +81,22 @@ type dockerInspect struct {
 
 // ContainerList returns the workspace's containers, optionally filtered by
 // labels. Health is "" when the container declares no healthcheck.
-func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
+func (d *DockerDriver) ContainerList(ctx context.Context, wctx infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
+	containers, err := d.listContainers(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	fillRestartCounts(ctx, containers)
+	return containers, nil
+}
+
+// listContainers is the `docker ps` half on its own, WITHOUT the restart-count
+// inspect. ContainerStats needs the ids and labels but carries no count, and
+// gitops calls both list and stats on every automations poll — so sharing
+// ContainerList would have run the batched inspect of every container twice per
+// poll and thrown one of them away, on the path the comment below calls the
+// first-time-to-live-dev hot path.
+func (d *DockerDriver) listContainers(ctx context.Context, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
 	// A single `docker ps` with a LEAN field-separated --format returns
 	// everything the Container type needs (name, state, health-from-status,
 	// image, created, labels) WITHOUT a per-container `docker inspect`. Two
@@ -108,12 +123,7 @@ func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.Workspac
 	if err != nil {
 		return nil, fmt.Errorf("docker ps: %w", err)
 	}
-	containers, err := parsePS(out)
-	if err != nil {
-		return nil, err
-	}
-	fillRestartCounts(ctx, containers)
-	return containers, nil
+	return parsePS(out)
 }
 
 // restartFormat is the lean inspect format for fillRestartCounts: id + count.
@@ -203,7 +213,9 @@ func parseRestartCounts(raw []byte) map[string]int {
 // workspace's containers first (ContainerList forces the workspace label) and
 // sampling only those IDs; name/labels come from the listing, memory from stats.
 func (d *DockerDriver) ContainerStats(ctx context.Context, wctx infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.ContainerStat, error) {
-	containers, err := d.ContainerList(ctx, wctx, filter)
+	// The lean listing: a stat has no restart count, so this must not pay for
+	// the inspect that reads one.
+	containers, err := d.listContainers(ctx, filter)
 	if err != nil {
 		return nil, err
 	}

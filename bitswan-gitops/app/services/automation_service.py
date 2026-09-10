@@ -761,7 +761,13 @@ class AutomationService:
                     state=None,
                     status=None,
                     deployment_id=deployment_id,
-                    active=cfg.get("active", False),
+                    # Absent means nobody ever slept it. Sleeping is something
+                    # gitops WRITES (mark_as_inactive sets active: False), so a
+                    # legacy entry that predates normalization is not asleep —
+                    # and defaulting it to False made the dashboard show it as
+                    # "Asleep — wakes on access" for a deployment that was never
+                    # started and will not wake.
+                    active=cfg.get("active", True) is not False,
                     automation_url=None,
                     relative_path=cfg.get("relative_path", None),
                     # Production is persisted as an empty-string stage in
@@ -960,8 +966,14 @@ class AutomationService:
             # change removes, still live at the source. So: the worst state
             # observed wins, and a count that WAS read is never overwritten by
             # a replica that carries none.
-            a.state = self._worse_state(a.state, container.get("State", "unknown"))
-            a.status = container.get("Status", "")
+            merged = self._worse_state(a.state, container.get("State", "unknown"))
+            if merged != a.state or a.status is None:
+                # `status` describes the SAME container as `state`, or the two
+                # fields contradict each other on the wire: a 3-replica
+                # deployment with one crashlooping replica went out as
+                # state="restarting" beside status="healthy".
+                a.status = container.get("Status", "")
+            a.state = merged
             count = container.get("RestartCount")
             if count is not None:
                 a.restart_count = (
@@ -1052,13 +1064,12 @@ class AutomationService:
             if not a.deployment_id:
                 continue
             conf = live_deployments.get(a.deployment_id)
-            if conf is not None and "active" in conf:
-                # Only when the yaml SAYS something. An entry that predates
-                # normalization carries no `active` key, and the rest of the
-                # codebase reads that absence as active (`… is not False`) —
-                # inventing a default here would stamp a running deployment
-                # asleep. Refreshing a value that exists is the whole point.
-                a.active = bool(conf["active"])
+            if conf is not None:
+                # Same reading as the static builder above: a missing key is not
+                # a sleep. Refreshing this at all is the point — the cache bakes
+                # `active` in when it is built, and sleeping only rewrites the
+                # yaml.
+                a.active = conf.get("active", True) is not False
             if a.container_id:
                 self._clear_sleep_reason(a.deployment_id)
             else:
