@@ -33,8 +33,10 @@ RUN install -m 0755 -d /etc/apt/keyrings && \
 # syft: the driver runs it (it owns docker) to produce an image SBOM for the
 # supply-chain panel — gitops has no docker socket after the cut-over, so it
 # can't scan the local image itself.
-RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-        | sh -s -- -b /usr/local/bin
+ARG SYFT_VERSION=1.18.1
+RUN curl -fsSL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_$(dpkg --print-architecture).tar.gz" \
+        | tar -xz -C /usr/local/bin syft && \
+    syft --version
 
 COPY --from=build /infra-driver /usr/local/bin/infra-driver
 

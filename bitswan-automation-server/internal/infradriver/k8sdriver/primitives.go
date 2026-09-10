@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
@@ -283,6 +284,7 @@ func (d *K8sDriver) ContainerStats(ctx context.Context, req infradriver.Workspac
 	}
 	raw, err := d.kubectl(ctx, "top", "pods", "--no-headers", "--containers")
 	if err != nil {
+		noteMetricsUnavailable(err)
 		return nil, nil
 	}
 	usage := map[string]int64{}
@@ -311,6 +313,18 @@ func (d *K8sDriver) ContainerStats(ctx context.Context, req infradriver.Workspac
 		})
 	}
 	return out, nil
+}
+
+var metricsUnavailableOnce sync.Once
+
+// noteMetricsUnavailable says once, in the driver's log, why the memory page is
+// showing reservations and no usage. Returning nothing is the right answer —
+// zeroes would be read as measurements — but a page that quietly omits a column
+// is indistinguishable from a cluster where nothing uses memory.
+func noteMetricsUnavailable(err error) {
+	metricsUnavailableOnce.Do(func() {
+		fmt.Printf("no live memory readings: %v — install metrics-server for the memory page to show usage\n", err)
+	})
 }
 
 func parseMi(s string) int64 {

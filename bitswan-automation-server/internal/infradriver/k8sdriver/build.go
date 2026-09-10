@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -127,37 +129,21 @@ func (d *K8sDriver) manifestDigest(ctx context.Context, ref string) string {
 	// The registry is asked directly rather than through buildkit, which has no
 	// command for "does this tag exist" — and an image already pushed is a hit
 	// whether or not the builder happens to be up.
-	host, repo, tag, ok := splitRef(ref)
+	_, repo, tag, ok := splitRef(ref)
 	if !ok {
 		return ""
 	}
-	url := fmt.Sprintf("%s%s/v2/%s/manifests/%s", registryScheme(), host, repo, tag)
-	resp, err := exec.CommandContext(ctx, "curl", "-fsS", "-o", "/dev/null",
-		"-w", "%{http_code}", "-H", "Accept: application/vnd.oci.image.manifest.v1+json",
-		"-H", "Accept: application/vnd.docker.distribution.manifest.v2+json", url).Output()
-	if err != nil || strings.TrimSpace(string(resp)) != "200" {
-		return ""
-	}
-	digest, err := exec.CommandContext(ctx, "curl", "-fsS", "-D", "-", "-o", "/dev/null",
-		"-H", "Accept: application/vnd.oci.image.manifest.v1+json",
-		"-H", "Accept: application/vnd.docker.distribution.manifest.v2+json", url).Output()
+	resp, err := registryRequest(ctx, http.MethodHead, "/v2/"+repo+"/manifests/"+url.PathEscape(tag))
 	if err != nil {
 		return ""
 	}
-	for _, line := range strings.Split(string(digest), "\n") {
-		if strings.HasPrefix(strings.ToLower(line), "docker-content-digest:") {
-			return strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-		}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
 	}
-	return "present"
+	return resp.Header.Get("Docker-Content-Digest")
 }
 
-// dockerfileFor produces the Dockerfile a build uses: the one the source ships,
-// or the generated source-bake.
-//
-// The generated one is written OUTSIDE the build context, so it is not copied
-// into the image and does not perturb the content address — the same reason the
-// Docker driver puts it in a temp file.
 func dockerfileFor(req infradriver.BuildRequest) (string, func(), error) {
 	if req.Dockerfile != "" {
 		path := req.Dockerfile

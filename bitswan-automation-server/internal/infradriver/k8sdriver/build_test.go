@@ -1,6 +1,12 @@
 package k8sdriver
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestSplitRefTakesTheTagAfterTheLastColon(t *testing.T) {
 	for _, tc := range []struct {
@@ -74,5 +80,36 @@ func TestTheRegistryIsSpokenToSecurelyUnlessAsked(t *testing.T) {
 	}
 	if got := buildkitInsecure(); got != ",registry.insecure=true" {
 		t.Errorf("builder option when asked = %q", got)
+	}
+}
+
+func TestACachedImageIsRecognisedByItsDigest(t *testing.T) {
+	const digest = "sha256:b0a1"
+	var asked []string
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.Method+" "+r.URL.Path)
+		if r.URL.Path == "/v2/internal/acme-backend/manifests/sha123" {
+			w.Header().Set("Docker-Content-Digest", digest)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer registry.Close()
+
+	t.Setenv("BITSWAN_K8S_REGISTRY", strings.TrimPrefix(registry.URL, "http://"))
+	t.Setenv("BITSWAN_K8S_REGISTRY_INSECURE", "true")
+	d := &K8sDriver{workspace: "acme", namespace: "bitswan"}
+
+	if got := d.manifestDigest(context.Background(), registryRef("internal/acme-backend:sha123")); got != digest {
+		t.Errorf("a tag already in the registry reported %q, want %q; every build would repeat work already done", got, digest)
+	}
+	if got := d.manifestDigest(context.Background(), registryRef("internal/acme-backend:never-built")); got != "" {
+		t.Errorf("a tag that is not there reported %q; the build would be skipped and the deploy would pull nothing", got)
+	}
+	for _, a := range asked {
+		if !strings.HasPrefix(a, "HEAD ") {
+			t.Errorf("the cache check fetched a body: %s", a)
+		}
 	}
 }
