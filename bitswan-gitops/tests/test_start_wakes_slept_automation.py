@@ -112,3 +112,53 @@ async def test_an_unknown_deployment_is_still_a_404(tmp_path, monkeypatch):
     with pytest.raises(HTTPException) as e:
         await svc.start_automation("nope-bp-staging")
     assert e.value.status_code == 404
+
+
+async def test_a_failed_wake_leaves_the_deployment_asleep(tmp_path, monkeypatch):
+    """A wake that could not redeploy must not leave the flag saying it woke.
+
+    Otherwise bitswan.yaml claims a container that does not exist, and the NEXT
+    Start reads `active: true` and takes the whole-workspace branch — the one
+    this change exists to avoid, where the same unrelated failure is waiting.
+    """
+    svc = _svc(tmp_path, monkeypatch, active=False)
+
+    async def _get_container(dep_id):
+        return []
+
+    async def _apply(dep_ids, report=None):
+        raise RuntimeError("driver apply failed: docker compose up failed: exit status 1")
+
+    monkeypatch.setattr(svc, "get_container", _get_container)
+    monkeypatch.setattr(svc, "apply_compose_for_deployments", _apply)
+
+    with pytest.raises(HTTPException) as e:
+        await svc.start_automation("frontend-bp-staging")
+    assert e.value.status_code == 502
+    assert "docker compose up failed" in e.value.detail
+    assert _yaml(tmp_path)["deployments"]["frontend-bp-staging"]["active"] is False
+
+
+async def test_restart_on_a_missing_container_wakes_it_too(tmp_path, monkeypatch):
+    """Restart is offered on asleep members as well, and carried the same bug."""
+    svc = _svc(tmp_path, monkeypatch, active=False)
+    containers: list[dict] = []
+
+    async def _get_container(dep_id):
+        return list(containers)
+
+    async def _apply(dep_ids, report=None):
+        if _yaml(tmp_path)["deployments"]["frontend-bp-staging"]["active"]:
+            containers.append({"Id": "c1"})
+
+    async def _deploy_everything():
+        raise AssertionError("Restart must not redeploy the whole workspace either")
+
+    monkeypatch.setattr(svc, "get_container", _get_container)
+    monkeypatch.setattr(svc, "apply_compose_for_deployments", _apply)
+    monkeypatch.setattr(svc, "deploy_automations", _deploy_everything)
+
+    res = await svc.restart_automation("frontend-bp-staging")
+    assert res["status"] == "success"
+    assert _yaml(tmp_path)["deployments"]["frontend-bp-staging"]["active"] is True
+    assert containers
