@@ -3,6 +3,7 @@ package core
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -132,14 +133,32 @@ func MaterializeEnv(secretsDir, bp, stage string, values map[string]string) (str
 	return path, nil
 }
 
-// SecretsContentHash is a stable digest of the NON-EMPTY, sorted KEY=VALUE
-// content materialized into the env file — identical inputs → identical hash.
-// It is folded into a service label so a secret-only change (same image, same
-// env_file path) still changes the service config and `docker compose up`
-// recreates the container; without it compose keys recreation off the config
-// alone and never reloads changed env_file CONTENTS. Empty ⇒ "" (no label, so
-// secret-less services never churn).
-func SecretsContentHash(values map[string]string) string {
+// SecretsContentHash is a stable, workspace-keyed digest of the NON-EMPTY,
+// sorted KEY=VALUE content materialized into the env file — identical inputs
+// under the same workspace key → identical hash. It is folded into a service
+// label so a secret-only change (same image, same env_file path) still changes
+// the service config and `docker compose up` recreates the container; without
+// it compose keys recreation off the config alone and never reloads changed
+// env_file CONTENTS. The digest is an HMAC under the workspace AES key, never a
+// bare hash of the values: the label is readable by anyone who can list
+// containers, and a bare hash of a short secret is a guess-and-compare oracle.
+// No content, or no key to hash it under, ⇒ "" (no label, so secret-less
+// services never churn).
+func SecretsContentHash(secretsDir string, values map[string]string) string {
+	stream := secretsContentStream(values)
+	if stream == "" {
+		return ""
+	}
+	key, err := loadAESKey(secretsDir)
+	if err != nil || len(key) == 0 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(stream))
+	return hex.EncodeToString(mac.Sum(nil))[:16]
+}
+
+func secretsContentStream(values map[string]string) string {
 	if len(values) == 0 {
 		return ""
 	}
@@ -148,23 +167,18 @@ func SecretsContentHash(values map[string]string) string {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	h := sha256.New()
-	any := false
+	var b strings.Builder
 	for _, k := range keys {
 		v := values[k]
 		if strings.TrimSpace(v) == "" {
 			continue
 		}
-		any = true
-		h.Write([]byte(k))
-		h.Write([]byte("="))
-		h.Write([]byte(v))
-		h.Write([]byte("\n"))
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(v)
+		b.WriteString("\n")
 	}
-	if !any {
-		return ""
-	}
-	return hex.EncodeToString(h.Sum(nil))[:16]
+	return b.String()
 }
 
 func stringify(v interface{}) string {

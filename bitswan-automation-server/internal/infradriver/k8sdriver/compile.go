@@ -440,7 +440,7 @@ func (c *compileState) workload(depID string, conf *core.Deployment, slot string
 			// purpose — a live slot must not be recreated in place, and a
 			// production credential is applied with no downtime by the next
 			// promotion, which brings the idle slot up reading the new value.
-			"bitswan.io/credentials": credentialsFingerprint(slot, secretContent),
+			"bitswan.io/credentials": c.credentialsFingerprint(slot, secretContent),
 			// The raw values, because a label cannot hold all of them: an
 			// identifier carries an "@" once a slot is involved, and a content
 			// hash is a character over the limit.
@@ -778,22 +778,16 @@ func (c *compileState) routesKeptWhileAsleep(depID string, conf *core.Deployment
 }
 
 // credentialsFingerprint is what makes a credential change roll a workload, and
-// empty for a production slot, which must not be recreated in place.
-func credentialsFingerprint(slot string, content map[string]string) string {
-	if slot != "" || len(content) == 0 {
+// empty for a production slot, which must not be recreated in place. It is the
+// same workspace-keyed digest the Docker driver folds into a service label, so
+// a pod annotation — readable by anyone who can list pods, which is a weaker
+// right than reading the Secret — never carries a bare hash of secret values.
+func (c *compileState) credentialsFingerprint(slot string, content map[string]string) string {
+	if slot != "" {
 		return "none"
 	}
-	keys := make([]string, 0, len(content))
-	for k := range content {
-		keys = append(keys, k)
+	if h := core.SecretsContentHash(c.ctx.SecretsDir, content); h != "" {
+		return h
 	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(k)
-		b.WriteString("=")
-		b.WriteString(content[k])
-		b.WriteString("\n")
-	}
-	return k8srender.HashHex(b.String())[:16]
+	return "none"
 }

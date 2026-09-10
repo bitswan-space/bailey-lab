@@ -530,7 +530,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		// live slot must never be force-recreated here. Only single-slot
 		// (dev/staging) backends get the hash.
 		if slot == "" {
-			if h := secretsContentHash(values); h != "" {
+			if h := secretsContentHash(c.secretsDir, values); h != "" {
 				labels["gitops.secrets_hash"] = h
 			}
 		}

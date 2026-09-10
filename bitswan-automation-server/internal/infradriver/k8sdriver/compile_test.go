@@ -1,6 +1,8 @@
 package k8sdriver
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -458,16 +460,37 @@ func TestAScopedBackendGetsItsCredentials(t *testing.T) {
 // rides in the pod template — except on a production slot, which must not be
 // recreated in place.
 func TestCredentialsRollTheWorkloadExceptInProduction(t *testing.T) {
-	a := credentialsFingerprint("", map[string]string{"A": "1"})
-	b := credentialsFingerprint("", map[string]string{"A": "2"})
+	c := &compileState{ctx: infradriver.WorkspaceContext{SecretsDir: t.TempDir()}}
+	a := c.credentialsFingerprint("", map[string]string{"A": "1"})
+	b := c.credentialsFingerprint("", map[string]string{"A": "2"})
 	if a == b {
 		t.Error("two different credentials produced the same fingerprint; a change would not roll the workload")
 	}
-	if again := credentialsFingerprint("", map[string]string{"A": "1"}); again != a {
+	if again := c.credentialsFingerprint("", map[string]string{"A": "1"}); again != a {
 		t.Error("the same credentials produced two fingerprints; every apply would roll the workload")
 	}
-	if got := credentialsFingerprint("blue", map[string]string{"A": "1"}); got != "none" {
+	if got := c.credentialsFingerprint("blue", map[string]string{"A": "1"}); got != "none" {
 		t.Errorf("a production slot got fingerprint %q; a live slot must not be recreated in place", got)
+	}
+}
+
+// TestTheCredentialAnnotationIsNotAnOracle guards the reason the fingerprint is
+// keyed. Listing pods is a weaker right than reading Secrets, so an annotation
+// carrying a bare digest of the values would let anyone with it confirm a
+// guessed password offline. Two workspaces holding the same credential must not
+// annotate the same value either — that would leak the equality across a
+// boundary the Secrets themselves keep.
+func TestTheCredentialAnnotationIsNotAnOracle(t *testing.T) {
+	content := map[string]string{"PASSWORD": "hunter2"}
+	one := &compileState{ctx: infradriver.WorkspaceContext{SecretsDir: t.TempDir()}}
+	two := &compileState{ctx: infradriver.WorkspaceContext{SecretsDir: t.TempDir()}}
+	got := one.credentialsFingerprint("", content)
+	bare := sha256.Sum256([]byte("PASSWORD=hunter2\n"))
+	if got == hex.EncodeToString(bare[:])[:16] {
+		t.Error("the annotation is a bare digest of the credential content")
+	}
+	if other := two.credentialsFingerprint("", content); other == got {
+		t.Error("two workspaces annotated the same credential identically; the digest is not keyed")
 	}
 }
 
