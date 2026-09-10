@@ -277,7 +277,14 @@ export function Terminal({ wsUrl, onExit, onOpen, onUploadFiles, onInputWriter }
     ws.addEventListener('close', (ev) => {
       term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
       if (wasOpened) onInputWriterRef.current?.(null);
-      if (wasOpened) onExitRef.current?.({ code: ev.code, reason: ev.reason });
+      // Report EVERY close, including a socket that never opened. A handshake
+      // the gate declines closes without ever reaching OPEN, and staying quiet
+      // about it left the parent holding a session object for a connection that
+      // does not exist: with the status dot now reading `connected`, that was a
+      // dot stuck on "Connecting to agent…" for good, with no retry and no
+      // error. The parent's relaunch budget handles it from here and lands on
+      // an error with a Retry once the attempts run out.
+      onExitRef.current?.({ code: ev.code, reason: ev.reason });
     });
 
     const encoder = new TextEncoder();

@@ -14,7 +14,7 @@
 // BADGE means observed health, and a ✓ appears only when the containers were
 // seen and every one of them is fine.
 
-import type { DisplayStatus } from '@/lib/status';
+import { isUpStatus, type DisplayStatus } from '@/lib/status';
 
 export type StageHealthKind =
   | 'not-deployed'
@@ -136,5 +136,12 @@ export function stageHealth({
       ...HEALTH['partly-asleep'],
       label: `${services(asleep)} of ${statuses.length} asleep`,
     };
+  // Healthy is a claim, and it needs an observation behind it. Nothing failing
+  // and nothing asleep is NOT the same as something running: on the first paint
+  // the automations snapshot is still empty, so every member reads
+  // 'not-deployed', and a stage nobody has heard anything about was rendering a
+  // green tick and the word Healthy. Same for a container removed outside
+  // gitops ('unknown') and for a history entry that carries no members at all.
+  if (!statuses.some(isUpStatus)) return HEALTH.unknown;
   return HEALTH.healthy;
 }

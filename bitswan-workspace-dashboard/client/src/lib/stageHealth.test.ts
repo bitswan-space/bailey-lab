@@ -87,3 +87,22 @@ test('a fault outranks a sleeping member', () => {
     'failing',
   );
 });
+
+test('a stage nobody has heard anything about is not Healthy', () => {
+  // On the first paint the automations snapshot is still empty, so every
+  // member reads 'not-deployed'. That used to fall through to Healthy — a
+  // green tick and the word Healthy for a stage nothing had been observed
+  // about, which is the one claim this module promises never to make.
+  assert.equal(
+    stageHealth({ deployed: true, statuses: ['not-deployed', 'not-deployed'] }).kind,
+    'unknown',
+  );
+  // A container removed outside gitops reads 'unknown' for good.
+  assert.equal(stageHealth({ deployed: true, statuses: ['unknown'] }).kind, 'unknown');
+  // And a history entry that carries no members at all.
+  assert.equal(stageHealth({ deployed: true, statuses: [] }).kind, 'unknown');
+});
+
+test('Healthy needs at least one container actually seen running', () => {
+  assert.equal(stageHealth({ deployed: true, statuses: ['running', 'unknown'] }).kind, 'healthy');
+});

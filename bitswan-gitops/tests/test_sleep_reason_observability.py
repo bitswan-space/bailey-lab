@@ -145,3 +145,52 @@ async def test_automations_list_reports_a_slept_deployment_as_inactive(
     result = await svc.get_automations()
     entry = next(a for a in result if a.deployment_id == "frontend-bp-staging")
     assert entry.active is False, "the list still claimed a slept deployment was active"
+
+
+def test_worse_state_lets_no_replica_hide_another(tmp_path):
+    """Replicas share a deployment_id, so one entry is described by several
+    containers. The worst of them is the honest reading — a dead replica beside
+    a live one is not "running"."""
+    svc = _svc(tmp_path)
+    assert svc._worse_state(None, "running") == "running"
+    assert svc._worse_state("running", "restarting") == "restarting"
+    assert svc._worse_state("restarting", "running") == "restarting"
+    assert svc._worse_state("running", "exited") == "exited"
+    assert svc._worse_state("exited", "dead") == "dead"
+    # An unrecognised state must not be mistaken for a clean bill.
+    assert svc._worse_state("running", "weird-new-state") == "weird-new-state"
+    assert svc._worse_state("weird-new-state", "running") == "weird-new-state"
+
+
+async def test_a_crashlooping_replica_is_not_hidden_by_its_healthy_siblings(
+    tmp_path, monkeypatch
+):
+    """The bug this pins: the overlay took the LAST container's word for the
+    whole deployment, so a 3-replica deployment whose first replica was
+    restarting 23,032 times reported state=running with no restart count."""
+    svc = _svc(tmp_path)
+    svc.workspace_name = "ws"
+    from app.models import DeployedAutomation
+
+    entry = DeployedAutomation(
+        container_id=None,
+        endpoint_name=None,
+        created_at=None,
+        name="backend-bp-production",
+        state=None,
+        status=None,
+        deployment_id="backend-bp-production",
+        active=True,
+        automation_url=None,
+        relative_path="copies/main/bp/backend",
+        stage="production",
+    )
+    label = {"gitops.deployment_id": "backend-bp-production"}
+    containers = [
+        {"Id": "r1", "State": "restarting", "Status": "", "Labels": label, "RestartCount": 23032},
+        {"Id": "r2", "State": "running", "Status": "", "Labels": label, "RestartCount": None},
+        {"Id": "r3", "State": "running", "Status": "", "Labels": label, "RestartCount": None},
+    ]
+    svc._apply_docker_overlay([entry], containers, {}, {})
+    assert entry.state == "restarting"
+    assert entry.restart_count == 23032

@@ -119,20 +119,22 @@ func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.Workspac
 // restartFormat is the lean inspect format for fillRestartCounts: id + count.
 const restartFormat = "{{.Id}}" + psSep + "{{.RestartCount}}"
 
-// fillRestartCounts stamps RestartCount onto the containers Docker reports as
-// RESTARTING — and onto no others.
+// fillRestartCounts stamps RestartCount onto every listed container.
 //
 // It takes a second command because `docker ps` has no field for the restart
 // count; only `docker inspect` carries it. That is the very call ContainerList
-// deliberately stopped making (see above), so two things keep this from being
-// that mistake again:
+// deliberately stopped making (see above) — but what made that slow was
+// exec-PER-CONTAINER, not inspect. Measured twice on a live sandbox daemon:
+// 20 separate inspects cost 0.60s, while ONE batched inspect of all 111 (and
+// again of all 83) containers cost 0.06-0.10s — less than the `docker ps` it
+// follows. One exec, whatever the count.
 //
-//   - it is ONE exec for every id at once. The old cost was per-container
-//     execs: measured on a live sandbox daemon (111 containers), 20 separate
-//     inspects cost 0.60s, while a single batched inspect of all 111 cost
-//     0.08s — less than the `docker ps` it follows.
-//   - the id list is only the restarting containers, which in a healthy
-//     workspace is empty; then no command runs at all.
+// An earlier version inspected only the containers `docker ps` caught in state
+// `restarting`, to keep the healthy case at zero extra commands. That made the
+// number useless for the case it exists to serve: a container that crashes
+// every few minutes is `running` at most poll instants, so the count — the
+// durable evidence a status dot cannot carry — flickered in and out between
+// polls and vanished once the container settled or died for good.
 //
 // A count that cannot be read stays nil, never 0, and NEVER fails the listing.
 // The count is supplementary; the list of containers is the answer the caller
@@ -144,7 +146,7 @@ const restartFormat = "{{.Id}}" + psSep + "{{.RestartCount}}"
 // that came back get their counts, and the rest keep nil, which the callers
 // render as nothing rather than as zero.
 func fillRestartCounts(ctx context.Context, containers []infradriver.Container) {
-	ids := restartingIDs(containers)
+	ids := allIDs(containers)
 	if len(ids) == 0 {
 		return
 	}
@@ -166,14 +168,13 @@ func fillRestartCounts(ctx context.Context, containers []infradriver.Container) 
 	}
 }
 
-// restartingIDs is the subset fillRestartCounts is allowed to inspect: the
-// containers Docker reports as restarting, and nothing else.
-func restartingIDs(containers []infradriver.Container) []string {
-	ids := make([]string, 0)
+// allIDs is what fillRestartCounts inspects: every listed container, in one
+// exec. Restricting it to the ones currently restarting made the count blink —
+// see fillRestartCounts.
+func allIDs(containers []infradriver.Container) []string {
+	ids := make([]string, 0, len(containers))
 	for _, c := range containers {
-		if c.State == "restarting" {
-			ids = append(ids, c.ID)
-		}
+		ids = append(ids, c.ID)
 	}
 	return ids
 }
