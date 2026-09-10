@@ -112,9 +112,7 @@ func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.Workspac
 	if err != nil {
 		return nil, err
 	}
-	if err := fillRestartCounts(ctx, containers); err != nil {
-		return nil, err
-	}
+	fillRestartCounts(ctx, containers)
 	return containers, nil
 }
 
@@ -136,34 +134,36 @@ const restartFormat = "{{.Id}}" + psSep + "{{.RestartCount}}"
 //   - the id list is only the restarting containers, which in a healthy
 //     workspace is empty; then no command runs at all.
 //
-// A count that cannot be read stays nil, never 0: `docker inspect` still
-// prints the containers it found when one of the ids has been removed
-// meanwhile (a normal race against a restarting container), and reporting
-// "restarted 0 times" for the rest would be inventing an observation. Only an
-// inspect that produced nothing at all is an error worth failing the list for.
-func fillRestartCounts(ctx context.Context, containers []infradriver.Container) error {
+// A count that cannot be read stays nil, never 0, and NEVER fails the listing.
+// The count is supplementary; the list of containers is the answer the caller
+// asked for. `docker inspect` prints the containers it found and exits non-zero
+// when an id has been removed meanwhile — a normal race against a container
+// that is, by definition, restarting — and if the only restarting id is the one
+// that vanished there is no output at all. Failing here would delete the whole
+// container list over exactly the race this comment calls normal. So the ids
+// that came back get their counts, and the rest keep nil, which the callers
+// render as nothing rather than as zero.
+func fillRestartCounts(ctx context.Context, containers []infradriver.Container) {
 	ids := restartingIDs(containers)
 	if len(ids) == 0 {
-		return nil
+		return
 	}
 	args := append([]string{"inspect", "--format", restartFormat}, ids...)
-	out, err := exec.CommandContext(ctx, "docker", args...).Output()
+	out, _ := exec.CommandContext(ctx, "docker", args...).Output()
 	if len(out) == 0 {
-		if err != nil {
-			return fmt.Errorf("docker inspect (restart counts): %w", err)
-		}
-		return nil
+		return
 	}
 	counts, err := parseRestartCounts(out)
 	if err != nil {
-		return err
+		// Malformed output is not a reason to lose the listing either; it is a
+		// reason not to claim a count.
+		return
 	}
 	for i := range containers {
 		if n, ok := counts[containers[i].ID]; ok {
 			containers[i].RestartCount = &n
 		}
 	}
-	return nil
 }
 
 // restartingIDs is the subset fillRestartCounts is allowed to inspect: the
