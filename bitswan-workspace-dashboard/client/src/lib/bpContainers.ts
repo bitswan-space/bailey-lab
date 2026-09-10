@@ -31,8 +31,8 @@ export interface BpContainer {
   status: DisplayStatus;
   /**
    * Times Docker's restart policy has brought the container back up. Absent
-   * means the driver did not read it (it reads it only for containers it sees
-   * restarting) — NOT zero, which would claim the container has never died.
+   * means the driver could not read it — NOT zero, which would claim the
+   * container has never died.
    */
   restartCount?: number;
   /** True for frontends (exposed through Bailey), false for worker containers. */

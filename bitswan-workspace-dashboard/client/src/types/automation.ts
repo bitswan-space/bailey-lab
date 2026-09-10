@@ -26,8 +26,7 @@ export interface DeployedAutomation {
   expose?: boolean;
   // Times Docker's restart policy has brought the container back up after it
   // died — the durable evidence a status dot cannot carry (bailey-lab #463).
-  // Absent/null means the driver did not read it (it reads it only for
-  // containers it sees restarting), which is NOT the same as 0.
+  // Absent/null means the driver could not read it, which is NOT the same as 0.
   restart_count?: number | null;
   // Memory governance (Containers tab): live usage vs the declared reservation.
   mem_usage_bytes?: number | null;

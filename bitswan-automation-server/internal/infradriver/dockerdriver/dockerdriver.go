@@ -155,12 +155,7 @@ func fillRestartCounts(ctx context.Context, containers []infradriver.Container) 
 	if len(out) == 0 {
 		return
 	}
-	counts, err := parseRestartCounts(out)
-	if err != nil {
-		// Malformed output is not a reason to lose the listing either; it is a
-		// reason not to claim a count.
-		return
-	}
+	counts := parseRestartCounts(out)
 	for i := range containers {
 		if n, ok := counts[containers[i].ID]; ok {
 			containers[i].RestartCount = &n
@@ -180,8 +175,11 @@ func allIDs(containers []infradriver.Container) []string {
 }
 
 // parseRestartCounts maps the lean restartFormat output to counts by container
-// id. A line whose count is not a number is skipped rather than guessed at.
-func parseRestartCounts(raw []byte) (map[string]int, error) {
+// id. A line it cannot read costs THAT container its count and nothing more:
+// the container this feature exists for — the one crashlooping — must not lose
+// its number because some other line came back malformed. Nothing is ever
+// guessed at; a container with no readable count simply has none.
+func parseRestartCounts(raw []byte) map[string]int {
 	counts := map[string]int{}
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" {
@@ -189,15 +187,15 @@ func parseRestartCounts(raw []byte) (map[string]int, error) {
 		}
 		id, count, ok := strings.Cut(line, psSep)
 		if !ok {
-			return nil, fmt.Errorf("parse docker inspect restart count: no separator in %q", line)
+			continue
 		}
 		n, err := strconv.Atoi(strings.TrimSpace(count))
 		if err != nil {
-			return nil, fmt.Errorf("parse docker inspect restart count %q: %w", count, err)
+			continue
 		}
 		counts[id] = n
 	}
-	return counts, nil
+	return counts
 }
 
 // ContainerStats returns live memory usage for the workspace's RUNNING

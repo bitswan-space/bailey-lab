@@ -194,3 +194,15 @@ async def test_a_crashlooping_replica_is_not_hidden_by_its_healthy_siblings(
     svc._apply_docker_overlay([entry], containers, {}, {})
     assert entry.state == "restarting"
     assert entry.restart_count == 23032
+
+
+def test_an_unreadable_state_never_hides_a_dead_replica(tmp_path):
+    """`removing` — or whatever Docker adds next — is an observation we cannot
+    read. It must rank above "running" so it is not mistaken for a clean bill,
+    and BELOW every fault so it cannot hide a replica we can read as dead."""
+    svc = _svc(tmp_path)
+    assert svc._worse_state("exited", "removing") == "exited"
+    assert svc._worse_state("removing", "exited") == "exited"  # order must not matter
+    assert svc._worse_state("running", "removing") == "removing"
+    assert svc._worse_state("removing", "running") == "removing"
+    assert svc._worse_state("restarting", "removing") == "restarting"

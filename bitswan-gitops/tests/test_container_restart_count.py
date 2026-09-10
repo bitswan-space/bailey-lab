@@ -44,8 +44,8 @@ def test_driver_json_carries_the_count_through_to_the_docker_dict():
 
 
 def test_a_count_the_driver_did_not_read_stays_none_not_zero():
-    # The driver reads the count only for containers it sees restarting, so
-    # "absent" is the normal case for a healthy container — and it must not be
+    # "Absent" is what an unread count looks like — the container vanished
+    # under the inspect, or its line was unreadable — and it must not be
     # confused with a container that has never restarted.
     c = Container.from_json(
         {"id": "abc", "name": "svc", "state": "running", "health": "healthy"}
