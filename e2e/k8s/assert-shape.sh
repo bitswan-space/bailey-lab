@@ -243,6 +243,33 @@ else
   esac
 fi
 
+echo "=== the features that exist on Docker exist here ==="
+# Three times a namespace implementation has been written and its call site
+# left gated to Docker, and each time every chapter stayed green because the
+# chapters navigate and capture rather than assert. These check the EFFECT, in
+# the place a person would look: a database with something in it, and a page
+# that answers.
+gitops_pod=$($KUBECTL -n "$NS" get pods -l app.kubernetes.io/name -o name 2>/dev/null |
+  grep -- '-gitops' | head -1)
+if [ -z "$gitops_pod" ]; then
+  fail "no gitops pod to check the vulnerability database in"
+else
+  if $KUBECTL -n "$NS" exec "$gitops_pod" -- sh -c \
+      'test -d /grype-db && [ -n "$(ls -A /grype-db 2>/dev/null)" ]' >/dev/null 2>&1; then
+    pass "the shared vulnerability database is populated and readable by gitops"
+  else
+    fail "gitops sees no vulnerability database — every CVE scan reports the image unscanned"
+  fi
+fi
+
+mem=$($KUBECTL -n "$NS" exec deploy/bailey -c daemon -- \
+  curl -sS -m 10 http://127.0.0.1:9080/bailey/api/admin/resources 2>/dev/null |
+  python3 -c 'import json,sys; print(json.load(sys.stdin).get("host_total_bytes", 0))' 2>/dev/null)
+case "${mem:-0}" in
+  ''|0) fail "resource management reports no memory budget — the admin page is empty or erroring" ;;
+  *)    pass "resource management reports a budget of $mem bytes" ;;
+esac
+
 echo "=== nothing crash-looped ==="
 restarts=$($KUBECTL -n "$NS" get pods \
   -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.containerStatuses[*]}{.restartCount}{" "}{end}{"\n"}{end}' |

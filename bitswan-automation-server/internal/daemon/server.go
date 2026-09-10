@@ -609,14 +609,17 @@ func (s *Server) Run() error {
 	// A namespace has none of them — its equivalents are declared, not created —
 	// so running them there would only retry and log.
 	//
-	// The grype DB refresher and the build proxies are the same story, and the
-	// backup scheduler is not: its server-state paths are all inside the config
-	// directory, which is the volume this pod already carries, so it runs
-	// everywhere.
+	// The build proxies are the same story. The grype DB refresher is NOT: it
+	// has a namespace implementation now — a Job in place of the throwaway
+	// container, writing to the volume this pod already carries — so gating it
+	// off here left every workspace scanning against a database that was never
+	// downloaded, which the supply-chain panel reports and no chapter fails on.
+	// The backup scheduler runs everywhere for the same reason: its
+	// server-state paths are all inside that same volume.
 	if !onKubernetes() {
 		go startServiceReconciler()
-		startGrypeDBRefresher()
 	}
+	startGrypeDBRefresher()
 
 	// Nightly server-level backups (whole workspace trees incl. secrets +
 	// DB dumps + server state → one restic repo per server via AOC). Self-
