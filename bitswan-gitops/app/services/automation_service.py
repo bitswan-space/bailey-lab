@@ -987,9 +987,19 @@ class AutomationService:
         # (memory-pressure | manual) so the dashboard/logs explain the absence
         # instead of a container silently vanishing. Running entries clear any
         # stale marker (self-healing).
+        # `active` is baked into the static cache when it is built, and sleeping
+        # a deployment only rewrites bitswan.yaml — so the cached copy went on
+        # claiming active:true for an evicted deployment until something else
+        # rebuilt the cache. Re-read it from the yaml this call already loaded:
+        # whether a deployment is asleep is exactly what a consumer asking for
+        # the automations list needs to be told.
+        live_deployments = (bs_yaml or {}).get("deployments", {}) or {}
         for a in result:
             if not a.deployment_id:
                 continue
+            conf = live_deployments.get(a.deployment_id)
+            if conf is not None:
+                a.active = bool(conf.get("active", False))
             if a.container_id:
                 self._clear_sleep_reason(a.deployment_id)
             else:

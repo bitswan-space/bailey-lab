@@ -159,3 +159,14 @@ test('asleep outranks running when a name collapses several records', () => {
   );
   assert.equal(c.status, 'asleep');
 });
+
+test('a sleep gitops attributed is asleep even if `active` still says true', () => {
+  // Measured live: the automations cache bakes `active` in when it is built, so
+  // an evicted deployment arrived as active:true with asleep_reason:"manual".
+  // Reading only `active` would have shown it as "unknown" — and the stage it
+  // belongs to as Healthy.
+  const c = only(
+    bpContainers([rec({ active: true, state: null, asleep_reason: 'manual' })], COPY, BP),
+  );
+  assert.equal(c.status, 'asleep');
+});
