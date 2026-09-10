@@ -107,13 +107,18 @@ SA="system:serviceaccount:${NS}:bitswan-infra-driver"
 # down, a typo in the resource name — answers "no" to every question, and five
 # of the six checks below are looking for a no. They would all pass while
 # proving nothing. So the three outcomes are kept apart.
+# stdout only. Merging stderr looked like the careful thing to do and was the
+# opposite: asking about a cluster-scoped resource prints "Warning: resource
+# 'nodes' is not namespace scoped" first, so every such answer parsed as an
+# error and the check reported that it could not be asked. The answer is on
+# stdout and nothing else is; empty stdout is what "could not ask" looks like.
 can() {
   local out
-  out=$($KUBECTL auth can-i "$1" "$2" ${3:+-n "$3"} --as "$SA" 2>&1)
+  out=$($KUBECTL auth can-i "$1" "$2" ${3:+-n "$3"} --as "$SA" 2>/dev/null | tail -1)
   case "$out" in
-    yes*) echo yes ;;
-    no*)  echo no ;;
-    *)    echo "error: $out" ;;
+    yes) echo yes ;;
+    no)  echo no ;;
+    *)   echo unknown ;;
   esac
 }
 
@@ -122,7 +127,7 @@ allowed() {
   case "$(can "$verb" "$res" "$ns")" in
     yes) pass "$what" ;;
     no)  fail "$what — refused" ;;
-    *)   fail "$what — the question could not be asked: $(can "$verb" "$res" "$ns")" ;;
+    *)   fail "$what — the question could not be asked" ;;
   esac
 }
 
@@ -131,7 +136,7 @@ refused() {
   case "$(can "$verb" "$res" "$ns")" in
     no)  pass "$what" ;;
     yes) fail "$what — ALLOWED" ;;
-    *)   fail "$what — the question could not be asked: $(can "$verb" "$res" "$ns")" ;;
+    *)   fail "$what — the question could not be asked" ;;
   esac
 }
 
@@ -209,10 +214,19 @@ agent=$($KUBECTL -n "$NS" get pods -l bitswan.io/role=coding-agent -o name 2>/de
 if [ -z "$agent" ]; then
   fail "no coding-agent pod to test isolation against"
 else
+  # Whatever the image happens to carry. The agent has no nc, which the first
+  # version of this check treated as "cannot test" — so a policy that was not
+  # enforced would have been reported as untestable rather than as open.
   reach() {
-    # 0 reached, 1 refused or timed out, 2 could not be asked.
-    $KUBECTL -n "$NS" exec "$agent" -- sh -c \
-      "command -v nc >/dev/null || exit 2; nc -z -w 3 $1 $2" >/dev/null 2>&1
+    $KUBECTL -n "$NS" exec "$agent" -- sh -c "
+      if command -v bash >/dev/null; then
+        timeout 4 bash -c 'exec 3<>/dev/tcp/$1/$2' && exit 0 || exit 1
+      elif command -v python3 >/dev/null; then
+        python3 -c 'import socket,sys; s=socket.create_connection((\"$1\",$2),4); s.close()' && exit 0 || exit 1
+      elif command -v nc >/dev/null; then
+        nc -z -w 3 $1 $2 && exit 0 || exit 1
+      fi
+      exit 2" >/dev/null 2>&1
     case $? in 0) echo reached ;; 2) echo unknown ;; *) echo blocked ;; esac
   }
   gitops_host=$($KUBECTL -n "$NS" get svc -o name 2>/dev/null | grep -- '-gitops$' | head -1 | cut -d/ -f2)

@@ -103,11 +103,13 @@ func compileScenario(t *testing.T, name string) (k8srender.ObjectSet, []infradri
 		domain:    sc.Domain,
 		claim:     os.Getenv("BITSWAN_K8S_VOLUME_CLAIM"),
 	}
-	objs, routes, err := c.compile()
+	foundation, workloads, routes, err := c.compile()
 	if err != nil {
 		t.Fatalf("compile %s: %v", name, err)
 	}
-	return objs, routes, sc
+	// The properties below hold over everything an apply creates, whichever
+	// phase creates it.
+	return append(append(k8srender.ObjectSet{}, foundation...), workloads...), routes, sc
 }
 
 var scenarios = []string{"dev", "bluegreen", "staging", "livedev"}
@@ -625,5 +627,49 @@ func TestGarageCarriesItsTooling(t *testing.T) {
 	}
 	if !hasS3 {
 		t.Errorf("the object store's Service publishes %v, not the S3 port %d it binds", published, garageS3Port)
+	}
+}
+
+// TestTheFoundationComesBeforeTheProcess is the ordering the whole apply rests
+// on. A backend waits three minutes for the bucket it authenticates against and
+// then exits; the bucket is created by provisioning, and provisioning can only
+// run once the object store is up. Applied together, the workload loses that
+// race and the restart it causes is indistinguishable from a crash.
+func TestTheFoundationComesBeforeTheProcess(t *testing.T) {
+	for _, name := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			sc := loadScenario(t, name)
+			wctx := buildTree(t, t.TempDir(), sc)
+			bs, err := core.ParseBitswanYAML([]byte(sc.BitswanYAML))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			c := &compileState{
+				ctx: wctx, bs: bs, workspace: sc.WorkspaceName,
+				domain: sc.Domain, claim: os.Getenv("BITSWAN_K8S_VOLUME_CLAIM"),
+			}
+			foundation, workloads, _, err := c.compile()
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+
+			for _, o := range foundation {
+				switch kindOf(o) {
+				case "StatefulSet", "Service", "Secret", "Deployment":
+				default:
+					t.Errorf("foundation holds a %s, which is not something a process runs on", kindOf(o))
+				}
+				if l := labelsOf(o); l["gitops.automation_name"] != nil {
+					t.Errorf("%s is an automation and belongs in the second phase", nameOf(o))
+				}
+			}
+			for _, o := range workloads {
+				if kindOf(o) == "StatefulSet" {
+					t.Errorf("%s is a StatefulSet in the workload phase; a database applied "+
+						"beside the thing that authenticates against it is the race this split removes",
+						nameOf(o))
+				}
+			}
+		})
 	}
 }

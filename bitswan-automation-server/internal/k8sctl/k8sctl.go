@@ -159,3 +159,24 @@ func PruneRetired(ctx context.Context, selector string, keep map[string]bool) er
 	}
 	return nil
 }
+
+// WaitRollout blocks until an object of any kind has finished rolling out.
+//
+// WaitAvailable's Deployment-only shape does not cover a StatefulSet, and a
+// database is always a StatefulSet — so the one wait a deploy most needs before
+// it provisions was the one that could not be expressed.
+func WaitRollout(ctx context.Context, kind, name string, timeout time.Duration) error {
+	ns, err := Namespace()
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "kubectl", "-n", ns, "rollout", "status",
+		strings.ToLower(kind)+"/"+name, "--timeout="+timeout.String())
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s/%s did not roll out: %w: %s\n%s",
+			kind, name, err, strings.TrimSpace(out.String()), describe(ctx, ns, name))
+	}
+	return nil
+}

@@ -47,65 +47,74 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 		claim:     os.Getenv("BITSWAN_K8S_VOLUME_CLAIM"),
 	}
 	report("compile", "workspace volume: "+describeClaim(c.claim))
-	objs, routes, err := c.compile()
+	foundation, workloads, routes, err := c.compile()
 	if err != nil {
 		return nil, err
 	}
-	if len(objs) == 0 {
+	if len(foundation) == 0 && len(workloads) == 0 {
 		report("apply", "nothing declared for this business process")
-	} else {
-		report("apply", fmt.Sprintf("applying %d object(s)", len(objs)))
-		if err := k8sctl.Apply(ctx, objs); err != nil {
+		return routes, nil
+	}
+
+	// Phase one: what a business process needs before it can run. Its database,
+	// its object store, and the proxy its egress is redirected through.
+	if len(foundation) > 0 {
+		report("apply", fmt.Sprintf("applying %d foundation object(s)", len(foundation)))
+		if err := k8sctl.Apply(ctx, foundation); err != nil {
+			return nil, err
+		}
+		report("wait", "waiting for the stage's infrastructure")
+		if err := waitForFoundation(ctx, foundation, report); err != nil {
 			return nil, err
 		}
 	}
 
-	// What a promotion retires has to actually go away, or the old slot keeps
-	// serving beside the new one. The Docker driver gets this from
-	// --remove-orphans; here it is an explicit sweep, scoped to this business
-	// process so a deploy of one cannot reap a sibling's.
-	// Scoped twice over: to this business process, and to the stages this
-	// declaration actually describes. A push that carries only production must
-	// not reap a live-dev session the author is in the middle of — "absent from
-	// this file" and "retired" are different things, and only the second is a
-	// reason to delete something.
-	if req.Ctx.BP != "" {
-		base := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
-			",gitops.bp=" + k8srender.LabelValue(req.Ctx.BP)
-		keep := appliedNames(objs)
-		for _, stage := range stagesIn(objs) {
-			selector := base + ",gitops.stage=" + k8srender.LabelValue(stage)
-			if err := k8sctl.PruneRetired(ctx, selector, keep); err != nil {
-				return nil, fmt.Errorf("prune retired workloads: %w", err)
-			}
+	// Then provision into it, while nothing is yet trying to authenticate
+	// against it. A backend gives up after three minutes of Access Denied and
+	// exits, so doing this after the workloads are up is a race the workload
+	// loses — and the restart it causes is indistinguishable from a crash.
+	report("provision", "Ensuring live databases for (re)created backends...")
+	if err := core.EnsureLivePostgresDBs(x, ctx, req.Ctx, bs, nil, runningInfos(ctx, d), report); err != nil {
+		return nil, fmt.Errorf("ensure live postgres dbs: %w", err)
+	}
+	report("provision", "Provisioning per-BP namespaces...")
+	if changed := core.ProvisionForDeployments(x, ctx, req.Ctx, bs, report); len(changed) > 0 {
+		// Garage mints its keys server-side, so the first compile wrote a
+		// placeholder. The material on disk is real now, and recompiling before
+		// the workloads are applied means they are born with it rather than
+		// rolled onto it.
+		report("provision", fmt.Sprintf("credentials arrived for %d resource(s); recompiling", len(changed)))
+		if _, workloads, routes, err = c.compile(); err != nil {
+			return nil, err
 		}
 	}
 
-	// The database a backend connects to has to exist before the backend gives
-	// up retrying, and the bucket and the standby database have to exist before
-	// a snapshot or a promotion needs them. This is the same provisioning the
-	// Docker driver runs post-up, against the same declaration, differing only
-	// in how a command reaches a container.
-	if len(objs) > 0 {
-		report("provision", "Ensuring live databases for (re)created backends...")
-		if err := core.EnsureLivePostgresDBs(x, ctx, req.Ctx, bs, nil, runningInfos(ctx, d), report); err != nil {
-			return nil, fmt.Errorf("ensure live postgres dbs: %w", err)
+	// Phase two: the business process itself.
+	if len(workloads) > 0 {
+		report("apply", fmt.Sprintf("applying %d workload object(s)", len(workloads)))
+		if err := k8sctl.Apply(ctx, workloads); err != nil {
+			return nil, err
 		}
-		report("provision", "Provisioning per-BP namespaces...")
-		if changed := core.ProvisionForDeployments(x, ctx, req.Ctx, bs, report); len(changed) > 0 {
-			// Those workloads were compiled against placeholder credentials:
-			// Garage mints its keys server-side, and on a first apply there was
-			// no Garage yet to mint them. The material on disk is real now, so
-			// one more pass writes it into their Secrets — and because the
-			// content hash rides in the pod template, the workloads that need
-			// it roll and the ones that do not stay put.
-			report("provision", fmt.Sprintf("credentials arrived for %d resource(s); reapplying", len(changed)))
-			objs, routes, err = c.compile()
-			if err != nil {
-				return nil, err
-			}
-			if err := k8sctl.Apply(ctx, objs); err != nil {
-				return nil, err
+	}
+
+	applied := append(append(k8srender.ObjectSet{}, foundation...), workloads...)
+
+	// What a promotion retires has to actually go away, or the old slot keeps
+	// serving beside the new one. The Docker driver gets this from
+	// --remove-orphans; here it is an explicit sweep, scoped twice over: to
+	// this business process, and to the stages this declaration actually
+	// describes. A push that carries only production must not reap a live-dev
+	// session the author is in the middle of — "absent from this file" and
+	// "retired" are different things, and only the second is a reason to
+	// delete something.
+	if req.Ctx.BP != "" {
+		base := k8srender.WorkspaceLabel + "=" + k8srender.LabelValue(d.workspace) +
+			",gitops.bp=" + k8srender.LabelValue(req.Ctx.BP)
+		keep := appliedNames(applied)
+		for _, stage := range stagesIn(applied) {
+			selector := base + ",gitops.stage=" + k8srender.LabelValue(stage)
+			if err := k8sctl.PruneRetired(ctx, selector, keep); err != nil {
+				return nil, fmt.Errorf("prune retired workloads: %w", err)
 			}
 		}
 	}
@@ -116,7 +125,7 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 	// new one answers, not before.
 	if len(routes) > 0 {
 		report("wait", fmt.Sprintf("waiting for %d routed workload(s)", len(routes)))
-		if err := waitForRouted(ctx, objs, routes, report); err != nil {
+		if err := waitForRouted(ctx, workloads, routes, report); err != nil {
 			return nil, err
 		}
 	}
@@ -127,6 +136,32 @@ func (d *K8sDriver) apply(ctx context.Context, req infradriver.ApplyRequest, rep
 	}
 	return routes, nil
 }
+
+// waitForFoundation blocks until every workload a business process depends on
+// has rolled out. Bounded, and named in the error: a database that never
+// arrives is a different problem from a deploy that is merely slow.
+func waitForFoundation(ctx context.Context, foundation k8srender.ObjectSet, report func(step, msg string)) error {
+	for _, obj := range foundation {
+		kind, _ := obj["kind"].(string)
+		if kind != "StatefulSet" && kind != "Deployment" {
+			continue
+		}
+		meta, _ := obj["metadata"].(map[string]interface{})
+		name, _ := meta["name"].(string)
+		if name == "" {
+			continue
+		}
+		if err := k8sctl.WaitRollout(ctx, kind, name, foundationReadyTimeout); err != nil {
+			return fmt.Errorf("%s is what this business process runs on: %w", name, err)
+		}
+		report("wait", name+" is ready")
+	}
+	return nil
+}
+
+// foundationReadyTimeout is how long a database or object store has to come up.
+// Generous, because a cold node pulling an image it has never seen is minutes.
+const foundationReadyTimeout = 10 * time.Minute
 
 type compileState struct {
 	driver    *K8sDriver
@@ -143,9 +178,13 @@ type compileState struct {
 }
 
 // compile turns the declaration into the objects that realize it.
-func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, error) {
+// compile returns what a business process needs BEFORE it can run, and the
+// process itself, separately — because applying them together is a race the
+// process loses. A backend waits three minutes for the bucket it authenticates
+// against and then exits; the bucket is created by the provisioning that runs
+// after the apply.
+func (c *compileState) compile() (foundation, workloads k8srender.ObjectSet, routes []infradriver.Route, err error) {
 	var objs k8srender.ObjectSet
-	var routes []infradriver.Route
 
 	// Decided before any workload is rendered, because a workload in a
 	// firewalled group carries the rule installer that points at its proxy.
@@ -193,7 +232,7 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 			slotConf := core.EffectiveSlotConf(id, conf, sd.Slot, c.bs.Deployments)
 			w, extra, route, emit, err := c.workload(id, slotConf, sd.Slot, sd.DB)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if !emit {
 				continue
@@ -223,14 +262,17 @@ func (c *compileState) compile() (k8srender.ObjectSet, []infradriver.Route, erro
 			// service silently never appears fails much later, as a connection
 			// refused with no indication that the thing it was connecting to
 			// was never asked for.
-			objs, err := c.infraService(svc, realm)
-			if err != nil {
-				return nil, nil, err
+			rendered, ierr := c.infraService(svc, realm)
+			if ierr != nil {
+				return nil, nil, nil, ierr
 			}
-			infra = append(infra, objs...)
+			infra = append(infra, rendered...)
 		}
 	}
-	return append(append(infra, c.firewallObjects()...), objs...), routes, nil
+	// The firewall proxy belongs to the foundation too: a workload's rule
+	// installer resolves it by name at pod start, and in monitor mode every
+	// outbound request is redirected to it the moment the workload runs.
+	return append(infra, c.firewallObjects()...), objs, routes, nil
 }
 
 // workload renders one automation. The bool reports whether it should be
