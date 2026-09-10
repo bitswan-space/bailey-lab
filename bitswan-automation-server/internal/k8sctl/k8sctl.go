@@ -13,9 +13,11 @@ package k8sctl
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -233,4 +235,128 @@ func jobLog(ctx context.Context, ns, name string) string {
 		return "(no log)"
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// PodInfo is what a caller outside this package needs to know about a pod
+// without learning the API's shape.
+type PodInfo struct {
+	Name        string
+	Labels      map[string]string
+	Annotations map[string]string
+	Created     int64
+	Running     bool
+}
+
+// ListPods reports the bitswan-managed pods in this namespace.
+//
+// Scoped to what this Bailey manages, deliberately: a namespace can hold things
+// that are none of its business, and counting them would make its memory budget
+// somebody else's.
+func ListPods(ctx context.Context) ([]PodInfo, error) {
+	ns, err := Namespace()
+	if err != nil {
+		return nil, err
+	}
+	out, err := exec.CommandContext(ctx, "kubectl", "-n", ns, "get", "pods",
+		"-l", k8srender.ManagedByLabel+"="+k8srender.ManagedBy, "-o", "json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get pods: %w", err)
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name              string            `json:"name"`
+				Labels            map[string]string `json:"labels"`
+				Annotations       map[string]string `json:"annotations"`
+				CreationTimestamp time.Time         `json:"creationTimestamp"`
+			} `json:"metadata"`
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parse pod list: %w", err)
+	}
+	pods := make([]PodInfo, 0, len(list.Items))
+	for _, it := range list.Items {
+		pods = append(pods, PodInfo{
+			Name:        it.Metadata.Name,
+			Labels:      it.Metadata.Labels,
+			Annotations: it.Metadata.Annotations,
+			Created:     it.Metadata.CreationTimestamp.Unix(),
+			Running:     it.Status.Phase == "Running",
+		})
+	}
+	return pods, nil
+}
+
+// PodMemoryUsage is live memory per pod, or nothing when the metrics API is
+// absent. Nothing rather than zeroes: a zero reads as "this uses no memory",
+// which would make the budget confidently wrong.
+func PodMemoryUsage(ctx context.Context) (map[string]int64, error) {
+	ns, err := Namespace()
+	if err != nil {
+		return nil, err
+	}
+	out, err := exec.CommandContext(ctx, "kubectl", "-n", ns, "top", "pods", "--no-headers").Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl top pods: %w", err)
+	}
+	usage := map[string]int64{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		if b := MemoryQuantityBytes(f[2]); b > 0 {
+			usage[f[0]] = b
+		}
+	}
+	return usage, nil
+}
+
+// Get returns an object, or every object of a kind when name is empty.
+func Get(ctx context.Context, kind, name string) ([]byte, error) {
+	ns, err := Namespace()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"-n", ns, "get", kind}
+	if name != "" {
+		args = append(args, name)
+	}
+	args = append(args, "-o", "json")
+	out, err := exec.CommandContext(ctx, "kubectl", args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubectl get %s: %w", kind, err)
+	}
+	return out, nil
+}
+
+// MemoryQuantityBytes reads a Kubernetes memory quantity, and reports zero for
+// anything it does not recognise so a caller can tell "no answer" from a number
+// this invented.
+func MemoryQuantityBytes(v string) int64 {
+	v = strings.TrimSpace(v)
+	for _, u := range []struct {
+		suffix string
+		mult   int64
+	}{
+		{"Ki", 1 << 10}, {"Mi", 1 << 20}, {"Gi", 1 << 30}, {"Ti", 1 << 40},
+		{"k", 1000}, {"M", 1000 * 1000}, {"G", 1000 * 1000 * 1000},
+	} {
+		if strings.HasSuffix(v, u.suffix) {
+			n, err := strconv.ParseFloat(strings.TrimSuffix(v, u.suffix), 64)
+			if err != nil {
+				return 0
+			}
+			return int64(n * float64(u.mult))
+		}
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }

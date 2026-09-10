@@ -69,7 +69,17 @@ func (s *Server) handleMemoryAdmit(w http.ResponseWriter, r *http.Request) {
 
 // baileyMemGovernor is the daemon's memory backend. A package var (not a Server
 // field) so it can be swapped in tests; defaults to the docker implementation.
-var baileyMemGovernor MemoryGovernor = dockerMemoryGovernor{}
+var baileyMemGovernor MemoryGovernor = newMemoryGovernor()
+
+// newMemoryGovernor picks the backend for the platform. Docker reads the host's
+// containers and the host's memory; a namespace reads its own pods and what it
+// is allowed, which are different questions with different right answers.
+func newMemoryGovernor() MemoryGovernor {
+	if onKubernetes() {
+		return k8sMemoryGovernor{}
+	}
+	return dockerMemoryGovernor{}
+}
 
 // desiredGroup is one (bp, stage) deployment group a workspace's gitops knows
 // about (from its bitswan.yaml). Used to surface SLEPT groups — deployed but
