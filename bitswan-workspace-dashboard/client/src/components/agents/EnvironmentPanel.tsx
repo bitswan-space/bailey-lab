@@ -28,6 +28,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
+import { bpContainers, type BpContainer } from '@/lib/bpContainers';
+import { isUpStatus, STATUS_META } from '@/lib/status';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { cn } from '@/lib/utils';
 
@@ -52,16 +54,11 @@ interface Props {
   copy: string;
 }
 
-type Status = 'running' | 'failed' | 'stopped';
-
-interface Item {
-  name: string;
-  // eslint-disable-next-line no-restricted-syntax -- wire-mirror: snapshot's deployment_id is nullable
-  deploymentId: string | null;
-  url: string | null;
-  status: Status;
-  expose: boolean;
-}
+// One row of the panel. Frontends and worker containers are the same shape as
+// the Containers sub-tab's list, and derived by the same function — the two
+// used to each map the automations snapshot by hand, and each got the state
+// collapse wrong the same way (bailey-lab #463).
+type Item = BpContainer;
 
 const WORKER_TYPES: { type: string; label: string }[] = [
   { type: 'go', label: 'Go backend' },
@@ -84,33 +81,10 @@ export function EnvironmentPanel({ bp, copy }: Props) {
   const [deleting, setDeleting] = useState<{ item: Item; kind: string } | null>(null);
 
   const { frontends, workers } = useMemo(() => {
-    const prefix = `copies/${copy}/${bp}/`;
-    const byName = new Map<string, Item>();
-    for (const a of automations) {
-      const rel = a.relative_path ?? '';
-      if (!rel.startsWith(prefix)) continue;
-      const name = a.automation_name ?? a.name;
-      const st = a.state ?? a.status ?? '';
-      const status: Status =
-        st === 'running' || st === 'restarting'
-          ? 'running'
-          : st === 'failed' || st === 'dead' || st === 'exited'
-            ? 'failed'
-            : 'stopped';
-      const prev = byName.get(name);
-      byName.set(name, {
-        name,
-        deploymentId: a.deployment_id ?? prev?.deploymentId ?? null,
-        url: a.automation_url ?? prev?.url ?? null,
-        status: status === 'running' ? 'running' : (prev?.status ?? status),
-        expose: !!a.expose || !!prev?.expose,
-      });
-    }
-    const all = [...byName.values()];
-    const byNameAsc = (a: Item, b: Item) => a.name.localeCompare(b.name);
+    const all = bpContainers(automations, copy, bp);
     return {
-      frontends: all.filter((i) => i.expose).sort(byNameAsc),
-      workers: all.filter((i) => !i.expose).sort(byNameAsc),
+      frontends: all.filter((i) => i.expose),
+      workers: all.filter((i) => !i.expose),
     };
   }, [automations, bp, copy]);
 
@@ -358,13 +332,14 @@ function Row({
   onDelete: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const dot =
-    item.status === 'running'
-      ? 'bg-emerald-600'
-      : item.status === 'failed'
-        ? 'bg-red-600'
-        : 'bg-muted-foreground/40';
-  const canOpen = !!item.url && item.status === 'running';
+  const meta = STATUS_META[item.status];
+  // "Up" is not "healthy": a restarting frontend keeps its open link (it does
+  // serve, between crashes) while its dot says restarting, and the title says
+  // how often it has had to be brought back.
+  const canOpen = !!item.url && isUpStatus(item.status);
+  const statusTitle = item.restartCount
+    ? `${meta.label} — restarted ${item.restartCount.toLocaleString()} times`
+    : meta.label;
   return (
     <div className="group flex items-center gap-1.5 rounded-md px-1.5 py-1 hover:bg-muted/60">
       <Icon className={cn('size-3 shrink-0', iconClass)} aria-hidden />
@@ -385,7 +360,7 @@ function Row({
           href={canOpen ? (item.url ?? undefined) : undefined}
           target="_blank"
           rel="noreferrer"
-          title={canOpen ? `Open ${item.url}` : `${item.name} — not running`}
+          title={canOpen ? `Open ${item.url}` : `${item.name} — ${meta.label.toLowerCase()}`}
           className={cn(
             'flex min-w-0 flex-1 items-center gap-1 truncate font-mono text-xs no-underline',
             canOpen ? 'cursor-pointer text-foreground' : 'cursor-default text-muted-foreground',
@@ -395,7 +370,7 @@ function Row({
           {canOpen && <ExternalLink className="size-2.5 shrink-0 opacity-60" aria-hidden />}
         </a>
       )}
-      <span className={cn('size-1.5 shrink-0 rounded-full', dot)} title={item.status} />
+      <span className={cn('size-1.5 shrink-0 rounded-full', meta.dot)} title={statusTitle} />
       {!renaming && (
         <div className="flex opacity-60 transition-opacity group-hover:opacity-100">
           <button
