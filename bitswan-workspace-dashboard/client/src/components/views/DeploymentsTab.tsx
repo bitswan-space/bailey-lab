@@ -72,6 +72,7 @@ import { promoteBpWithToast, watchDeployTask } from '@/lib/deployBp';
 import { useLastDeploy } from '@/hooks/useLastDeploy';
 import { displayFor, isUpStatus, STATUS_META, type DisplayStatus } from '@/lib/status';
 import { stageHealth, type StageHealthKind } from '@/lib/stageHealth';
+import { memoryPair } from '@/lib/memory';
 import {
   api,
   errorMessage,
@@ -992,19 +993,6 @@ function EmptyTab({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
 // ── Containers tab ──────────────────────────────────────────────────────────
 
 // Human byte size (binary units — what `free -h` shows).
-function fmtBytes(n: number): string {
-  if (!n && n !== 0) return '—';
-  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  const s = v >= 100 || i === 0 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
-  return `${s} ${u[i]}`;
-}
-
 interface Member {
   id: string;
   name: string;
@@ -1159,11 +1147,11 @@ function ContainerCard({
             title={
               m.memOver
                 ? 'Memory usage exceeds this container’s reservation'
-                : 'Memory usage / reserved'
+                : 'Live memory usage / the reservation declared in automation.toml'
             }
           >
             <MemoryStick className="size-3" aria-hidden />
-            {m.memUsageBytes != null ? fmtBytes(m.memUsageBytes) : '—'} / {m.memReservationMB} MB
+            {memoryPair(m.memUsageBytes ?? undefined, m.memReservationMB ?? undefined)}
           </span>
         )}
         {m.present && (
