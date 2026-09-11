@@ -91,3 +91,27 @@ def test_overlay_leaves_an_unread_count_none():
     svc._apply_docker_overlay(entries, containers, {}, {})
     assert entries[0].state == "running"
     assert entries[0].restart_count is None
+
+
+async def test_only_the_automations_listing_pays_for_the_count():
+    """The count needs a `docker inspect` on top of the `docker ps`, and
+    ContainerList is the shared primitive behind everything — the "is this one
+    container up?" checks before every backup, restore and SQL-explorer query,
+    and a re-broadcast on every docker start/die event. Hanging the inspect off
+    it made all of them pay for a number only one of them displays."""
+    asked: list[dict] = []
+
+    class _RecordingDriver:
+        async def container_list(self, ctx, labels=None, with_restart_counts=False):
+            asked.append({"labels": labels, "counts": with_restart_counts})
+            return []
+
+    svc = AutomationService()
+    svc.workspace_name = "ws"
+    svc._infra_driver = _RecordingDriver()
+
+    await svc.get_containers()
+    await svc.get_container("some-deployment")
+
+    assert asked[0]["counts"] is True, "the automations listing shows the count"
+    assert asked[1]["counts"] is False, "a single-container lookup does not"

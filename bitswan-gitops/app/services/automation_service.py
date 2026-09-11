@@ -695,6 +695,9 @@ class AutomationService:
         containers = await self.infra_driver.container_list(
             self._workspace_ctx(),
             labels={"gitops.workspace": self.workspace_name},
+            # The one caller that shows the restart count, so the one that pays
+            # the inspect for it.
+            with_restart_counts=True,
         )
         return [
             c.to_docker_dict()

@@ -87,7 +87,9 @@ func (d *DockerDriver) ContainerList(ctx context.Context, wctx infradriver.Works
 	if err != nil {
 		return nil, err
 	}
-	fillRestartCounts(ctx, containers)
+	if filter.WithRestartCounts {
+		fillRestartCounts(ctx, containers)
+	}
 	return containers, nil
 }
 
