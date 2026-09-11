@@ -51,10 +51,21 @@ export function stagePower(members: PowerMember[], asleepReason?: string): Stage
   // routing to it — nobody will ever knock — so it is only true to mention
   // when an exposed member is among the sleepers.
   const wakesOnAccess = members.some((m) => m.asleep && m.expose);
-  const canWake = sleeping > 0;
+  // Wake whenever NOTHING is up — asleep or dead. `_wake_context_stage`
+  // re-activates every member of the group and runs `docker compose up`, which
+  // revives dead containers as well as slept ones, so a stage whose containers
+  // all died is not a dead end: it is the stage that most needs the button.
+  // What must not happen is the SENTENCE below calling those containers asleep
+  // or promising they wake on access, which is why that case has its own.
+  const canWake = sleeping > 0 || running === 0;
   const canSleep = running > 0;
   let label: string;
-  if (sleeping === 0) {
+  if (sleeping === 0 && running === 0) {
+    // Deployed, nothing up, and nothing asleep: these containers died. Nothing
+    // will bring them back on access — there is no dehydrated host to knock on.
+    label =
+      'Nothing is running on this stage. Wake redeploys it — these containers are not asleep, so nothing brings them back on access.';
+  } else if (sleeping === 0) {
     label = 'Free this stage’s memory now. On-demand stages wake automatically on access.';
   } else if (running === 0) {
     label =

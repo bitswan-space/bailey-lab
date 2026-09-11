@@ -48,14 +48,27 @@ test('the sleep is attributed when gitops says who did it', () => {
   assert.doesNotMatch(stagePower([up, asleep]).label, /manually|memory pressure/);
 });
 
-test('a container that DIED is not offered as something to wake', () => {
-  // "Not up" also covers exited/failed/unreadable containers. Counting those
-  // as sleeping put "1 service of 2 asleep … leave them to wake on access"
-  // directly above a card correctly saying "1 service not running" — the same
-  // false comfort lib/stageHealth.ts documents at length and refuses.
+test('a dead container is not COUNTED as asleep, while something still runs', () => {
+  // "Not up" also covers exited/failed/unreadable containers. Counting those as
+  // sleeping put "1 service of 2 asleep … leave them to wake on access" above a
+  // card correctly saying "1 service not running".
   const p = stagePower([up, dead]);
-  assert.equal(p.canWake, false);
   assert.equal(p.sleeping, 0);
+  assert.equal(p.canWake, false, 'something is still up — Wake is for a stage that is not');
+});
+
+test('a stage whose containers ALL died still offers Wake', () => {
+  // Wake re-activates the group and runs `docker compose up`, which revives
+  // dead containers too — so the stage that most needs the button was the one
+  // left without it. The sentence must not call them asleep, though.
+  const p = stagePower([dead, dead]);
+  assert.equal(p.canWake, true);
+  assert.equal(p.canSleep, false);
+  assert.match(p.label, /Nothing is running on this stage/);
+  // It may mention sleep — it has to, to DENY it. What it must not do is claim
+  // these containers are asleep, or promise that opening the app revives them.
+  assert.match(p.label, /not asleep/i);
+  assert.match(p.label, /nothing brings them back on access/i);
 });
 
 test('a sleeping WORKER is not promised it will wake on access', () => {
