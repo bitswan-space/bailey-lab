@@ -1268,12 +1268,10 @@ function ContainersSection({
   // "Running" is the live container state, NOT whether a deploy record exists —
   // an asleep stage still has its records (present=true) but no running container.
   const isUp = (m: Member) => isUpStatus(m.display);
-  // Asleep means the members READ asleep — not merely that nothing is up, which
-  // also covers a stage whose containers all died (see lib/stageHealth.ts). The
-  // banner beside it promises "wakes on access"; that promise has to be true.
-  // (`anyRunning` went with the old power row: what may be offered is now
-  // stagePower's decision, not a local boolean.)
-  const asleep = members.length > 0 && members.every((m) => m.display === 'asleep');
+  // Whether the row appears, what it says and which buttons it offers is ONE
+  // decision and it lives in lib/stagePower.ts — the locals this used to keep
+  // (`asleep`, `anyRunning`) went with it, so there is no second definition of
+  // "asleep" here to drift from the first.
   // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
   // so the message can attribute the sleep instead of a bare "asleep".
   const asleepReason = members.map((m) => m.asleepReason).find(Boolean) ?? null;
@@ -1334,19 +1332,13 @@ function ContainersSection({
         </>
       ) : (
         <>
-      {/* Wake is offered whenever nothing is up — asleep OR dead. The previous
-          comment here claimed waking cannot help a dead stage; it can:
-          `_wake_context_stage` re-activates every member of the group and runs
-          `docker compose up`, which brings dead containers back. What must not
-          happen is the ROW claiming they are merely asleep, so the sentence
-          below says which case it is. */}
-      {/* The row always has exactly one thing to offer: if anything is up it
-          can free the memory, and if nothing is up Wake brings the group back —
+      {/* The row always has exactly one thing to offer: if anything is up it can
+          free the memory, and if nothing is up Wake brings the group back —
           `_wake_context_stage` re-activates every member and runs
           `docker compose up`, which revives dead containers as well as slept
           ones. What must not happen is the SENTENCE calling dead containers
-          asleep, so it says which case this is. */}
-      {canPower && members.length > 0 && (
+          asleep; stagePower owns both that decision and that wording. */}
+      {canPower && (powerState.canWake || powerState.canSleep) && (
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
           <span className="text-[12.5px] text-muted-foreground">{powerState.label}</span>
