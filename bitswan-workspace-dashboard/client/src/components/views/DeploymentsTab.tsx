@@ -73,6 +73,7 @@ import { useLastDeploy } from '@/hooks/useLastDeploy';
 import { displayFor, isUpStatus, STATUS_META, type DisplayStatus } from '@/lib/status';
 import { stageHealth, type StageHealthKind } from '@/lib/stageHealth';
 import { memoryPair } from '@/lib/memory';
+import { stagePower } from '@/lib/stagePower';
 import {
   api,
   errorMessage,
@@ -1267,14 +1268,25 @@ function ContainersSection({
   // "Running" is the live container state, NOT whether a deploy record exists —
   // an asleep stage still has its records (present=true) but no running container.
   const isUp = (m: Member) => isUpStatus(m.display);
-  const anyRunning = members.some(isUp);
-  // Asleep means the members READ asleep — not merely that nothing is up, which
-  // also covers a stage whose containers all died (see lib/stageHealth.ts). The
-  // banner beside it promises "wakes on access"; that promise has to be true.
-  const asleep = members.length > 0 && members.every((m) => m.display === 'asleep');
+  // Whether the row appears, what it says and which buttons it offers is ONE
+  // decision and it lives in lib/stagePower.ts — the locals this used to keep
+  // (`asleep`, `anyRunning`) went with it, so there is no second definition of
+  // "asleep" here to drift from the first.
   // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
   // so the message can attribute the sleep instead of a bare "asleep".
   const asleepReason = members.map((m) => m.asleepReason).find(Boolean) ?? null;
+  // What the power row may offer. The sweep evicts per DEPLOYMENT, so "some of
+  // this stage is asleep" is the ordinary case — and it used to be the one case
+  // with no way back (see lib/stagePower.ts).
+  const powerState = stagePower(
+    members.map((m) => ({
+      asleep: m.display === 'asleep',
+      up: isUp(m),
+      present: m.present,
+      expose: m.expose,
+    })),
+    asleepReason ?? undefined,
+  );
   // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
   // a standby slot managed via the backup swap, so no power toggle there.
   const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
@@ -1320,40 +1332,24 @@ function ContainersSection({
         </>
       ) : (
         <>
-      {/* Wake is offered whenever nothing is up — asleep OR dead. The previous
-          comment here claimed waking cannot help a dead stage; it can:
-          `_wake_context_stage` re-activates every member of the group and runs
-          `docker compose up`, which brings dead containers back. What must not
-          happen is the ROW claiming they are merely asleep, so the sentence
-          below says which case it is. */}
-      {/* The row always has exactly one thing to offer: if anything is up it
-          can free the memory, and if nothing is up Wake brings the group back —
+      {/* The row always has exactly one thing to offer: if anything is up it can
+          free the memory, and if nothing is up Wake brings the group back —
           `_wake_context_stage` re-activates every member and runs
           `docker compose up`, which revives dead containers as well as slept
           ones. What must not happen is the SENTENCE calling dead containers
-          asleep, so it says which case this is. */}
-      {canPower && members.length > 0 && (
+          asleep; stagePower owns both that decision and that wording. */}
+      {canPower && (powerState.canWake || powerState.canSleep) && (
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
-          <span className="text-[12.5px] text-muted-foreground">
-            {asleep
-              ? asleepReason === 'manual'
-                ? 'Asleep — put to sleep manually. Wakes on access, or wake now.'
-                : asleepReason === 'memory-pressure'
-                  ? 'Asleep — evicted under memory pressure. Wakes on access, or wake now.'
-                  : 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
-              : anyRunning
-                ? 'Free this stage’s memory now. On-demand stages wake automatically on access.'
-                : 'Nothing is running on this stage. Wake redeploys it — these containers are not asleep, so nothing will bring them back on access.'}
-          </span>
+          <span className="text-[12.5px] text-muted-foreground">{powerState.label}</span>
           <span className="ml-auto flex items-center gap-2">
-            {!anyRunning && (
+            {powerState.canWake && (
               <Button variant="outline" size="sm" className="h-7" disabled={busy}
                 onClick={() => power('wake')}>
                 <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
               </Button>
             )}
-            {anyRunning && (
+            {powerState.canSleep && (
               <Button variant="outline" size="sm" className="h-7" disabled={busy}
                 onClick={() => power('sleep')}>
                 <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
