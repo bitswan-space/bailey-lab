@@ -409,9 +409,22 @@ class InfraDriverClient:
     # ---- container primitives ----------------------------------------------
 
     async def container_list(
-        self, ctx: WorkspaceContext, labels: Optional[dict] = None
+        self,
+        ctx: WorkspaceContext,
+        labels: Optional[dict] = None,
+        with_restart_counts: bool = False,
     ) -> list[Container]:
-        body = {"ctx": ctx.to_json(), "filter": {"labels": labels or {}}}
+        """`with_restart_counts` costs a `docker inspect` of the listed
+        containers on the driver side, so only the automations listing — the one
+        that shows the number — asks for it. Every other caller ("is this
+        container up?" before a backup, a restore, a SQL query) leaves it off."""
+        body = {
+            "ctx": ctx.to_json(),
+            "filter": {
+                "labels": labels or {},
+                "with_restart_counts": with_restart_counts,
+            },
+        }
         out = await self._post_json(PATH_CONTAINERS_LIST, body)
         return [Container.from_json(c) for c in (out.get("containers") or [])]
 

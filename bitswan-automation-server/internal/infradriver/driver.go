@@ -191,10 +191,18 @@ type Image struct {
 	Size    int64  `json:"size"`    // bytes
 }
 
-// ContainerFilter narrows ContainerList. Empty fields are ignored; Labels are
-// matched as exact key=value pairs (e.g. gitops.deployment.id, gitops.stage).
+// ContainerFilter narrows ContainerList — and carries the one option the call
+// has. Empty fields are ignored; Labels are matched as exact key=value pairs
+// (e.g. gitops.deployment.id, gitops.stage).
 type ContainerFilter struct {
 	Labels map[string]string `json:"labels,omitempty"`
+	// Read each container's restart count too. OFF by default, and deliberately
+	// opt-in: the count needs a `docker inspect` on top of the `docker ps`, and
+	// ContainerList is the shared primitive behind everything — "is this one
+	// container up?" checks before every backup, restore and SQL-explorer
+	// query, and a re-broadcast on every docker start/die event. Only the
+	// automations listing, which actually shows the number, asks for it.
+	WithRestartCounts bool `json:"with_restart_counts,omitempty"`
 }
 
 // Container is one realized container.
