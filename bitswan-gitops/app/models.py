@@ -33,6 +33,17 @@ class DeployedAutomation(BaseModel):
     # container vanished under the inspect, or its line came back unreadable —
     # which is NOT the same claim as 0; the dashboard renders None as nothing.
     restart_count: int | None = None
+    # When this container last started. The ONE field that moves when a
+    # container is restarted in place — the id, the creation time and the restart
+    # count all stay exactly as they were, and the state is `running` on either
+    # side of a window too short to sample — so it is how the dashboard can tell
+    # that an operator's own Restart actually finished (bailey-lab #476).
+    #
+    # Always TIMEZONE-AWARE. A naive datetime serialises with no offset and the
+    # browser then reads it as local time, so a UTC+2 operator sees a restart
+    # that happened just now as two hours in the future. None means the driver
+    # could not read it (or it has never started) — never the epoch.
+    started_at: datetime | None = None
     mem_usage_bytes: int | None = None
     mem_reservation_mb: int | None = None
     mem_policy: str | None = None
