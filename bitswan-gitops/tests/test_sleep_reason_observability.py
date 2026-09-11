@@ -336,3 +336,36 @@ async def test_the_replica_order_does_not_decide_what_the_record_says(
     assert entry.mem_usage_bytes is None, "that was the OTHER replica's memory"
     assert entry.mem_over_reservation is False, "and that was the other replica's flag"
     assert entry.restart_count == 40
+
+
+async def test_an_unhealthy_replica_is_not_lost_to_a_healthy_one(tmp_path):
+    """Docker's healthcheck verdict rides on `status`, and every other field
+    belongs to the replica whose STATE won. With two replicas both `running`,
+    one failing its healthcheck, the winner is whichever came first — so the
+    verdict has to survive on its own, or the only fault anyone reported about
+    this deployment never reaches the wire."""
+    svc = _svc(tmp_path)
+    svc.workspace_name = "ws"
+    from app.models import DeployedAutomation
+
+    entry = DeployedAutomation(
+        container_id=None,
+        endpoint_name=None,
+        created_at=None,
+        name="backend-bp-production",
+        state=None,
+        status=None,
+        deployment_id="backend-bp-production",
+        active=True,
+        automation_url=None,
+        relative_path="copies/main/bp/backend",
+        stage="production",
+    )
+    label = {"gitops.deployment_id": "backend-bp-production"}
+    containers = [
+        {"Id": "ok", "State": "running", "Status": "healthy", "Labels": label},
+        {"Id": "sick", "State": "running", "Status": "unhealthy", "Labels": label},
+    ]
+    svc._apply_docker_overlay([entry], containers, {}, {})
+    assert entry.state == "running"
+    assert entry.status == "unhealthy"

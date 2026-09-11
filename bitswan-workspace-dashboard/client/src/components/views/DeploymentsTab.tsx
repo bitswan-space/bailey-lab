@@ -1305,13 +1305,19 @@ function ContainersSection({
         </>
       ) : (
         <>
-      {/* Only when it can actually offer something. A stage whose containers all
-          died has nothing to wake (waking re-activates; these are active and
-          dead) and nothing to put to sleep, and rendering a memory banner with
-          an empty button row beside it is a dead end on the stage that most
-          needs an action — the per-container Start below is the one that
-          applies. */}
-      {canPower && (members.some((m) => m.display === 'asleep') || anyRunning) && (
+      {/* Wake is offered whenever nothing is up — asleep OR dead. The previous
+          comment here claimed waking cannot help a dead stage; it can:
+          `_wake_context_stage` re-activates every member of the group and runs
+          `docker compose up`, which brings dead containers back. What must not
+          happen is the ROW claiming they are merely asleep, so the sentence
+          below says which case it is. */}
+      {/* The row always has exactly one thing to offer: if anything is up it
+          can free the memory, and if nothing is up Wake brings the group back —
+          `_wake_context_stage` re-activates every member and runs
+          `docker compose up`, which revives dead containers as well as slept
+          ones. What must not happen is the SENTENCE calling dead containers
+          asleep, so it says which case this is. */}
+      {canPower && members.length > 0 && (
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
           <span className="text-[12.5px] text-muted-foreground">
@@ -1321,14 +1327,12 @@ function ContainersSection({
                 : asleepReason === 'memory-pressure'
                   ? 'Asleep — evicted under memory pressure. Wakes on access, or wake now.'
                   : 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
-              : 'Free this stage’s memory now. On-demand stages wake automatically on access.'}
+              : anyRunning
+                ? 'Free this stage’s memory now. On-demand stages wake automatically on access.'
+                : 'Nothing is running on this stage. Wake redeploys it — these containers are not asleep, so nothing will bring them back on access.'}
           </span>
-          {/* Wake whenever ANYTHING is asleep, not only when everything is: a
-              stage with one member asleep and another whose container exited
-              hit neither branch and offered no action at all — just a disabled
-              Sleep button. (The stacked wake branch generalises this row.) */}
           <span className="ml-auto flex items-center gap-2">
-            {members.some((m) => m.display === 'asleep') && (
+            {!anyRunning && (
               <Button variant="outline" size="sm" className="h-7" disabled={busy}
                 onClick={() => power('wake')}>
                 <Power className="mr-1.5 size-3.5" aria-hidden /> Wake

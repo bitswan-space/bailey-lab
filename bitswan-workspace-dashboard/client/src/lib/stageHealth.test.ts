@@ -134,10 +134,11 @@ test('a real fault still outranks a member nobody can account for', () => {
   );
 });
 
-test('a container created and never started is not counted as running', () => {
-  // Docker's `created` means it exists and has executed nothing. Mapping it to
-  // 'running' put a green tick on a stage whose service had never run — the
-  // same intent-over-observation this module removes, in the mapping every
-  // view routes through.
-  assert.equal(stageHealth({ deployed: true, statuses: ['running', 'unknown'] }).kind, 'unknown');
+test('a member nobody can account for is named even when another is asleep', () => {
+  // Sleeping is accounted for; missing is not. Checking the sleepers first
+  // swallowed the third member entirely: "1 service of 3 asleep", calm blue,
+  // and no mention of the one that is gone.
+  const h = stageHealth({ deployed: true, statuses: ['running', 'asleep', 'unknown'] });
+  assert.equal(h.kind, 'unknown');
+  assert.equal(h.label, '1 service of 3 not accounted for');
 });
