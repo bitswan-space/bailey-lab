@@ -861,7 +861,16 @@ class AutomationService:
         where an unreadable state sits, which is at the bottom.
         """
         # Worst first.
-        order = ["dead", "exited", "failed", "restarting", "paused", "created", "starting", "running"]
+        order = [
+            "dead",
+            "exited",
+            "failed",
+            "restarting",
+            "paused",
+            "created",
+            "starting",
+            "running",
+        ]
 
         def rank(state: str) -> float:
             try:
