@@ -35,6 +35,14 @@ export interface BpContainer {
    * container has never died.
    */
   restartCount?: number;
+  /**
+   * The container the row describes, and when it last started (ISO-8601). Both
+   * absent when the driver could not read them. Together they are the baseline
+   * an operator's own Restart is measured against: the start time is the only
+   * thing that moves when a container is restarted in place (bailey-lab #476).
+   */
+  containerId?: string;
+  startedAt?: string;
   /** True for frontends (exposed through Bailey), false for worker containers. */
   expose: boolean;
 }
@@ -85,6 +93,15 @@ export function bpContainers(
         restartCount === undefined
           ? prev?.restartCount
           : Math.max(restartCount, prev?.restartCount ?? 0),
+      // The id and the start time come from the KEPT record, like the url above
+      // and NOT like the count on the line above that. The difference is
+      // deliberate: "the highest count any replica reported" is still true of
+      // the deployment, but "the most recently started replica" pinned to
+      // another replica's id is false about a container — and it would make the
+      // row look restarted whenever ANY replica restarted, witnessing an action
+      // this row's own Restart button never took.
+      containerId: (keep === 'new' ? a.container_id : prev?.containerId) ?? undefined,
+      startedAt: (keep === 'new' ? a.started_at : prev?.startedAt) ?? undefined,
       expose: !!a.expose || !!prev?.expose,
     });
   }

@@ -28,6 +28,14 @@ export interface DeployedAutomation {
   // died — the durable evidence a status dot cannot carry (bailey-lab #463).
   // Absent/null means the driver could not read it, which is NOT the same as 0.
   restart_count?: number | null;
+  // When this container last started, ISO-8601 with an explicit offset. The ONE
+  // field that moves when a container is restarted in place — the id, the
+  // creation time and the restart count all stay as they were, and the state is
+  // `running` on either side of a window too short to sample — so it is how the
+  // dashboard can tell that an operator's own Restart finished (bailey-lab
+  // #476). Absent/null means the driver could not read it (or the container has
+  // never started), which is NOT "started at the epoch".
+  started_at?: string | null;
   // Memory governance (Containers tab): live usage vs the declared reservation.
   mem_usage_bytes?: number | null;
   mem_reservation_mb?: number | null;

@@ -13,7 +13,7 @@ import time
 import toml
 import uuid
 import yaml
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any, Callable
 from app.models import DeployedAutomation
@@ -695,8 +695,8 @@ class AutomationService:
         containers = await self.infra_driver.container_list(
             self._workspace_ctx(),
             labels={"gitops.workspace": self.workspace_name},
-            # The one caller that shows the restart count, so the one that pays
-            # the inspect for it.
+            # The one caller that shows the restart count and reads the start
+            # time, so the one that pays for the single inspect carrying both.
             with_restart_counts=True,
         )
         return [
@@ -959,6 +959,11 @@ class AutomationService:
                     a.state = None
                     a.container_id = None
                     a.restart_count = None
+                    # …and its start time. The clone is taken DURING this pass,
+                    # so if the live slot's container was overlaid first the
+                    # standby would read "up since Tuesday" off a container that
+                    # may not even be running.
+                    a.started_at = None
                     # …including the memory reading. `docker stats` only reports
                     # RUNNING containers, so a standby slot that is down would
                     # otherwise keep showing the live slot's usage — and its red
@@ -996,6 +1001,21 @@ class AutomationService:
                 except (ValueError, TypeError):
                     pass
 
+            # The container's last start, unix seconds from the driver's one
+            # batched inspect. TIMEZONE-AWARE, unlike created_at above: a naive
+            # datetime serialises with no offset and the browser reads it as
+            # local time. (created_at has that defect latent — nothing renders
+            # it — and fixing it needs its own look at every consumer.)
+            # Falsy means absent: None is "not read", and 0 is not a container
+            # start time.
+            started_str = container.get("StartedAt")
+            started_at = None
+            if started_str:
+                try:
+                    started_at = datetime.fromtimestamp(started_str, tz=timezone.utc)
+                except (ValueError, TypeError, OSError):
+                    pass
+
             a.endpoint_name = info.get("Name")
             # `deploy.replicas > 1` labels every replica with the SAME
             # deployment_id, so this loop visits one entry several times. Taking
@@ -1017,6 +1037,12 @@ class AutomationService:
             if won:
                 a.container_id = container.get("Id")
                 a.created_at = created_at
+                # The start instant belongs to the container the id names, like
+                # the creation instant beside it. Taking the newest replica's
+                # start time and pairing it with another replica's id would
+                # report a restart of a container the row's own Restart button
+                # never touched.
+                a.started_at = started_at
                 a.status = container.get("Status", "")
                 # The memory reading belongs to whichever container we just
                 # switched to. `docker stats` only reports RUNNING containers,
