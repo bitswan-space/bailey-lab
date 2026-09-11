@@ -248,3 +248,47 @@ async def test_the_merged_record_describes_one_container(tmp_path, monkeypatch):
     assert entry.container_id == "sick", "the record must point at the container it describes"
     assert entry.status != "healthy", "state and status must not contradict each other"
     assert entry.mem_usage_bytes is None, "the healthy replica's memory is not this record's"
+
+
+async def test_the_replica_order_does_not_decide_what_the_record_says(
+    tmp_path, monkeypatch
+):
+    """The same two replicas, the other way round.
+
+    With the healthy one first, the record took its id and memory, then switched
+    the id to the sick replica when that one won the state — but `docker stats`
+    has no row for a restarting container, so the healthy replica's usage (and
+    its over-reservation flag) stayed behind on a record now describing the sick
+    one.
+    """
+    svc = _svc(tmp_path)
+    svc.workspace_name = "ws"
+    from app.models import DeployedAutomation
+
+    entry = DeployedAutomation(
+        container_id=None,
+        endpoint_name=None,
+        created_at=None,
+        name="backend-bp-production",
+        state=None,
+        status=None,
+        deployment_id="backend-bp-production",
+        active=True,
+        automation_url=None,
+        relative_path="copies/main/bp/backend",
+        stage="production",
+    )
+    label = {
+        "gitops.deployment_id": "backend-bp-production",
+        "gitops.mem_reservation_mb": "50",
+    }
+    containers = [
+        {"Id": "healthy", "State": "running", "Status": "healthy", "Labels": label},
+        {"Id": "sick", "State": "restarting", "Status": "", "Labels": label, "RestartCount": 40},
+    ]
+    svc._apply_docker_overlay([entry], containers, {"_mem": {"healthy": 900 * 1024 * 1024}}, {})
+    assert entry.state == "restarting"
+    assert entry.container_id == "sick"
+    assert entry.mem_usage_bytes is None, "that was the OTHER replica's memory"
+    assert entry.mem_over_reservation is False, "and that was the other replica's flag"
+    assert entry.restart_count == 40
