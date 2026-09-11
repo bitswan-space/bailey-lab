@@ -5888,7 +5888,9 @@ class AutomationService:
                     # lie in the file everything else reads — and would send the
                     # NEXT Start down the whole-workspace branch this one exists
                     # to avoid, where the same unrelated failure awaits it.
-                    logger.warning("wake of %s failed to redeploy: %s", deployment_id, e)
+                    logger.warning(
+                        "wake of %s failed to redeploy: %s", deployment_id, e
+                    )
                     await self.mark_as_inactive(deployment_id)
                     raise HTTPException(
                         status_code=502,
