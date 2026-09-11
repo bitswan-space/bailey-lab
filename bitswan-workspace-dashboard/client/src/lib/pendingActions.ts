@@ -180,10 +180,14 @@ export function settle(
       // container's clock, so this comparison is skew-free; comparing either
       // against Date.now() would not be.)
       if (after !== undefined && (before === undefined || after > before)) return OBSERVED;
-      // The same container, up, with no later start to show for it. If nobody
-      // can read a start time here, the restart is simply not witnessable — say
-      // that once, rather than wait out a budget we know will expire.
-      if (p.issued && after === undefined) return UNWITNESSABLE;
+      // The same container, up, and no start time to compare — on EITHER side.
+      // That is a workspace whose driver does not report the field (one built
+      // before it), so there is nothing here that could ever witness this
+      // restart: say so once instead of waiting out a budget we know will
+      // expire. When the baseline HAD a start time and this reading does not,
+      // the field is plainly available and the inspect just lost a race against
+      // the restarting container — that one is worth waiting for.
+      if (p.issued && before === undefined && after === undefined) return UNWITNESSABLE;
       return NOT_DONE;
     }
   }

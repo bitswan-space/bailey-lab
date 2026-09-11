@@ -102,17 +102,25 @@ test('a restart whose container was replaced settles on the new container id', (
   assert.deepEqual(done, { done: true, how: 'observed' });
 });
 
-test('a restart against a record with no start time is unwitnessable, not observed', () => {
-  // An infra-driver older than the field returns neither reading. Saying
-  // "restarted" would be the pre-#476 claim; waiting out 90s would be a false
-  // alarm. It is named for what it is, once.
-  const done = settle(action(), automation({ started_at: null }), 2);
+test('a restart is unwitnessable where the field was never readable', () => {
+  // An infra-driver older than the field returns nothing on either side of the
+  // action. Saying "restarted" would be the pre-#476 claim; waiting out 90s
+  // would be a false alarm. It is named for what it is, once.
+  const p = action({ baseline: { containerId: 'c1', status: 'running' } });
+  const done = settle(p, automation({ started_at: null }), 2);
   assert.deepEqual(done, { done: true, how: 'unwitnessable' });
+});
+
+test('an inspect that lost a race is waited for, not called unwitnessable', () => {
+  // The baseline HAS a start time, so the field is plainly available here — a
+  // reading that arrives without one is the inspect losing its race against a
+  // container that is, by definition, restarting. The next snapshot has it.
+  assert.deepEqual(settle(action(), automation({ started_at: null }), 2), { done: false });
 });
 
 test('an unwitnessable restart is only reported once the request was accepted', () => {
   // Between the click and gitops accepting, there is nothing to report yet.
-  const p = action({ issued: false });
+  const p = action({ issued: false, baseline: { containerId: 'c1', status: 'running' } });
   assert.deepEqual(settle(p, automation({ started_at: null }), 2), { done: false });
 });
 
