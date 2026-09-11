@@ -853,20 +853,34 @@ class AutomationService:
     def forget_copy(self, copy: str) -> None:
         self._cache.pop(copy, None)
 
-    # Docker state → the dashboard's display bucket, and each bucket's severity.
-    # Mirrors lib/status.ts (stateToDisplay + STATUS_SEVERITY) deliberately: two
-    # layers collapsing the same replicas must not disagree about which one is
-    # worse. Higher is worse; an unreadable state sits at the BOTTOM, because an
-    # observation we cannot read must never outrank one we can.
+    # How bad each Docker state is, for collapsing the containers of ONE
+    # deployment. Higher is worse. Ordered to agree with the dashboard's
+    # STATUS_SEVERITY wherever both are deciding the same thing, with one
+    # deliberate difference, spelled out below.
     _STATE_SEVERITY = {
-        "dead": 6,  # stopped
-        "exited": 6,  # stopped
-        "failed": 6,  # stopped
-        "paused": 6,  # stopped — not up, whatever its name suggests
+        "dead": 6,  # → stopped
+        "exited": 6,  # → stopped
+        "failed": 6,  # → stopped
+        "paused": 6,  # → stopped — not up, whatever its name suggests
         "restarting": 5,
+        # Created and never started. This ranks ABOVE running, unlike the
+        # dashboard's table, and the difference is not an oversight:
+        #
+        #   here we merge the CONTAINERS of one deployment, and `created` is a
+        #   real observation — Docker told us this replica exists and has never
+        #   executed anything. A running sibling must not erase it.
+        #
+        #   the dashboard merges RECORDS, and it ranks the bucket `created`
+        #   displays as ('unknown') at the bottom, because there that value
+        #   means nobody told us anything — and an absence must never outrank
+        #   something seen.
+        #
+        # Same principle, opposite answer, because they are not the same
+        # question. An unrecognised state — `removing`, or whatever Docker adds
+        # next — IS an absence here too, and gets 0 below.
+        "created": 3,
         "running": 2,
         "starting": 2,  # on its way up
-        "created": 1,  # exists, never started: unknown, not a claim either way
     }
 
     @staticmethod
