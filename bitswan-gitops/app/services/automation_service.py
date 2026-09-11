@@ -695,6 +695,9 @@ class AutomationService:
         containers = await self.infra_driver.container_list(
             self._workspace_ctx(),
             labels={"gitops.workspace": self.workspace_name},
+            # The one caller that shows the restart count, so the one that pays
+            # the inspect for it.
+            with_restart_counts=True,
         )
         return [
             c.to_docker_dict()
@@ -761,7 +764,13 @@ class AutomationService:
                     state=None,
                     status=None,
                     deployment_id=deployment_id,
-                    active=cfg.get("active", False),
+                    # Absent means nobody ever slept it. Sleeping is something
+                    # gitops WRITES (mark_as_inactive sets active: False), so a
+                    # legacy entry that predates normalization is not asleep —
+                    # and defaulting it to False made the dashboard show it as
+                    # "Asleep — wakes on access" for a deployment that was never
+                    # started and will not wake.
+                    active=self._is_active(cfg),
                     automation_url=None,
                     relative_path=cfg.get("relative_path", None),
                     # Production is persisted as an empty-string stage in
@@ -844,6 +853,72 @@ class AutomationService:
     def forget_copy(self, copy: str) -> None:
         self._cache.pop(copy, None)
 
+    # How bad each Docker state is, for collapsing the containers of ONE
+    # deployment. Higher is worse. Ordered to agree with the dashboard's
+    # STATUS_SEVERITY wherever both are deciding the same thing, with one
+    # deliberate difference, spelled out below.
+    _STATE_SEVERITY = {
+        "dead": 6,  # → stopped
+        "exited": 6,  # → stopped
+        "failed": 6,  # → stopped
+        "paused": 6,  # → stopped — not up, whatever its name suggests
+        "restarting": 5,
+        # Created and never started. This ranks ABOVE running, unlike the
+        # dashboard's table, and the difference is not an oversight:
+        #
+        #   here we merge the CONTAINERS of one deployment, and `created` is a
+        #   real observation — Docker told us this replica exists and has never
+        #   executed anything. A running sibling must not erase it.
+        #
+        #   the dashboard merges RECORDS, and it ranks the bucket `created`
+        #   displays as ('unknown') at the bottom, because there that value
+        #   means nobody told us anything — and an absence must never outrank
+        #   something seen.
+        #
+        # Same principle, opposite answer, because they are not the same
+        # question. An unrecognised state — `removing`, or whatever Docker adds
+        # next — IS an absence here too, and gets 0 below.
+        "created": 3,
+        "running": 2,
+        "starting": 2,  # on its way up
+    }
+
+    @staticmethod
+    def _is_active(conf: dict | None) -> bool:
+        """Is this deployment entry live — i.e. NOT asleep?
+
+        A MISSING `active` key means nobody ever slept it. Sleeping is something
+        gitops writes (`mark_as_inactive` sets `active: False`), and write-time
+        normalisation fills the key in for everything it touches, so an entry
+        without one predates that normalisation and is live. The file said
+        nothing, and nothing is not "no".
+
+        This is the only place that decides it. There were three readings in
+        this file — two defaulting to True and one to False — so the automations
+        list called a legacy entry live while the deploy path skipped it, and
+        the operator got a member stuck at "not accounted for" that nothing was
+        ever going to start.
+        """
+        return bool((conf or {}).get("active", True))
+
+    @classmethod
+    def _worse_state(cls, current: str | None, incoming: str) -> str:
+        """The less healthy of two container states for ONE deployment.
+
+        Replicas of a deployment share its deployment_id, so several containers
+        describe one entry. A dead replica beside a live one is not "running":
+        the operator has to see the worst of them, by the same ranking the
+        dashboard uses when it collapses records onto a row.
+        """
+        if not current:
+            return incoming
+
+        def rank(state: str) -> int:
+            # 0 = an unrecognised state: below everything, including running.
+            return cls._STATE_SEVERITY.get(state, 0)
+
+        return incoming if rank(incoming) > rank(current) else current
+
     def _apply_docker_overlay(
         self,
         entries: list[DeployedAutomation],
@@ -877,6 +952,20 @@ class AutomationService:
                 if slot and base_id in by_id:
                     a = by_id[base_id].model_copy()
                     a.deployment_id = deployment_id
+                    # The clone must describe ITS OWN container, not inherit the
+                    # live slot's reading — the fields below are merged (worst
+                    # state wins, counts are kept), so anything carried over
+                    # from the base would stick to the standby slot.
+                    a.state = None
+                    a.container_id = None
+                    a.restart_count = None
+                    # …including the memory reading. `docker stats` only reports
+                    # RUNNING containers, so a standby slot that is down would
+                    # otherwise keep showing the live slot's usage — and its red
+                    # over-reservation flag — attributed to a container that is
+                    # not even up.
+                    a.mem_usage_bytes = None
+                    a.mem_over_reservation = False
                     entries.append(a)
                     by_id[deployment_id] = a
                 else:
@@ -907,24 +996,73 @@ class AutomationService:
                 except (ValueError, TypeError):
                     pass
 
-            a.container_id = container.get("Id")
             a.endpoint_name = info.get("Name")
-            a.created_at = created_at
-            a.state = container.get("State", "unknown")
-            a.status = container.get("Status", "")
+            # `deploy.replicas > 1` labels every replica with the SAME
+            # deployment_id, so this loop visits one entry several times. Taking
+            # the last container's word for it meant a 3-replica deployment with
+            # one replica crashlooping reported `running` — a healthy replica
+            # hiding a broken one, which is the bug the dashboard half of this
+            # change removes, still live at the source. So: the worst state
+            # observed wins, and a count that WAS read is never overwritten by
+            # a replica that carries none.
+            merged = self._worse_state(a.state, container.get("State", "unknown"))
+            # ONE record, ONE container: everything below describes whichever
+            # replica's state won. Merging `state` while letting the id, the
+            # creation time and the memory reading come from whichever replica
+            # happened to be last would emit a record describing two different
+            # containers — state="restarting" beside the healthy replica's id,
+            # which is the same hazard the dashboard avoids when it collapses
+            # records onto a row.
+            won = a.container_id is None or merged != a.state
+            if won:
+                a.container_id = container.get("Id")
+                a.created_at = created_at
+                a.status = container.get("Status", "")
+                # The memory reading belongs to whichever container we just
+                # switched to. `docker stats` only reports RUNNING containers,
+                # so a restarting winner has no row — and leaving the previous
+                # replica's numbers in place would put the healthy replica's
+                # usage, and its red over-reservation flag, on a record that now
+                # describes the sick one. Order of replicas must not decide it.
+                a.mem_usage_bytes = None
+                a.mem_over_reservation = False
+            elif container.get("Status") == "unhealthy" and a.status != "unhealthy":
+                # One exception to "the winner owns every field": Docker's
+                # healthcheck verdict. Two replicas both `running`, one of them
+                # failing its healthcheck — the winner is whichever came first,
+                # and dropping the verdict would lose the only fault anyone
+                # reported about this deployment.
+                a.status = "unhealthy"
+            a.state = merged
+            # The count belongs to the winning replica too. max()-ing it across
+            # replicas put one container's 23,032 next to another container's
+            # id — the Inspect pane beside it reads the real per-container value
+            # and would have shown 3.
+            if won:
+                a.restart_count = container.get("RestartCount")
             a.automation_url = url
 
             # Memory overlay for the Containers tab: reservation + policy from the
             # container labels (stamped by the compiler); live usage from the
             # stats map threaded via info["_mem"] (container id → bytes).
-            try:
-                a.mem_reservation_mb = (
-                    int(labels.get("gitops.mem_reservation_mb") or 0) or None
-                )
-            except (TypeError, ValueError):
-                a.mem_reservation_mb = None
-            a.mem_policy = labels.get("gitops.mem_policy") or None
-            usage = ((info or {}).get("_mem") or {}).get(container.get("Id"))
+            # The reservation and the policy are labels of THIS container, so
+            # they move with the winner as well: the over-reservation flag
+            # compares usage against the reservation, and taking them from
+            # different replicas made that comparison — which raises a SIEM
+            # event — depend on the order Docker listed them in.
+            if won:
+                try:
+                    a.mem_reservation_mb = (
+                        int(labels.get("gitops.mem_reservation_mb") or 0) or None
+                    )
+                except (TypeError, ValueError):
+                    a.mem_reservation_mb = None
+                a.mem_policy = labels.get("gitops.mem_policy") or None
+            # Keyed on the container this record describes, and NOT gated on
+            # `won`: the winner's stats row may be read on a later iteration,
+            # and gating it there meant a deployment whose first-seen replica
+            # had no row never reported memory at all.
+            usage = ((info or {}).get("_mem") or {}).get(a.container_id)
             if usage is not None:
                 a.mem_usage_bytes = int(usage)
                 if a.mem_reservation_mb:
@@ -939,13 +1077,23 @@ class AutomationService:
         # would be blank whenever the container is down and the user couldn't wake it.
         for a in entries:
             if a.expose and not a.automation_url and a.deployment_id:
-                base_id = a.deployment_id.split("@")[0]
+                base_id, _, slot = a.deployment_id.partition("@")
                 dep_conf = dep_configs.get(base_id, {})
+                # The slot is what the host name turns on, so it cannot be
+                # stripped here: handing a standby slot the LIVE stage's URL put
+                # the operator one click from production while the UI told them
+                # they were looking at the standby container. The main loop
+                # above is careful about exactly this.
+                host_stage = (
+                    "dr"
+                    if slot
+                    else (dep_conf.get("stage", "production") or "production")
+                )
                 a.automation_url = generate_workspace_url(
                     self.workspace_name,
                     dep_conf.get("automation_name", base_id),
                     dep_conf.get("context", ""),
-                    dep_conf.get("stage", "production") or "production",
+                    host_stage,
                     gitops_domain,
                     True,
                 )
@@ -986,9 +1134,23 @@ class AutomationService:
         # (memory-pressure | manual) so the dashboard/logs explain the absence
         # instead of a container silently vanishing. Running entries clear any
         # stale marker (self-healing).
+        # `active` is baked into the static cache when it is built, and sleeping
+        # a deployment only rewrites bitswan.yaml — so the cached copy went on
+        # claiming active:true for an evicted deployment until something else
+        # rebuilt the cache. Re-read it from the yaml this call already loaded:
+        # whether a deployment is asleep is exactly what a consumer asking for
+        # the automations list needs to be told.
+        live_deployments = (bs_yaml or {}).get("deployments", {}) or {}
         for a in result:
             if not a.deployment_id:
                 continue
+            conf = live_deployments.get(a.deployment_id)
+            if conf is not None:
+                # Same reading as the static builder above: a missing key is not
+                # a sleep. Refreshing this at all is the point — the cache bakes
+                # `active` in when it is built, and sleeping only rewrites the
+                # yaml.
+                a.active = self._is_active(conf)
             if a.container_id:
                 self._clear_sleep_reason(a.deployment_id)
             else:
@@ -5760,7 +5922,7 @@ class AutomationService:
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         active_deployments = {}
         for deployment_id, config in bs_yaml["deployments"].items():
-            if config.get("active", False):
+            if self._is_active(config):
                 active_deployments[deployment_id] = config
         return active_deployments
 

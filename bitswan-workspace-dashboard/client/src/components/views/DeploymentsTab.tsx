@@ -1,6 +1,7 @@
 import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
+  AlertTriangle,
   Archive,
   ArrowRight,
   Boxes,
@@ -69,7 +70,9 @@ import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import type { ServiceType, StagingGate, StagingLogEntry, StagingSignoff } from '@/lib/api';
 import { promoteBpWithToast, watchDeployTask } from '@/lib/deployBp';
 import { useLastDeploy } from '@/hooks/useLastDeploy';
-import { STATUS_META, stateToDisplay, type DisplayStatus } from '@/lib/status';
+import { displayFor, isUpStatus, STATUS_META, type DisplayStatus } from '@/lib/status';
+import { stageHealth, type StageHealthKind } from '@/lib/stageHealth';
+import { memoryPair } from '@/lib/memory';
 import {
   api,
   errorMessage,
@@ -125,6 +128,21 @@ const STAGE_LABEL: Record<string, string> = Object.fromEntries(
 // DR mirrors Production — it shows Production's deployment data and shares its
 // secrets. Map a stage id to the id whose data it displays.
 const stageDataId = (id: StageId): StageId => (id === 'dr' ? 'production' : id);
+
+/**
+ * Has anything actually been DEPLOYED to this stage?
+ *
+ * One predicate, because the pipeline node and the stage card sit in the same
+ * viewport and were each deciding it their own way: the node asked for a
+ * history entry carrying a source commit, the card settled for any current
+ * entry at all. gitops writes history rows for firewall, backup and secret
+ * changes too — those have no source commit and no members — so a stage that
+ * had only ever had a secret declared showed an empty dashed circle above a
+ * card that said "Deployed". A deploy is the thing with a source commit.
+ */
+// eslint-disable-next-line no-restricted-syntax -- mirrors byStage's entry type
+const stageIsDeployed = (hist?: BpHistory | null): boolean =>
+  !!hist && hist.history.some((h) => !!h.source_commit);
 
 /** The stage a deployment id targets. Ids end `-dev` / `-staging`; production
  *  ids are either `-production` or bare `<automation>-<bp>` (gitops's target-id
@@ -289,17 +307,38 @@ function SectionTab({
   );
 }
 
+// What the badge on a pipeline node says. A ✓ is reserved for a stage whose
+// containers were SEEN and are all fine; every other case gets its own marker
+// or a plain grey dot, so the tick never stands in for "we did not look".
+const STAGE_BADGE: Record<StageHealthKind, { dot: string; title: string }> = {
+  healthy: { dot: 'bg-emerald-500', title: 'Deployed and running' },
+  restarting: { dot: 'bg-violet-500', title: 'Deployed — a container keeps restarting' },
+  failing: { dot: 'bg-red-500', title: 'Deployed — a container is not running' },
+  asleep: { dot: 'bg-sky-500', title: 'Deployed, asleep — it wakes on access' },
+  'partly-asleep': { dot: 'bg-sky-500', title: 'Deployed — some of its services are asleep' },
+  unknown: { dot: 'bg-zinc-300', title: 'Deployed — open the stage to see its containers' },
+  'not-deployed': { dot: 'bg-zinc-300', title: 'Nothing deployed here yet' },
+};
+
 // ── Pipeline node ───────────────────────────────────────────────────────────
 // Label sits ABOVE the circle; the active stage gets a brand-blue ring and a
 // short vertical "tail" dropping toward the card below (wireframe StageNode).
 function StageNode({
   stage,
   deployed,
+  health,
   active,
   onClick,
 }: {
   stage: { id: StageId; label: string; icon: LucideIcon };
   deployed: boolean;
+  /**
+   * What the stage's containers were observed doing. The badge renders THIS,
+   * while the emerald fill renders `deployed` — the two are different claims,
+   * and the badge used to be a second copy of the first one, so a crashlooping
+   * production wore a green tick (bailey-lab #463).
+   */
+  health: StageHealthKind;
   active: boolean;
   onClick: () => void;
 }) {
@@ -328,11 +367,18 @@ function StageNode({
           )}
         >
           <Icon className="size-[22px]" aria-hidden />
-          <span className="absolute -bottom-0.5 -right-0.5 flex size-[18px] items-center justify-center rounded-full border-2 border-background bg-background shadow-sm">
-            {deployed ? (
+          <span
+            className="absolute -bottom-0.5 -right-0.5 flex size-[18px] items-center justify-center rounded-full border-2 border-background bg-background shadow-sm"
+            title={STAGE_BADGE[health].title}
+          >
+            {health === 'healthy' ? (
               <Check className="size-3 text-emerald-500" aria-hidden />
+            ) : health === 'restarting' ? (
+              <RotateCcw className="size-3 text-violet-500" aria-hidden />
+            ) : health === 'failing' ? (
+              <AlertTriangle className="size-3 text-red-500" aria-hidden />
             ) : (
-              <span className="size-1.5 rounded-full bg-zinc-300" />
+              <span className={cn('size-1.5 rounded-full', STAGE_BADGE[health].dot)} />
             )}
           </span>
         </span>
@@ -962,19 +1008,6 @@ function EmptyTab({ icon: Icon, label }: { icon: LucideIcon; label: string }) {
 // ── Containers tab ──────────────────────────────────────────────────────────
 
 // Human byte size (binary units — what `free -h` shows).
-function fmtBytes(n: number): string {
-  if (!n && n !== 0) return '—';
-  const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < u.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  const s = v >= 100 || i === 0 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
-  return `${s} ${u[i]}`;
-}
-
 interface Member {
   id: string;
   name: string;
@@ -989,6 +1022,10 @@ interface Member {
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
   memReservationMB: number | null;
   memOver: boolean;
+  // Times Docker's restart policy has brought this member's container back up.
+  // Absent when the driver did not read it — never 0 in that case, because a
+  // container that has never died is a different claim (bailey-lab #463).
+  restartCount?: number;
   // Why this member is asleep — 'memory-pressure' | 'manual' — or null when it
   // has a running container. Drives the stage's "Asleep" attribution.
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
@@ -1078,7 +1115,10 @@ function ContainerCard({
 }) {
   const [open, setOpen] = useState<'logs' | 'inspect' | null>(null);
   const meta = STATUS_META[m.display];
-  const running = m.display === 'running';
+  // Up, not healthy: a restarting container is running (over and over), so the
+  // useful action on it is Stop. Offering Start would be answering a question
+  // nobody asked and implying it is down.
+  const running = isUpStatus(m.display);
   const KindIcon = m.expose ? Globe : Boxes;
   const toggle = (p: 'logs' | 'inspect') => setOpen((cur) => (cur === p ? null : p));
   return (
@@ -1104,6 +1144,15 @@ function ContainerCard({
             {m.replicas}
           </span>
         )}
+        {!!m.restartCount && (
+          <span
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-violet-600"
+            title={`Docker's restart policy has brought this container back up ${m.restartCount.toLocaleString()} times — it keeps dying`}
+          >
+            <RotateCcw className="size-3" aria-hidden />
+            {m.restartCount.toLocaleString()}
+          </span>
+        )}
         {m.memReservationMB != null && (
           <span
             className={cn(
@@ -1113,11 +1162,11 @@ function ContainerCard({
             title={
               m.memOver
                 ? 'Memory usage exceeds this container’s reservation'
-                : 'Memory usage / reserved'
+                : 'Live memory usage / the reservation declared in automation.toml'
             }
           >
             <MemoryStick className="size-3" aria-hidden />
-            {m.memUsageBytes != null ? fmtBytes(m.memUsageBytes) : '—'} / {m.memReservationMB} MB
+            {memoryPair(m.memUsageBytes ?? undefined, m.memReservationMB ?? undefined)}
           </span>
         )}
         {m.present && (
@@ -1179,6 +1228,7 @@ function ContainerCard({
 
 function ContainersSection({
   members,
+  emptyReason,
   stage,
   stageLabel,
   bp,
@@ -1186,6 +1236,8 @@ function ContainersSection({
   onRefresh,
 }: {
   members: Member[];
+  /** Why the list is empty, when "none deployed" is not the reason. */
+  emptyReason?: string;
   stage: StageId;
   stageLabel: string;
   bp: string;
@@ -1214,13 +1266,12 @@ function ContainersSection({
   const [busy, setBusy] = useState(false);
   // "Running" is the live container state, NOT whether a deploy record exists —
   // an asleep stage still has its records (present=true) but no running container.
-  const isUp = (m: Member) =>
-    m.display === 'running' ||
-    m.display === 'restarting' ||
-    m.display === 'building' ||
-    m.display === 'deployed';
+  const isUp = (m: Member) => isUpStatus(m.display);
   const anyRunning = members.some(isUp);
-  const asleep = members.length > 0 && members.every((m) => !isUp(m));
+  // Asleep means the members READ asleep — not merely that nothing is up, which
+  // also covers a stage whose containers all died (see lib/stageHealth.ts). The
+  // banner beside it promises "wakes on access"; that promise has to be true.
+  const asleep = members.length > 0 && members.every((m) => m.display === 'asleep');
   // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
   // so the message can attribute the sleep instead of a bare "asleep".
   const asleepReason = members.map((m) => m.asleepReason).find(Boolean) ?? null;
@@ -1269,7 +1320,19 @@ function ContainersSection({
         </>
       ) : (
         <>
-      {canPower && (members.length > 0 || asleep) && (
+      {/* Wake is offered whenever nothing is up — asleep OR dead. The previous
+          comment here claimed waking cannot help a dead stage; it can:
+          `_wake_context_stage` re-activates every member of the group and runs
+          `docker compose up`, which brings dead containers back. What must not
+          happen is the ROW claiming they are merely asleep, so the sentence
+          below says which case it is. */}
+      {/* The row always has exactly one thing to offer: if anything is up it
+          can free the memory, and if nothing is up Wake brings the group back —
+          `_wake_context_stage` re-activates every member and runs
+          `docker compose up`, which revives dead containers as well as slept
+          ones. What must not happen is the SENTENCE calling dead containers
+          asleep, so it says which case this is. */}
+      {canPower && members.length > 0 && (
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
           <span className="text-[12.5px] text-muted-foreground">
@@ -1279,26 +1342,31 @@ function ContainersSection({
                 : asleepReason === 'memory-pressure'
                   ? 'Asleep — evicted under memory pressure. Wakes on access, or wake now.'
                   : 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
-              : 'Free this stage’s memory now. On-demand stages wake automatically on access.'}
+              : anyRunning
+                ? 'Free this stage’s memory now. On-demand stages wake automatically on access.'
+                : 'Nothing is running on this stage. Wake redeploys it — these containers are not asleep, so nothing will bring them back on access.'}
           </span>
-          {asleep ? (
-            <Button variant="outline" size="sm" className="ml-auto h-7" disabled={busy}
-              onClick={() => power('wake')}>
-              <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
-            </Button>
-          ) : (
-            <Button variant="outline" size="sm" className="ml-auto h-7" disabled={busy || !anyRunning}
-              onClick={() => power('sleep')}>
-              <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
-            </Button>
-          )}
+          <span className="ml-auto flex items-center gap-2">
+            {!anyRunning && (
+              <Button variant="outline" size="sm" className="h-7" disabled={busy}
+                onClick={() => power('wake')}>
+                <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
+              </Button>
+            )}
+            {anyRunning && (
+              <Button variant="outline" size="sm" className="h-7" disabled={busy}
+                onClick={() => power('sleep')}>
+                <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
+              </Button>
+            )}
+          </span>
         </div>
       )}
       {/* CouchDB keeps its console link here — it has no explorer replacement. */}
       <StageServicesRow stage={stage} only={['couchdb']} />
       {members.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-muted-foreground">
-          No containers in {stageLabel}.
+          {emptyReason ?? `No containers in ${stageLabel}.`}
         </div>
       ) : (
         members.map((m) => <ContainerCard key={m.id} m={m} onAction={onAction} />)
@@ -2508,6 +2576,12 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // carrying the stable `-dr` URL. The live slot keeps the bare id.
   const members = useMemo(() => {
     if (!currentEntry) return [];
+    // The DR stage's containers are the standby SLOT's (`<id>@<slot>`). Until
+    // that slot name has been fetched, looking them up by the bare id returns
+    // the LIVE slot's containers — the card would report DR healthy on
+    // production's readings, and Restart/Stop on those cards would act on the
+    // live production deployment. Show nothing until we know.
+    if (isDr && !drSlot) return [];
     return Object.keys(currentEntry.members).map((id) => {
       const lookupId = isDr && drSlot ? `${id}@${drSlot}` : id;
       const a = automations.find((x) => x.deployment_id === lookupId);
@@ -2517,7 +2591,11 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         id: lookupId,
         name: a?.automation_name ?? id,
         present: !!a?.deployment_id,
-        display: a?.deployment_id ? stateToDisplay(a.state) : 'not-deployed',
+        // gitops marks a slept deployment `active: false` and sends no container
+        // state for it. Reading only the state made it 'unknown' — a shrug —
+        // which the stage summary then counted as nothing at all and called the
+        // stage Healthy (bailey-lab #463).
+        display: displayFor(a),
         replicas: a?.replicas ?? 0,
         url: a?.automation_url ?? null,
         publicUrl: publicUrlFor(a?.automation_url ?? null),
@@ -2525,6 +2603,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         memUsageBytes: a?.mem_usage_bytes ?? null,
         memReservationMB: a?.mem_reservation_mb ?? null,
         memOver: a?.mem_over_reservation ?? false,
+        restartCount: a?.restart_count ?? undefined,
         asleepReason: a?.asleep_reason ?? null,
       };
     });
@@ -2660,23 +2739,41 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     [],
   );
 
-  const friendly = useMemo(() => {
-    const isUp = (m: Member) =>
-      m.display === 'running' ||
-      m.display === 'restarting' ||
-      m.display === 'building' ||
-      m.display === 'deployed';
-    const failing = members.filter((m) => m.display === 'failed' || m.display === 'stopped').length;
-    if (!currentEntry)
-      return { label: 'Not deployed yet', color: 'text-muted-foreground', dot: 'bg-zinc-400', ring: 'ring-zinc-400/10' };
-    // Deployed but nothing running = intentionally asleep (manual sleep or the
-    // on-demand memory sweep). Distinct from a failure; wakes on access.
-    if (members.length > 0 && !members.some(isUp))
-      return { label: 'Asleep', color: 'text-sky-600', dot: 'bg-sky-500', ring: 'ring-sky-500/10' };
-    if (failing > 0)
-      return { label: `${failing} service${failing === 1 ? '' : 's'} not running`, color: 'text-red-600', dot: 'bg-red-500', ring: 'ring-red-500/10' };
-    return { label: 'Healthy', color: 'text-emerald-600', dot: 'bg-emerald-500', ring: 'ring-emerald-500/10' };
-  }, [members, currentEntry]);
+  // The card's status line and the pipeline node's badge are the same question,
+  // so they come from the same function — AND from the same reading of
+  // "deployed" (see stageIsDeployed; they used to disagree).
+  const friendly = useMemo(
+    () =>
+      stageHealth({
+        deployed: stageIsDeployed(byStage[stageDataId(activeStage)]),
+        statuses: members.map((m) => m.display),
+      }),
+    [members, byStage, activeStage],
+  );
+
+  // Container statuses per stage, for the pipeline badges. A stage's current
+  // deploy entry names its members; the automations snapshot says what each
+  // member's container is actually doing.
+  //
+  // Returns undefined when that cannot be resolved — see stageHealth: the
+  // badge then claims nothing. Disaster recovery is the case that needs it.
+  // Its containers are the STANDBY slot's (`<id>@<slot>`) and the slot name is
+  // only fetched while DR is the open view, so anywhere else we would be
+  // reading the live slot's containers and calling them DR's.
+  const statusesForStage = useCallback(
+    // eslint-disable-next-line no-restricted-syntax -- undefined IS the answer here: "not resolved", which stageHealth reads as a claim it must not make
+    (id: StageId): DisplayStatus[] | undefined => {
+      if (id === 'dr' && !drSlot) return undefined;
+      const h = byStage[stageDataId(id)];
+      const cur = h?.history.find((e) => e.commit === h.current) ?? h?.history[0];
+      if (!cur) return undefined;
+      return Object.keys(cur.members ?? {}).map((mid) => {
+        const lookupId = id === 'dr' && drSlot ? `${mid}@${drSlot}` : mid;
+        return displayFor(automations.find((x) => x.deployment_id === lookupId));
+      });
+    },
+    [byStage, automations, drSlot],
+  );
 
   // "{N} containers promote together" — the BP's container count, stable across
   // stages (max members seen on any stage's current deployment).
@@ -2831,8 +2928,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             // commit). Secret/firewall/backup audit records land in history
             // for stages that never deployed — declaring a secret writes
             // blobs to every realm — and must not light the stage up as ✓.
-            const deployed =
-              !!sHist && sHist.history.some((h) => !!h.source_commit);
+            const deployed = stageIsDeployed(sHist);
             const next = STAGES[i + 1];
             // Promotable when the source stage RUNS different content than the
             // target — compared by baked-image content hash, not source_commit
@@ -2855,6 +2951,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                 <StageNode
                   stage={s}
                   deployed={deployed}
+                  health={stageHealth({ deployed, statuses: statusesForStage(s.id) }).kind}
                   active={isActive}
                   onClick={() => setActiveStage(s.id)}
                 />
@@ -3060,15 +3157,24 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
               </div>
               <div className="flex flex-wrap gap-2.5">
                 {frontends.map((f) => {
-                  const running = f.display === 'running';
+                  const running = isUpStatus(f.display);
                   // A URL is openable even when the container is down: opening an
                   // on-demand host wakes it (loading screen → app). Only when there
                   // is no URL at all is it truly unreachable.
                   const openable = !!f.url;
+                  // "Asleep — opens with a loading screen" is a promise, and it
+                  // is only true for a container that is actually asleep.
+                  // Anything else gets what is actually happening: a restarting
+                  // frontend does serve between crashes (so it keeps its link),
+                  // and a stopped/failed/unknown one is not waiting to be woken.
                   const subtitle = f.url
-                    ? running
-                      ? f.url.replace('https://', '')
-                      : 'Asleep — opens with a loading screen'
+                    ? f.display === 'restarting'
+                      ? 'Restarting — the container keeps dying'
+                      : running
+                        ? f.url.replace('https://', '')
+                        : f.display === 'asleep'
+                          ? 'Asleep — opens with a loading screen'
+                          : STATUS_META[f.display].label
                     : 'Not deployed';
                   const inner = (
                     <>
@@ -3213,6 +3319,12 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             ) : visibleSection === 'containers' ? (
               <ContainersSection
                 members={members}
+                {...(isDr && !drSlot
+                  ? {
+                      emptyReason:
+                        'The standby slot has not been resolved, so this stage’s containers cannot be identified. Reopen the stage to try again — nothing is shown rather than the live slot’s containers, which are not these.',
+                    }
+                  : {})}
                 stage={activeStage}
                 stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
                 bp={bp.name}

@@ -213,7 +213,14 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
           setLaunchState('refused');
           return;
         }
-        if (Date.now() - s.startedAt >= HEALTHY_SESSION_MS) {
+        // A session that RAN for a while and then ended is a normal end: start
+        // the next one with a clean budget. Age alone is not enough to say it
+        // ran — a handshake that hangs and is dropped by the proxy after 20s+
+        // is old and never connected, and treating that as healthy resets the
+        // budget every time, so the backoff never engages and the user never
+        // reaches the error with its Retry. Now that the session records
+        // whether its socket ever opened, ask that.
+        if (s.connected && Date.now() - s.startedAt >= HEALTHY_SESSION_MS) {
           failedAttempts.current = 0;
           setLaunchGen((g) => g + 1);
           return;
@@ -247,14 +254,27 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     <div className="flex min-h-0 flex-1 flex-col">
       {/* Header: agent status dot + sub-tabs. No session name — one
           conversation per (user, copy, BP), so there is nothing to tell
-          apart; the dot alone carries running / failed / starting. */}
+          apart; the dot alone carries running / failed / starting.
+
+          It goes green on `agent.connected`, NOT on `agent`: a session object
+          exists from the moment one is asked for, so reading its existence
+          announced a running agent while the socket was still opening — or
+          had been declined outright and would never open (bailey-lab #463). */}
       <div className="flex h-10 shrink-0 items-center gap-4 border-b border-border bg-background px-5">
         <div className="flex items-center border-r border-border pr-4">
           <span
-            title={agent ? 'Agent running' : launchFailed ? 'Agent unavailable' : 'Starting agent…'}
+            title={
+              agent?.connected
+                ? 'Agent running'
+                : launchFailed
+                  ? 'Agent unavailable'
+                  : agent
+                    ? 'Connecting to agent…'
+                    : 'Starting agent…'
+            }
             className={cn(
               'size-1.5 rounded-full',
-              agent
+              agent?.connected
                 ? 'bg-emerald-600'
                 : launchFailed
                   ? 'bg-destructive'

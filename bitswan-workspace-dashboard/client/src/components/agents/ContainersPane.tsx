@@ -15,6 +15,8 @@ import { api } from '@/lib/api';
 import { deployBpWithToast } from '@/lib/deployBp';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { useBpLabel } from '@/hooks/useBpLabel';
+import { bpContainers, type BpContainer } from '@/lib/bpContainers';
+import { isUpStatus, STATUS_META } from '@/lib/status';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { BuildLogsPane } from '@/components/automations/inspect/BuildLogsPane';
@@ -37,13 +39,6 @@ interface Props {
   bp: string;
   copy: string;
   active: boolean;
-}
-
-interface Container {
-  name: string;
-  deploymentId: string | null;
-  status: 'running' | 'failed' | 'stopped';
-  expose: boolean;
 }
 
 type Detail = 'overview' | 'logs' | 'build';
@@ -69,30 +64,7 @@ export function ContainersPane({ bp, copy, active }: Props) {
   // literally labelled "Business process", so it must print the name.
   const label = useBpLabel()(bp);
 
-  const containers = useMemo<Container[]>(() => {
-    const prefix = `copies/${copy}/${bp}/`;
-    const byName = new Map<string, Container>();
-    for (const a of automations) {
-      const rel = a.relative_path ?? '';
-      if (!rel.startsWith(prefix)) continue;
-      const name = a.automation_name ?? a.name;
-      const st = a.state ?? a.status ?? '';
-      const status: Container['status'] =
-        st === 'running' || st === 'restarting'
-          ? 'running'
-          : st === 'failed' || st === 'dead' || st === 'exited'
-            ? 'failed'
-            : 'stopped';
-      const prev = byName.get(name);
-      byName.set(name, {
-        name,
-        deploymentId: a.deployment_id ?? prev?.deploymentId ?? null,
-        status: status === 'running' ? 'running' : (prev?.status ?? status),
-        expose: !!a.expose || !!prev?.expose,
-      });
-    }
-    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }, [automations, bp, copy]);
+  const containers = useMemo(() => bpContainers(automations, copy, bp), [automations, bp, copy]);
 
   // Selection lives in the URL (`ct`) so container/data views deep-link;
   // `~objects` / `~sql` select the data explorers instead of a container.
@@ -165,7 +137,7 @@ export function ContainersPane({ bp, copy, active }: Props) {
     };
   }, [selected?.name, bp, copy, detail, active]);
 
-  const lifecycle = async (verb: 'restart' | 'stop' | 'start', c: Container) => {
+  const lifecycle = async (verb: 'restart' | 'stop' | 'start', c: BpContainer) => {
     if (!c.deploymentId) return;
     setBusy(true);
     try {
@@ -242,6 +214,7 @@ export function ContainersPane({ bp, copy, active }: Props) {
                 <span className="flex-1 truncate font-mono text-xs text-foreground">
                   {c.name}
                 </span>
+                <RestartChip count={c.restartCount} />
                 <StatusDot status={c.status} />
               </button>
             ))
@@ -286,15 +259,28 @@ export function ContainersPane({ bp, copy, active }: Props) {
                 <div className="truncate font-mono text-sm font-semibold text-foreground">
                   Inspect {selected.name}
                 </div>
-                <div className="text-xs text-muted-foreground">
-                  Local container — logs &amp; details for this copy
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className={STATUS_META[selected.status].labelColor}>
+                    {/* STATUS_META's placeholder for 'unknown' is an em-dash,
+                        which reads as a broken line here rather than as a
+                        state. Say what it means instead. */}
+                    {selected.status === 'unknown'
+                      ? 'No container state'
+                      : STATUS_META[selected.status].label}
+                  </span>
+                  {!!selected.restartCount && (
+                    <span className="text-violet-600">
+                      · restarted {selected.restartCount.toLocaleString()} times
+                    </span>
+                  )}
+                  <span>· logs &amp; details for this copy</span>
                 </div>
               </div>
               <div className="ml-auto flex items-center gap-2">
                 {busy && (
                   <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-hidden />
                 )}
-                {selected.status === 'running' ? (
+                {isUpStatus(selected.status) ? (
                   <>
                     <LifecycleBtn
                       icon={<RotateCcw className="size-3" aria-hidden />}
@@ -379,14 +365,29 @@ function DataEntry({
   );
 }
 
-function StatusDot({ status }: { status: Container['status'] }) {
-  const cls =
-    status === 'running'
-      ? 'bg-emerald-600'
-      : status === 'failed'
-        ? 'bg-red-600'
-        : 'bg-muted-foreground/40';
-  return <span className={cn('size-1.5 shrink-0 rounded-full', cls)} title={status} />;
+function StatusDot({ status }: { status: BpContainer['status'] }) {
+  const meta = STATUS_META[status];
+  return <span className={cn('size-1.5 shrink-0 rounded-full', meta.dot)} title={meta.label} />;
+}
+
+/**
+ * The restart count next to a container Docker's restart policy has had to
+ * bring back up. Shown only for a count that was actually read AND is non-zero: a
+ * colour cannot tell a container that restarted twice during a deploy from one
+ * that has restarted twenty-three thousand times, and that difference is the
+ * whole point (bailey-lab #463).
+ */
+function RestartChip({ count }: { count?: number }) {
+  if (!count) return null;
+  return (
+    <span
+      className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-medium text-violet-600"
+      title={`Restarted ${count.toLocaleString()} times by Docker's restart policy — it keeps dying`}
+    >
+      <RotateCcw className="size-2.5" aria-hidden />
+      {count.toLocaleString()}
+    </span>
+  );
 }
 
 function DetailTab({
