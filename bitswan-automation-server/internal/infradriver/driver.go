@@ -196,12 +196,25 @@ type Image struct {
 // (e.g. gitops.deployment.id, gitops.stage).
 type ContainerFilter struct {
 	Labels map[string]string `json:"labels,omitempty"`
-	// Read each container's restart count too. OFF by default, and deliberately
-	// opt-in: the count needs a `docker inspect` on top of the `docker ps`, and
-	// ContainerList is the shared primitive behind everything — "is this one
-	// container up?" checks before every backup, restore and SQL-explorer
-	// query, and a re-broadcast on every docker start/die event. Only the
-	// automations listing, which actually shows the number, asks for it.
+	// Pay for the one batched `docker inspect` this listing needs — it reads
+	// RestartCount AND StartedAt, the two fields `docker ps` cannot give.
+	// OFF by default, and deliberately opt-in: ContainerList is the shared
+	// primitive behind everything — "is this one container up?" checks before
+	// every backup, restore and SQL-explorer query, and a re-broadcast on every
+	// docker start/die event. Only the automations listing, which shows both
+	// readings, asks for it.
+	//
+	// The NAME is frozen at the count it originally fetched, on purpose. The
+	// server decodes this struct with plain encoding/json and no
+	// DisallowUnknownFields, so an unrecognised key is silently ignored — and
+	// the driver ships as its own image, which can be newer OR older than the
+	// gitops asking. Renaming the key would make a NEW driver meeting an OLD
+	// gitops stop returning counts it reads perfectly well, turning a one-way
+	// degradation into a two-way one. An old driver meeting a new gitops returns
+	// neither reading, and both render as nothing — which looks exactly like a
+	// healthy fleet, so a mismatch is worth noticing rather than papering over.
+	// The honest-name migration, if anyone wants it, is three releases: accept
+	// both keys, then send the new one, then drop the old.
 	WithRestartCounts bool `json:"with_restart_counts,omitempty"`
 }
 
@@ -225,6 +238,25 @@ type Container struct {
 	// it at 0 (measured), so a non-zero value always means the container died
 	// on its own.
 	RestartCount *int `json:"restart_count,omitempty"`
+	// When this container last started, in unix SECONDS (same unit as Created
+	// above). Read by the same batched inspect as RestartCount, so it carries
+	// the same discipline: NIL means "not read" — the flag was off, the inspect
+	// lost its race, the line was unreadable, or Docker reported the zero time
+	// for a container that has never started. Never 0, and never the unix value
+	// of Docker's zero time.
+	//
+	// It is here because it is the ONLY field that moves when a container is
+	// restarted in place: an operator's `docker restart` leaves the id, Created
+	// and RestartCount exactly as they were (measured on a live daemon — every
+	// container up 22-35h past its Created still reads RestartCount 0), and the
+	// state is `running` on either side of a window too short to sample. Without
+	// this, a caller cannot tell a container that was restarted from one that was
+	// not, which is what bailey-lab #476 needs in order to report an operator's
+	// own action as finished.
+	//
+	// A restart POLICY moves it too, so "it moved" means "this container started
+	// again" — never "it is healthy". Pair it with State.
+	StartedAt *int64 `json:"started_at,omitempty"`
 }
 
 // ContainerStat is one container's live memory usage (from `docker stats`). Only

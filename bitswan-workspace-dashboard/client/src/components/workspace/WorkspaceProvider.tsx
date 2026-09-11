@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 import { api } from '@/lib/api';
+import { observePending } from '@/lib/pendingActions';
 import type {
   BusinessProcess,
   DeployedAutomation,
@@ -362,6 +363,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       es?.close();
     };
   }, []);
+
+  // An operator's own action (Restart, Stop, Start, a stage's Wake or Sleep)
+  // ends on an OBSERVATION of the container, and this is the one place an
+  // observation arrives — so it is settled here and nowhere else. Resolving it
+  // inside the views instead would mean one resolver per mounted consumer, all
+  // racing to report the same fact. See lib/pendingActions.ts.
+  useEffect(() => {
+    observePending(automations);
+  }, [automations]);
 
   return (
     <WorkspaceContext.Provider

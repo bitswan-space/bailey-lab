@@ -269,3 +269,42 @@ test('a container created and never started is not "running"', () => {
   // counts as running, so a normal deploy does not flicker.
   assert.equal(stateToDisplay('starting'), 'running');
 });
+
+test('the baseline a restart is measured against comes from the record the dot describes', () => {
+  // The row's dot, deployment id, url, container id and start time must all
+  // describe ONE container (the worst-state one). The pending-action layer
+  // (bailey-lab #476) compares this start time against a later reading of it to
+  // decide whether the operator's restart finished — so a start time borrowed
+  // from the healthy replica would have it watching a container the row's own
+  // Restart button never touches.
+  const c = only(
+    bpContainers(
+      [
+        rec({
+          deployment_id: 'backend-live-dev',
+          container_id: 'healthy',
+          state: 'running',
+          started_at: '2026-09-11T16:50:12Z',
+        }),
+        rec({
+          deployment_id: 'backend-live-dev@green',
+          container_id: 'sick',
+          state: 'restarting',
+          started_at: '2026-09-10T18:26:13Z',
+        }),
+      ],
+      COPY,
+      BP,
+    ),
+  );
+  assert.equal(c.status, 'restarting');
+  assert.equal(c.containerId, 'sick');
+  // NOT the later one — unlike the count on the test above, a timestamp is not
+  // max()-ed across replicas.
+  assert.equal(c.startedAt, '2026-09-10T18:26:13Z');
+});
+
+test('a record with no start time contributes none, never a zero or an epoch', () => {
+  assert.equal(only(bpContainers([rec({ started_at: null })], COPY, BP)).startedAt, undefined);
+  assert.equal(only(bpContainers([rec()], COPY, BP)).startedAt, undefined);
+});
