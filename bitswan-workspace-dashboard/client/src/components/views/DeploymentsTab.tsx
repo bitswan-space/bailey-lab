@@ -1213,6 +1213,7 @@ function ContainerCard({
 
 function ContainersSection({
   members,
+  emptyReason,
   stage,
   stageLabel,
   bp,
@@ -1220,6 +1221,8 @@ function ContainersSection({
   onRefresh,
 }: {
   members: Member[];
+  /** Why the list is empty, when "none deployed" is not the reason. */
+  emptyReason?: string;
   stage: StageId;
   stageLabel: string;
   bp: string;
@@ -1302,7 +1305,13 @@ function ContainersSection({
         </>
       ) : (
         <>
-      {canPower && (members.length > 0 || asleep) && (
+      {/* Only when it can actually offer something. A stage whose containers all
+          died has nothing to wake (waking re-activates; these are active and
+          dead) and nothing to put to sleep, and rendering a memory banner with
+          an empty button row beside it is a dead end on the stage that most
+          needs an action — the per-container Start below is the one that
+          applies. */}
+      {canPower && (members.some((m) => m.display === 'asleep') || anyRunning) && (
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
           <span className="text-[12.5px] text-muted-foreground">
@@ -1338,7 +1347,7 @@ function ContainersSection({
       <StageServicesRow stage={stage} only={['couchdb']} />
       {members.length === 0 ? (
         <div className="px-3 py-10 text-center text-sm text-muted-foreground">
-          No containers in {stageLabel}.
+          {emptyReason ?? `No containers in ${stageLabel}.`}
         </div>
       ) : (
         members.map((m) => <ContainerCard key={m.id} m={m} onAction={onAction} />)
@@ -3288,6 +3297,12 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             ) : visibleSection === 'containers' ? (
               <ContainersSection
                 members={members}
+                {...(isDr && !drSlot
+                  ? {
+                      emptyReason:
+                        'The standby slot has not been resolved, so this stage’s containers cannot be identified. Reopen the stage to try again — nothing is shown rather than the live slot’s containers, which are not these.',
+                    }
+                  : {})}
                 stage={activeStage}
                 stageLabel={STAGE_LABEL[activeStage] ?? activeStage}
                 bp={bp.name}

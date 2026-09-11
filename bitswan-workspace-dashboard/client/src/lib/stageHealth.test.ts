@@ -133,3 +133,11 @@ test('a real fault still outranks a member nobody can account for', () => {
     'failing',
   );
 });
+
+test('a container created and never started is not counted as running', () => {
+  // Docker's `created` means it exists and has executed nothing. Mapping it to
+  // 'running' put a green tick on a stage whose service had never run — the
+  // same intent-over-observation this module removes, in the mapping every
+  // view routes through.
+  assert.equal(stageHealth({ deployed: true, statuses: ['running', 'unknown'] }).kind, 'unknown');
+});

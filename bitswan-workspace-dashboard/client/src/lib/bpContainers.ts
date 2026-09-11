@@ -74,7 +74,10 @@ export function bpContainers(
         prev?.deploymentId ??
         a.deployment_id ??
         undefined,
-      url: (keep === 'new' ? a.automation_url : prev?.url) ?? prev?.url ?? a.automation_url ?? undefined,
+      // From the kept record only — no falling back to the other one. A URL
+      // borrowed from the healthy slot while the dot and the buttons describe
+      // the sick one is the same split, in the one field a user navigates with.
+      url: (keep === 'new' ? a.automation_url : prev?.url) ?? undefined,
       status: prev ? worstStatus(prev.status, status) : status,
       // Several records for one name means several containers (replicas, a
       // blue/green pair): the highest count is the one worth showing.

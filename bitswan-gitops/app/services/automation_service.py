@@ -850,45 +850,39 @@ class AutomationService:
     def forget_copy(self, copy: str) -> None:
         self._cache.pop(copy, None)
 
-    @staticmethod
-    def _worse_state(current: str | None, incoming: str) -> str:
+    # Docker state → the dashboard's display bucket, and each bucket's severity.
+    # Mirrors lib/status.ts (stateToDisplay + STATUS_SEVERITY) deliberately: two
+    # layers collapsing the same replicas must not disagree about which one is
+    # worse. Higher is worse; an unreadable state sits at the BOTTOM, because an
+    # observation we cannot read must never outrank one we can.
+    _STATE_SEVERITY = {
+        "dead": 6,  # stopped
+        "exited": 6,  # stopped
+        "failed": 6,  # stopped
+        "paused": 6,  # stopped — not up, whatever its name suggests
+        "restarting": 5,
+        "running": 2,
+        "starting": 2,  # on its way up
+        "created": 1,  # exists, never started: unknown, not a claim either way
+    }
+
+    @classmethod
+    def _worse_state(cls, current: str | None, incoming: str) -> str:
         """The less healthy of two container states for ONE deployment.
 
         Replicas of a deployment share its deployment_id, so several containers
         describe one entry. A dead replica beside a live one is not "running":
-        the operator has to see the worst of them, which is the same rule the
-        dashboard applies when it collapses records onto a row — including
-        where an unreadable state sits, which is at the bottom.
+        the operator has to see the worst of them, by the same ranking the
+        dashboard uses when it collapses records onto a row.
         """
-        # Worst first.
-        order = [
-            "dead",
-            "exited",
-            "failed",
-            "restarting",
-            "paused",
-            "created",
-            "starting",
-            "running",
-        ]
-
-        def rank(state: str) -> float:
-            try:
-                return float(order.index(state))
-            except ValueError:
-                # Outside the vocabulary — `removing`, or whatever Docker adds
-                # next. It sits at the BOTTOM, below even "running", on the same
-                # principle the dashboard's worstStatus states and is tested on:
-                # the absence of an observation never outranks something
-                # actually seen. It still loses to every fault, so it can never
-                # hide a replica we CAN read as dead — but a replica being
-                # removed during a rolling restart no longer drags a deployment
-                # whose other replicas are running into "not accounted for".
-                return float(len(order))
-
         if not current:
             return incoming
-        return current if rank(current) <= rank(incoming) else incoming
+
+        def rank(state: str) -> int:
+            # 0 = an unrecognised state: below everything, including running.
+            return cls._STATE_SEVERITY.get(state, 0)
+
+        return incoming if rank(incoming) > rank(current) else current
 
     def _apply_docker_overlay(
         self,
@@ -1015,8 +1009,12 @@ class AutomationService:
             except (TypeError, ValueError):
                 a.mem_reservation_mb = None
             a.mem_policy = labels.get("gitops.mem_policy") or None
+            # Keyed on the container this record describes, and NOT gated on
+            # `won`: the winner's stats row may be read on a later iteration,
+            # and gating it there meant a deployment whose first-seen replica
+            # had no row never reported memory at all.
             usage = ((info or {}).get("_mem") or {}).get(a.container_id)
-            if won and usage is not None:
+            if usage is not None:
                 a.mem_usage_bytes = int(usage)
                 if a.mem_reservation_mb:
                     a.mem_over_reservation = (

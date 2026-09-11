@@ -161,7 +161,15 @@ def test_worse_state_lets_no_replica_hide_another(tmp_path):
     assert svc._worse_state("running", "restarting") == "restarting"
     assert svc._worse_state("restarting", "running") == "restarting"
     assert svc._worse_state("running", "exited") == "exited"
-    assert svc._worse_state("exited", "dead") == "dead"
+    # `dead` and `exited` are the same thing to every consumer (the dashboard
+    # maps both to "stopped"), so which literal survives is not a claim about
+    # anything — the bucket is.
+    assert svc._worse_state("exited", "dead") in ("exited", "dead")
+    # `paused` is NOT up, whatever its name suggests, and the dashboard ranks it
+    # with the stopped ones — above a restart loop. The two layers collapse the
+    # same replicas, so they must not disagree about which is worse.
+    assert svc._worse_state("restarting", "paused") == "paused"
+    assert svc._worse_state("paused", "restarting") == "paused"
     # An unrecognised state sits at the bottom: it never outranks something we
     # could actually read — see the dedicated test below for why — and it never
     # hides a fault either.

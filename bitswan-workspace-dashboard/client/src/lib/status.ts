@@ -91,10 +91,18 @@ export const STATUS_META: Record<DisplayStatus, StatusMeta> = {
 /** Map an automation's raw Docker container state to a display status. */
 export function stateToDisplay(state: AutomationState | null | undefined): DisplayStatus {
   switch (state) {
+    // `starting` is Docker reporting that the entrypoint is coming up — that
+    // one really is on its way to running.
     case 'running':
     case 'starting':
-    case 'created':
       return 'running';
+    // `created` is NOT. The container exists and has never executed anything —
+    // a compose up that created it and could not start it leaves it here — and
+    // calling that "Running" was the same intent-over-observation this module
+    // exists to remove, in the one mapping every view routes through. It is no
+    // claim either way: not running, not a fault we can name.
+    case 'created':
+      return 'unknown';
     case 'restarting':
       return 'restarting';
     case 'exited':
@@ -175,11 +183,14 @@ export function displayFor(a?: DeployedAutomation): DisplayStatus {
   // only rewrites bitswan.yaml. The reason was the only thing that gave it
   // away. (That staleness is fixed in gitops too — this reads both so a
   // dashboard in front of an older gitops still tells the truth.)
-  // Asleep means the container is GONE. Both signs of sleep can be stale — a
-  // yaml entry that predates normalization carries no `active` key, a sleep
-  // marker outlives the sleep it described — so a live container state
-  // overrules them. Nothing that is running may read as asleep.
+  // Asleep means the deployment is INACTIVE and its container is gone. The
+  // sleep marker is deliberately not enough on its own: gitops only clears it
+  // for a deployment that has a container, so one that was woken and then
+  // failed to come back up keeps the marker — and reading that as sleep put
+  // "Asleep — it wakes on access" on a broken deployment that will not wake,
+  // which is the promise this whole change exists to stop making. `active` is
+  // read from the yaml on every automations call, so it is the authority.
   const gone = !a.container_id && !a.state;
-  if (gone && (a.active === false || a.asleep_reason)) return 'asleep';
+  if (gone && a.active === false) return 'asleep';
   return stateToDisplay(a.state);
 }

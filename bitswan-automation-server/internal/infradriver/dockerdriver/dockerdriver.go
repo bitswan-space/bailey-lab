@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -161,8 +162,16 @@ func fillRestartCounts(ctx context.Context, containers []infradriver.Container) 
 		return
 	}
 	args := append([]string{"inspect", "--format", restartFormat}, ids...)
-	out, _ := exec.CommandContext(ctx, "docker", args...).Output()
+	out, err := exec.CommandContext(ctx, "docker", args...).Output()
 	if len(out) == 0 {
+		if err != nil && ctx.Err() == nil {
+			// Not the vanished-container race — that one still prints the
+			// containers it found. This is the inspect failing outright (a
+			// daemon that does not expose the field, an exec that could not
+			// run), and its only other symptom is a chip that never appears,
+			// which looks exactly like a healthy fleet. Say it once per call.
+			log.Printf("infra-driver: restart counts unavailable: %v", err)
+		}
 		return
 	}
 	counts := parseRestartCounts(out)
