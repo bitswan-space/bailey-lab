@@ -38,8 +38,15 @@ interface PendingActionMarkProps {
  *     is not softened, it gains the context that explains it.
  */
 export function PendingActionMark({ pending, density, className }: PendingActionMarkProps) {
-  const now = useNow();
+  // The ticking clock lives one level in, so a row with nothing in flight — the
+  // overwhelming majority, and there is one of these per container everywhere —
+  // does not subscribe to it and does not re-render every 30s.
   if (!pending) return null;
+  return <Mark pending={pending} density={density} className={className} />;
+}
+
+function Mark({ pending, density, className }: PendingActionMarkProps & { pending: PendingAction }) {
+  const now = useNow();
   const sentence = pendingSentence(pending, now);
   const size = density === 'dot' ? 'size-3' : 'size-3.5';
   return (
