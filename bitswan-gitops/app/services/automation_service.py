@@ -980,6 +980,14 @@ class AutomationService:
                 a.container_id = container.get("Id")
                 a.created_at = created_at
                 a.status = container.get("Status", "")
+                # …and the memory reading belongs to whichever container we just
+                # switched to. `docker stats` only reports RUNNING containers,
+                # so a restarting winner has no row — and leaving the previous
+                # replica's numbers in place would put the healthy replica's
+                # usage, and its red over-reservation flag, on a record that now
+                # describes the sick one. Order of replicas must not decide it.
+                a.mem_usage_bytes = None
+                a.mem_over_reservation = False
             a.state = merged
             count = container.get("RestartCount")
             if count is not None:
