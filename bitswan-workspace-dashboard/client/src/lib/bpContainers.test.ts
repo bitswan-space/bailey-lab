@@ -171,21 +171,6 @@ test('asleep outranks running when a name collapses several records', () => {
   assert.equal(c.status, 'asleep');
 });
 
-test('a sleep gitops attributed is asleep even if `active` still says true', () => {
-  // Measured live: the automations cache bakes `active` in when it is built, so
-  // an evicted deployment arrived as active:true with asleep_reason:"manual".
-  // Reading only `active` would have shown it as "unknown" — and the stage it
-  // belongs to as Healthy.
-  const c = only(
-    bpContainers(
-      [rec({ active: true, state: null, container_id: null, asleep_reason: 'manual' })],
-      COPY,
-      BP,
-    ),
-  );
-  assert.equal(c.status, 'asleep');
-});
-
 test('a RUNNING container never reads as asleep, whatever the flags say', () => {
   // Both signs of sleep can be stale: a yaml entry that predates
   // normalization carries no `active` key (and one reader defaulted that to
@@ -218,4 +203,37 @@ test('the row points its buttons at the record its dot describes', () => {
   );
   assert.equal(c.status, 'restarting');
   assert.equal(c.deploymentId, 'backend-live-dev@green');
+});
+
+test('a woken deployment that failed to come back is not "asleep"', () => {
+  // gitops clears the sleep marker only for a deployment that HAS a container,
+  // so one that was woken and then failed to start keeps it. Reading that as
+  // sleep promised "wakes on access" for something broken. (This replaces a
+  // test that asserted the opposite — written when `active` was stale on the
+  // wire and the marker was the only signal. gitops now re-reads `active` from
+  // the yaml on every call, so it is the authority and the marker is not.)
+  const c = only(
+    bpContainers(
+      [rec({ active: true, state: null, container_id: null, asleep_reason: 'manual' })],
+      COPY,
+      BP,
+    ),
+  );
+  assert.equal(c.status, 'unknown');
+});
+
+test('the open link comes from the record the row describes', () => {
+  const c = only(
+    bpContainers(
+      [
+        rec({ deployment_id: 'frontend-live-dev', state: 'running', automation_url: 'https://healthy' }),
+        rec({ deployment_id: 'frontend-live-dev@green', state: 'restarting', automation_url: null }),
+      ],
+      COPY,
+      BP,
+    ),
+  );
+  assert.equal(c.status, 'restarting');
+  assert.equal(c.deploymentId, 'frontend-live-dev@green');
+  assert.equal(c.url, undefined, 'not the healthy slot’s URL');
 });
