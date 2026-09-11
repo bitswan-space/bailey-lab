@@ -131,20 +131,24 @@ export function stageHealth({
   // Not all asleep, and nothing failing — but a member that IS asleep still
   // has to be named, or the stage reads "Healthy" while one of its services is
   // not running at all.
-  if (asleep > 0)
-    return {
-      ...HEALTH['partly-asleep'],
-      label: `${services(asleep)} of ${statuses.length} asleep`,
-    };
   // A member nobody can account for — its container removed out of band, a
   // failed `compose up` that never created it, an entry missing from the
   // snapshot — leaves the stage short of a service while the others run. That
   // is not Healthy either: the tick is for a stage that was seen whole.
+  // — checked BEFORE the sleeping ones, because a sleeping member is accounted
+  // for and a missing one is not. The other order swallowed it: a stage with
+  // one running, one asleep and one gone reported "1 service of 3 asleep" in
+  // calm blue and never mentioned the third at all.
   const unaccounted = statuses.filter((s) => s === 'unknown' || s === 'not-deployed').length;
   if (unaccounted > 0 && unaccounted < statuses.length)
     return {
       ...HEALTH.unknown,
       label: `${services(unaccounted)} of ${statuses.length} not accounted for`,
+    };
+  if (asleep > 0)
+    return {
+      ...HEALTH['partly-asleep'],
+      label: `${services(asleep)} of ${statuses.length} asleep`,
     };
   // Healthy is a claim, and it needs an observation behind it. Nothing failing
   // and nothing asleep is NOT the same as something running: on the first paint

@@ -183,13 +183,15 @@ export function displayFor(a?: DeployedAutomation): DisplayStatus {
   // only rewrites bitswan.yaml. The reason was the only thing that gave it
   // away. (That staleness is fixed in gitops too — this reads both so a
   // dashboard in front of an older gitops still tells the truth.)
-  // Asleep means the deployment is INACTIVE and its container is gone. The
-  // sleep marker is deliberately not enough on its own: gitops only clears it
-  // for a deployment that has a container, so one that was woken and then
-  // failed to come back up keeps the marker — and reading that as sleep put
-  // "Asleep — it wakes on access" on a broken deployment that will not wake,
-  // which is the promise this whole change exists to stop making. `active` is
-  // read from the yaml on every automations call, so it is the authority.
+  // Asleep means the deployment is INACTIVE and its container is gone.
+  //
+  // ONE signal, deliberately: `active`, which gitops re-reads from the yaml on
+  // every automations call. The sleep marker (`asleep_reason`) is NOT enough on
+  // its own — gitops only clears it for a deployment that has a container, so
+  // one that was woken and then failed to come back up keeps it, and reading
+  // that as sleep put "Asleep — it wakes on access" on something broken that
+  // will not wake. The marker still earns its place: it says WHY, once we know
+  // that it is asleep.
   const gone = !a.container_id && !a.state;
   if (gone && a.active === false) return 'asleep';
   return stateToDisplay(a.state);

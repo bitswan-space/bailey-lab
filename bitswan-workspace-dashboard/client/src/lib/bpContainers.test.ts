@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { bpContainers, type BpContainer } from './bpContainers.ts';
+import { displayFor, stateToDisplay } from './status.ts';
 import { isUpStatus, worstStatus } from './status.ts';
 import type { DeployedAutomation } from '../types/automation.ts';
 
@@ -236,4 +237,35 @@ test('the open link comes from the record the row describes', () => {
   assert.equal(c.status, 'restarting');
   assert.equal(c.deploymentId, 'frontend-live-dev@green');
   assert.equal(c.url, undefined, 'not the healthy slot’s URL');
+});
+
+test('a container created and never started is not "running"', () => {
+  // The mapping itself, not something already mapped. Reverting
+  // `case 'created'` to return 'running' must fail HERE — the previous version
+  // of this test fed stageHealth an already-mapped 'unknown' and left the
+  // mapping it named completely unguarded.
+  assert.equal(stateToDisplay('created'), 'unknown');
+  assert.equal(
+    displayFor({
+      container_id: 'c1',
+      endpoint_name: null,
+      created_at: null,
+      name: 'backend',
+      state: 'created',
+      status: null,
+      deployment_id: 'backend-live-dev',
+      active: true,
+      automation_url: null,
+      relative_path: 'copies/alice/test33/backend',
+      stage: 'live-dev',
+      automation_name: 'backend',
+      context: null,
+      version_hash: null,
+      replicas: 1,
+    }),
+    'unknown',
+  );
+  // And `starting` — Docker reporting that the entrypoint is coming up — still
+  // counts as running, so a normal deploy does not flicker.
+  assert.equal(stateToDisplay('starting'), 'running');
 });

@@ -983,7 +983,7 @@ class AutomationService:
                 a.container_id = container.get("Id")
                 a.created_at = created_at
                 a.status = container.get("Status", "")
-                # …and the memory reading belongs to whichever container we just
+                # The memory reading belongs to whichever container we just
                 # switched to. `docker stats` only reports RUNNING containers,
                 # so a restarting winner has no row — and leaving the previous
                 # replica's numbers in place would put the healthy replica's
@@ -991,24 +991,38 @@ class AutomationService:
                 # describes the sick one. Order of replicas must not decide it.
                 a.mem_usage_bytes = None
                 a.mem_over_reservation = False
+            elif container.get("Status") == "unhealthy" and a.status != "unhealthy":
+                # One exception to "the winner owns every field": Docker's
+                # healthcheck verdict. Two replicas both `running`, one of them
+                # failing its healthcheck — the winner is whichever came first,
+                # and dropping the verdict would lose the only fault anyone
+                # reported about this deployment.
+                a.status = "unhealthy"
             a.state = merged
-            count = container.get("RestartCount")
-            if count is not None:
-                a.restart_count = (
-                    count if a.restart_count is None else max(a.restart_count, count)
-                )
+            # The count belongs to the winning replica too. max()-ing it across
+            # replicas put one container's 23,032 next to another container's
+            # id — the Inspect pane beside it reads the real per-container value
+            # and would have shown 3.
+            if won:
+                a.restart_count = container.get("RestartCount")
             a.automation_url = url
 
             # Memory overlay for the Containers tab: reservation + policy from the
             # container labels (stamped by the compiler); live usage from the
             # stats map threaded via info["_mem"] (container id → bytes).
-            try:
-                a.mem_reservation_mb = (
-                    int(labels.get("gitops.mem_reservation_mb") or 0) or None
-                )
-            except (TypeError, ValueError):
-                a.mem_reservation_mb = None
-            a.mem_policy = labels.get("gitops.mem_policy") or None
+            # The reservation and the policy are labels of THIS container, so
+            # they move with the winner as well: the over-reservation flag
+            # compares usage against the reservation, and taking them from
+            # different replicas made that comparison — which raises a SIEM
+            # event — depend on the order Docker listed them in.
+            if won:
+                try:
+                    a.mem_reservation_mb = (
+                        int(labels.get("gitops.mem_reservation_mb") or 0) or None
+                    )
+                except (TypeError, ValueError):
+                    a.mem_reservation_mb = None
+                a.mem_policy = labels.get("gitops.mem_policy") or None
             # Keyed on the container this record describes, and NOT gated on
             # `won`: the winner's stats row may be read on a later iteration,
             # and gating it there meant a deployment whose first-seen replica
@@ -1028,13 +1042,23 @@ class AutomationService:
         # would be blank whenever the container is down and the user couldn't wake it.
         for a in entries:
             if a.expose and not a.automation_url and a.deployment_id:
-                base_id = a.deployment_id.split("@")[0]
+                base_id, _, slot = a.deployment_id.partition("@")
                 dep_conf = dep_configs.get(base_id, {})
+                # The slot is what the host name turns on, so it cannot be
+                # stripped here: handing a standby slot the LIVE stage's URL put
+                # the operator one click from production while the UI told them
+                # they were looking at the standby container. The main loop
+                # above is careful about exactly this.
+                host_stage = (
+                    "dr"
+                    if slot
+                    else (dep_conf.get("stage", "production") or "production")
+                )
                 a.automation_url = generate_workspace_url(
                     self.workspace_name,
                     dep_conf.get("automation_name", base_id),
                     dep_conf.get("context", ""),
-                    dep_conf.get("stage", "production") or "production",
+                    host_stage,
                     gitops_domain,
                     True,
                 )
