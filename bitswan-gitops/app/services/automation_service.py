@@ -770,7 +770,7 @@ class AutomationService:
                     # and defaulting it to False made the dashboard show it as
                     # "Asleep — wakes on access" for a deployment that was never
                     # started and will not wake.
-                    active=cfg.get("active", True) is not False,
+                    active=self._is_active(cfg),
                     automation_url=None,
                     relative_path=cfg.get("relative_path", None),
                     # Production is persisted as an empty-string stage in
@@ -868,6 +868,24 @@ class AutomationService:
         "starting": 2,  # on its way up
         "created": 1,  # exists, never started: unknown, not a claim either way
     }
+
+    @staticmethod
+    def _is_active(conf: dict | None) -> bool:
+        """Is this deployment entry live — i.e. NOT asleep?
+
+        A MISSING `active` key means nobody ever slept it. Sleeping is something
+        gitops writes (`mark_as_inactive` sets `active: False`), and write-time
+        normalisation fills the key in for everything it touches, so an entry
+        without one predates that normalisation and is live. The file said
+        nothing, and nothing is not "no".
+
+        This is the only place that decides it. There were three readings in
+        this file — two defaulting to True and one to False — so the automations
+        list called a legacy entry live while the deploy path skipped it, and
+        the operator got a member stuck at "not accounted for" that nothing was
+        ever going to start.
+        """
+        return bool((conf or {}).get("active", True))
 
     @classmethod
     def _worse_state(cls, current: str | None, incoming: str) -> str:
@@ -1118,7 +1136,7 @@ class AutomationService:
                 # a sleep. Refreshing this at all is the point — the cache bakes
                 # `active` in when it is built, and sleeping only rewrites the
                 # yaml.
-                a.active = conf.get("active", True) is not False
+                a.active = self._is_active(conf)
             if a.container_id:
                 self._clear_sleep_reason(a.deployment_id)
             else:
@@ -5890,7 +5908,7 @@ class AutomationService:
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         active_deployments = {}
         for deployment_id, config in bs_yaml["deployments"].items():
-            if config.get("active", False):
+            if self._is_active(config):
                 active_deployments[deployment_id] = config
         return active_deployments
 
