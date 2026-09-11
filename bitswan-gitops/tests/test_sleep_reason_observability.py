@@ -398,3 +398,20 @@ def test_active_is_read_the_same_way_everywhere(tmp_path):
     )
     active = svc.get_active_automations()
     assert set(active) == {"legacy", "live"}
+
+
+def test_a_replica_that_never_started_is_not_erased_by_a_running_one(tmp_path):
+    """`created` means Docker created the container and it has never executed
+    anything. That is an OBSERVATION, not an absence, so a running sibling must
+    not bury it — otherwise the deployment reports `running`, the dashboard maps
+    that to a green dot, and the stage wears a tick with one service that has
+    never run. (The dashboard ranks the *display* bucket differently on purpose:
+    there it is merging records, where 'unknown' means nobody told us.)"""
+    svc = _svc(tmp_path)
+    assert svc._worse_state("running", "created") == "created"
+    assert svc._worse_state("created", "running") == "created"
+    # Still below every fault, and still beaten by a state we cannot read at all
+    # only in the sense that the unreadable one loses:
+    assert svc._worse_state("created", "exited") == "exited"
+    assert svc._worse_state("created", "restarting") == "restarting"
+    assert svc._worse_state("created", "removing") == "created"
