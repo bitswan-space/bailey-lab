@@ -194,9 +194,27 @@ async def test_a_crashlooping_replica_is_not_hidden_by_its_healthy_siblings(
     )
     label = {"gitops.deployment_id": "backend-bp-production"}
     containers = [
-        {"Id": "r1", "State": "restarting", "Status": "", "Labels": label, "RestartCount": 23032},
-        {"Id": "r2", "State": "running", "Status": "", "Labels": label, "RestartCount": None},
-        {"Id": "r3", "State": "running", "Status": "", "Labels": label, "RestartCount": None},
+        {
+            "Id": "r1",
+            "State": "restarting",
+            "Status": "",
+            "Labels": label,
+            "RestartCount": 23032,
+        },
+        {
+            "Id": "r2",
+            "State": "running",
+            "Status": "",
+            "Labels": label,
+            "RestartCount": None,
+        },
+        {
+            "Id": "r3",
+            "State": "running",
+            "Status": "",
+            "Labels": label,
+            "RestartCount": None,
+        },
     ]
     svc._apply_docker_overlay([entry], containers, {}, {})
     assert entry.state == "restarting"
@@ -240,14 +258,24 @@ async def test_the_merged_record_describes_one_container(tmp_path, monkeypatch):
     )
     label = {"gitops.deployment_id": "backend-bp-production"}
     containers = [
-        {"Id": "sick", "State": "restarting", "Status": "", "Labels": label, "RestartCount": 40},
+        {
+            "Id": "sick",
+            "State": "restarting",
+            "Status": "",
+            "Labels": label,
+            "RestartCount": 40,
+        },
         {"Id": "healthy", "State": "running", "Status": "healthy", "Labels": label},
     ]
     svc._apply_docker_overlay([entry], containers, {"_mem": {"healthy": 999}}, {})
     assert entry.state == "restarting"
-    assert entry.container_id == "sick", "the record must point at the container it describes"
+    assert (
+        entry.container_id == "sick"
+    ), "the record must point at the container it describes"
     assert entry.status != "healthy", "state and status must not contradict each other"
-    assert entry.mem_usage_bytes is None, "the healthy replica's memory is not this record's"
+    assert (
+        entry.mem_usage_bytes is None
+    ), "the healthy replica's memory is not this record's"
 
 
 async def test_the_replica_order_does_not_decide_what_the_record_says(
@@ -284,9 +312,17 @@ async def test_the_replica_order_does_not_decide_what_the_record_says(
     }
     containers = [
         {"Id": "healthy", "State": "running", "Status": "healthy", "Labels": label},
-        {"Id": "sick", "State": "restarting", "Status": "", "Labels": label, "RestartCount": 40},
+        {
+            "Id": "sick",
+            "State": "restarting",
+            "Status": "",
+            "Labels": label,
+            "RestartCount": 40,
+        },
     ]
-    svc._apply_docker_overlay([entry], containers, {"_mem": {"healthy": 900 * 1024 * 1024}}, {})
+    svc._apply_docker_overlay(
+        [entry], containers, {"_mem": {"healthy": 900 * 1024 * 1024}}, {}
+    )
     assert entry.state == "restarting"
     assert entry.container_id == "sick"
     assert entry.mem_usage_bytes is None, "that was the OTHER replica's memory"
