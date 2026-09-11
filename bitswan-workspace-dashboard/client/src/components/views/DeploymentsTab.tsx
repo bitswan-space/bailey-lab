@@ -129,6 +129,21 @@ const STAGE_LABEL: Record<string, string> = Object.fromEntries(
 // secrets. Map a stage id to the id whose data it displays.
 const stageDataId = (id: StageId): StageId => (id === 'dr' ? 'production' : id);
 
+/**
+ * Has anything actually been DEPLOYED to this stage?
+ *
+ * One predicate, because the pipeline node and the stage card sit in the same
+ * viewport and were each deciding it their own way: the node asked for a
+ * history entry carrying a source commit, the card settled for any current
+ * entry at all. gitops writes history rows for firewall, backup and secret
+ * changes too — those have no source commit and no members — so a stage that
+ * had only ever had a secret declared showed an empty dashed circle above a
+ * card that said "Deployed". A deploy is the thing with a source commit.
+ */
+// eslint-disable-next-line no-restricted-syntax -- mirrors byStage's entry type
+const stageIsDeployed = (hist?: BpHistory | null): boolean =>
+  !!hist && hist.history.some((h) => !!h.source_commit);
+
 /** The stage a deployment id targets. Ids end `-dev` / `-staging`; production
  *  ids are either `-production` or bare `<automation>-<bp>` (gitops's target-id
  *  scheme). live-dev instances never appear on this tab, so they map to null —
@@ -2724,12 +2739,16 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
     [],
   );
 
-  // The card's status line and the pipeline node's badge are the same
-  // question, so they come from the same function — see lib/stageHealth.ts for
-  // why that matters. "Deployed" here means "there is a current deploy entry".
+  // The card's status line and the pipeline node's badge are the same question,
+  // so they come from the same function — AND from the same reading of
+  // "deployed" (see stageIsDeployed; they used to disagree).
   const friendly = useMemo(
-    () => stageHealth({ deployed: !!currentEntry, statuses: members.map((m) => m.display) }),
-    [members, currentEntry],
+    () =>
+      stageHealth({
+        deployed: stageIsDeployed(byStage[stageDataId(activeStage)]),
+        statuses: members.map((m) => m.display),
+      }),
+    [members, byStage, activeStage],
   );
 
   // Container statuses per stage, for the pipeline badges. A stage's current
@@ -2909,8 +2928,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
             // commit). Secret/firewall/backup audit records land in history
             // for stages that never deployed — declaring a secret writes
             // blobs to every realm — and must not light the stage up as ✓.
-            const deployed =
-              !!sHist && sHist.history.some((h) => !!h.source_commit);
+            const deployed = stageIsDeployed(sHist);
             const next = STAGES[i + 1];
             // Promotable when the source stage RUNS different content than the
             // target — compared by baked-image content hash, not source_commit
