@@ -617,8 +617,13 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const healthy = stageName
       ? d.getByText(new RegExp(`Current on ${stageName}`, 'i')).first()
       : d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+    // A stage that finishes a deploy with a container in a restart loop has
+    // FAILED — that is the whole subject of #463, and the matcher knew only the
+    // old wording. ("N of M not accounted for" is deliberately absent: that one
+    // is the window before the automations snapshot lands, and it resolves.)
     const failed = d
       .getByText(/services? not running/i)
+      .or(d.getByText(/services? restarting/i))
       .or(d.getByText(/Last deploy to .* failed/i))
       .first();
     const isHealthy = () => healthy.isVisible().catch(() => false);
@@ -628,10 +633,12 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const BACKSTOP = 30 * 60_000; // generous absolute cap; the real guard is PROGRESS
     const deadline = Date.now() + BACKSTOP;
     for (;;) {
-      if (await isHealthy()) return; // terminal: success on screen
+      // Failure first: "Current on <Stage>" can be on screen at the same time
+      // as "1 service restarting", and the chip knows nothing about health.
       if (await isFailed()) {
         throw new Error(`deploy surfaced an error on screen: "${(await failed.textContent())?.trim()}"`);
       }
+      if (await isHealthy()) return; // terminal: success on screen
       if (Date.now() > deadline) throw new Error('deploy exceeded 30min backstop');
       // Wait up to PROGRESS for the on-screen progress to MOVE, racing the
       // terminal states so we resolve instantly when the deploy finishes. This
@@ -641,8 +648,8 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         await expect
           .poll(
             async () => {
-              if (await isHealthy()) return '<<healthy>>';
               if (await isFailed()) return '<<failed>>';
+              if (await isHealthy()) return '<<healthy>>';
               return await progressSignature();
             },
             { timeout: PROGRESS, intervals: [500, 1000, 2000] },
@@ -2063,11 +2070,24 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
-      const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
+      // Healthy, and only Healthy. "Current on <Stage>" is a history chip
+      // driven by commit identity alone — it never consults the containers, so
+      // accepting it let a deploy that came up crashlooping pass as a success,
+      // which is the one thing this walkthrough exists to catch.
+      const ok = d.getByText(/^Healthy$/i).first();
       const none = d.getByText(/Not deployed yet/i).first();
+      // A deploy that lands broken says so on the card. Racing it too means we
+      // stop on the answer instead of waiting out the full SLA for one that
+      // will never come — and the stage's transient "Deployed" / "not accounted
+      // for" (the snapshot has not landed yet) is neither, so it keeps waiting.
+      const bad = d
+        .getByText(/services? not running/i)
+        .or(d.getByText(/services? restarting/i))
+        .first();
       await Promise.race([
         ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
         none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+        bad.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
       ]);
       healthy = await ok.isVisible().catch(() => false);
       if (!healthy) {
@@ -2204,7 +2224,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // to main on a successful deploy) and report Healthy. (An empty BP merges
     // instantly — nothing to build — which is why this only bites a real
     // scaffolded BP.)
-    const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
+    // Its own comment above says "report Healthy" — so wait for that, not for
+    // the commit-identity chip beside it. A stage that lands broken keeps the
+    // progress ride going and the darkness watchdog below is what ends it.
+    const ok = d.getByText(/^Healthy$/i).first();
     const devStage = d.getByRole('button', { name: /Development/i }).first();
     // Ride the deploy the way an operator does: keep waiting AS LONG AS the screen
     // shows progress, with NO flat cap. Deploy builds the dev image
@@ -2413,11 +2436,18 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
-      const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
+      // Healthy only — see deployToDevHealthy: "Current on <Stage>" is a
+      // commit-identity chip and says nothing about the containers.
+      const ok = d.getByText(/^Healthy$/i).first();
       const none = d.getByText(/Not deployed yet/i).first();
+      const bad = d
+        .getByText(/services? not running/i)
+        .or(d.getByText(/services? restarting/i))
+        .first();
       await Promise.race([
         ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
         none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+        bad.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
       ]);
       healthy = await ok.isVisible().catch(() => false);
       if (!healthy) {
