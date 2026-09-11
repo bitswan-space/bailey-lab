@@ -127,7 +127,9 @@ async def test_a_failed_wake_leaves_the_deployment_asleep(tmp_path, monkeypatch)
         return []
 
     async def _apply(dep_ids, report=None):
-        raise RuntimeError("driver apply failed: docker compose up failed: exit status 1")
+        raise RuntimeError(
+            "driver apply failed: docker compose up failed: exit status 1"
+        )
 
     monkeypatch.setattr(svc, "get_container", _get_container)
     monkeypatch.setattr(svc, "apply_compose_for_deployments", _apply)
