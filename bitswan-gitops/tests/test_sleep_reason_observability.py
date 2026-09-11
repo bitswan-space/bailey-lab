@@ -369,3 +369,32 @@ async def test_an_unhealthy_replica_is_not_lost_to_a_healthy_one(tmp_path):
     svc._apply_docker_overlay([entry], containers, {}, {})
     assert entry.state == "running"
     assert entry.status == "unhealthy"
+
+
+def test_active_is_read_the_same_way_everywhere(tmp_path):
+    """One reading, three readers.
+
+    A missing `active` key means nobody ever slept it. This file used to read
+    that as True in two places and False in a third, so the automations list
+    reported a legacy entry as live while the deploy path skipped it — a member
+    stuck at "not accounted for" that nothing was ever going to start.
+    """
+    svc = _svc(tmp_path)
+    assert svc._is_active({}) is True, "absence is not a sleep"
+    assert svc._is_active({"active": True}) is True
+    assert svc._is_active({"active": False}) is False
+    assert svc._is_active(None) is True
+    # And the deploy path agrees with it, on the same yaml.
+    (tmp_path / "bitswan.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "deployments": {
+                    "legacy": {"stage": "dev"},  # predates normalisation
+                    "slept": {"stage": "dev", "active": False},
+                    "live": {"stage": "dev", "active": True},
+                }
+            }
+        )
+    )
+    active = svc.get_active_automations()
+    assert set(active) == {"legacy", "live"}
