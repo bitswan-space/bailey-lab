@@ -43,7 +43,57 @@ function send(message: unknown): void {
   process.send?.(message);
 }
 
-const opens = new Map<string, ResolvedWebview>();
+/**
+ * The one sidebar view this host serves, and the pages currently showing it.
+ *
+ * VS Code resolves a WebviewView once and keeps it for the life of the
+ * extension host; hiding the sidebar or reloading the window tears down the
+ * webview's DOM and boots it again against the *same* provider state, which is
+ * why a conversation is still there when you come back to it.
+ *
+ * We used to resolve a fresh view per page load. That handed the extension a
+ * second, unrelated sidebar every time the user opened the tab — so every visit
+ * started a new conversation, and the previous one was left running with
+ * nothing attached to it (one orphaned `claude` in the coding-agent container
+ * per visit, until the host was evicted half an hour later).
+ *
+ * So: resolve once, and let each page attach to it. Two browser tabs on the
+ * same (user, copy, BP) see the same conversation, exactly as two views of one
+ * VS Code sidebar would.
+ */
+interface Sidebar {
+  view: ResolvedWebview;
+  assetUris: unknown;
+}
+
+let sidebar: Promise<Sidebar> | undefined;
+let resolved: Sidebar | undefined;
+const attached = new Set<string>();
+
+function ensureSidebar(resourceBase: string): Promise<Sidebar> {
+  if (!sidebar) {
+    const pending = (async (): Promise<Sidebar> => {
+      const registration = await activation;
+      const view = await resolveWebviewView(registration, { extensionPath, resourceBase });
+      const assetUris = await prefetchAssetUris(view);
+      // Registered once, for the life of the view: every attached page gets
+      // every message, so a page that opens mid-conversation is fed by the
+      // extension's own re-init handshake rather than by a replay we invent.
+      view.onWebviewMessage((payload) => {
+        for (const id of attached) send({ t: 'toWebview', id, payload });
+      });
+      const ready: Sidebar = { view, assetUris };
+      resolved = ready;
+      return ready;
+    })();
+    sidebar = pending;
+    // A failed activation must not be cached forever: the next open retries.
+    pending.catch(() => {
+      if (sidebar === pending) sidebar = undefined;
+    });
+  }
+  return sidebar;
+}
 
 const ASSET_PREFETCH_ID = 'bitswan-asset-prefetch';
 const ASSET_PREFETCH_TIMEOUT_MS = 5_000;
@@ -95,14 +145,8 @@ process.on('message', (raw: Inbound) => {
   void (async () => {
     if (raw.t === 'open') {
       try {
-        const registration = await activation;
-        const view = await resolveWebviewView(registration, {
-          extensionPath,
-          resourceBase: raw.resourceBase,
-        });
-        opens.set(raw.id, view);
-        const assetUris = await prefetchAssetUris(view);
-        view.onWebviewMessage((payload) => send({ t: 'toWebview', id: raw.id, payload }));
+        const { view, assetUris } = await ensureSidebar(raw.resourceBase);
+        attached.add(raw.id);
         send({ t: 'opened', id: raw.id, html: view.html, assetUris });
       } catch (err) {
         send({ t: 'error', id: raw.id, message: String((err as Error)?.message ?? err) });
@@ -110,11 +154,14 @@ process.on('message', (raw: Inbound) => {
       return;
     }
     if (raw.t === 'toExt') {
-      opens.get(raw.id)?.sendFromWebview(raw.payload);
+      // Synchronous on purpose: `open` has already resolved the view, and
+      // routing through a promise here would reorder the webview's messages.
+      if (attached.has(raw.id)) resolved?.view.sendFromWebview(raw.payload);
       return;
     }
     if (raw.t === 'close') {
-      opens.delete(raw.id);
+      // The page went away; the view and its conversation stay.
+      attached.delete(raw.id);
     }
   })();
 });

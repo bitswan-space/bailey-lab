@@ -47,6 +47,18 @@ export function configDirNameFor(email: string): string {
   return `${clean}_${hash}`;
 }
 
+/**
+ * localStorage key the page's webview state is kept under.
+ *
+ * Scoped exactly as the extension scopes its view state — one user, one BP
+ * clone — so switching BPs restores that BP's conversation rather than the
+ * last one looked at, and two people sharing a browser profile do not inherit
+ * each other's panel.
+ */
+export function webviewStateKey(opts: { email: string; copy: string; bp: string }): string {
+  return `bitswan-sidebar-state:${configDirNameFor(opts.email)}:${opts.copy}/${opts.bp}`;
+}
+
 export const ASSET_BASE_PLACEHOLDER = 'https://__bitswan_sidebar_asset_base__';
 
 
@@ -139,13 +151,30 @@ function themeBlock(extDir: string): string {
   return themeBlockCache;
 }
 
-function injectBridge(html: string, assetUris?: unknown): string {
+function injectBridge(html: string, assetUris?: unknown, stateKey?: string): string {
   const inlinedAssets = assetUris
     ? `<script>window.__bitswanAssetUris = ${JSON.stringify(assetUris).split('<').join('\\u003c')};</script>`
     : '';
+  const seedStateKey = stateKey
+    ? `<script>window.__bitswanSidebarStateKey = ${JSON.stringify(stateKey).split('<').join('\\u003c')};</script>`
+    : '';
   const bridge = `<script>
 (function () {
+  // VS Code persists a webview's setState() across reloads and hands it back
+  // through getState(), which is how the panel comes back showing the
+  // conversation you left rather than a blank one. Nothing here survives a
+  // page load on its own, so localStorage stands in — per scope, because the
+  // extension keys its view state to one workspace folder. A browser that
+  // refuses storage (private window, blocked site data) just gets the old
+  // cold-start behaviour instead of an exception.
+  var KEY = window.__bitswanSidebarStateKey;
   var state = undefined;
+  try {
+    var saved = KEY ? window.localStorage.getItem(KEY) : null;
+    if (saved) state = JSON.parse(saved);
+  } catch (e) {
+    state = undefined;
+  }
   var HOST = '__bitswanHost';
   var FRAME = '__bitswanSidebar';
   var opened = {};
@@ -216,7 +245,16 @@ function injectBridge(html: string, assetUris?: unknown): string {
         parent.postMessage(envelope, '*');
       },
       getState: function () { return state; },
-      setState: function (next) { state = next; return next; },
+      setState: function (next) {
+        state = next;
+        try {
+          if (KEY) {
+            if (next === undefined) window.localStorage.removeItem(KEY);
+            else window.localStorage.setItem(KEY, JSON.stringify(next));
+          }
+        } catch (e) { /* storage unavailable or full — keep the in-memory copy */ }
+        return next;
+      },
     };
   };
 })();
@@ -228,7 +266,7 @@ function injectBridge(html: string, assetUris?: unknown): string {
       "content=\"default-src 'none'; img-src * data: blob:; media-src * data: blob:; style-src 'unsafe-inline' *; script-src 'unsafe-inline' 'unsafe-eval' data: blob: *; font-src * data:; connect-src * ws: wss: data:; worker-src * blob:;\"",
     ),
   );
-  const head = inlinedAssets + bridge;
+  const head = inlinedAssets + seedStateKey + bridge;
   return relaxed.includes('</head>')
     ? relaxed.replace('</head>', `${head}\n</head>`)
     : head + relaxed;
@@ -327,6 +365,32 @@ function agentExecEnv(opts: { email: string; copy: string; bp: string }): Record
   };
 }
 
+/**
+ * The BP clone as the extension host must see it: at the path the agent's own
+ * container uses, not the one the dashboard's file routes use.
+ *
+ * Claude Code names a conversation's transcript directory after the cwd it ran
+ * in — /workspace/copies/<copy>/<bp> becomes
+ * projects/-workspace-copies-<copy>-<bp>. The CLI runs in the coding-agent
+ * container, so that is the name on disk; if the extension host looked in
+ * `${WORKSPACE_ROOT}/copies/...` (/workspace/workspace/copies/...) it would
+ * compute a different name, find nothing, and show an empty history for a BP
+ * with a dozen conversations in it.
+ *
+ * SIDEBAR_COPIES_ROOT is that path, and the daemon mounts the same copies tree
+ * there as well so the directory genuinely exists here (services/dashboard.go).
+ * Falling back to workspaceRoot keeps standalone runs and the dev server
+ * working; there the two containers are one, so the paths already agree.
+ */
+export function sidebarWorkspaceFolder(opts: {
+  copy: string;
+  bp: string;
+  workspaceRoot: string;
+}): string {
+  const copies = process.env.SIDEBAR_COPIES_ROOT || path.join(opts.workspaceRoot, 'copies');
+  return path.join(copies, opts.copy, opts.bp);
+}
+
 function spawnHost(opts: {
   email: string;
   copy: string;
@@ -347,7 +411,7 @@ function spawnHost(opts: {
       ...process.env,
       CLAUDE_EXTENSION_PATH: ext,
       CLAUDE_CONFIG_DIR: configDir,
-      SIDEBAR_WORKSPACE_FOLDER: path.join(opts.workspaceRoot, 'copies', opts.copy, opts.bp),
+      SIDEBAR_WORKSPACE_FOLDER: sidebarWorkspaceFolder(opts),
       // The extension passes its own env straight through to whatever it
       // launches, so these reach claude-process-wrapper as its environment.
       // They are the scope the far side needs: identity (which keys the
@@ -526,9 +590,9 @@ function markThemeKind(html: string): string {
 
 export function pageFor(
   html: string,
-  opts: { assetBase: string; extensionDir: string; assetUris?: unknown },
+  opts: { assetBase: string; extensionDir: string; assetUris?: unknown; stateKey?: string },
 ): string {
-  const withBridge = injectBridge(markThemeKind(html), opts.assetUris);
+  const withBridge = injectBridge(markThemeKind(html), opts.assetUris, opts.stateKey);
   const themed = withBridge.includes('</head>')
     ? withBridge.replace('</head>', `${themeBlock(opts.extensionDir)}\n</head>`)
     : themeBlock(opts.extensionDir) + withBridge;

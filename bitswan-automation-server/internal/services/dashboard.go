@@ -131,8 +131,24 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
 			"CLAUDE_EXTENSION_PATH="+extensionPathInContainer,
 			"SIDEBAR_CONFIG_ROOT=/claude-config",
+			// The copies tree as the coding-agent container sees it. Claude
+			// Code names a conversation's transcript directory after the cwd
+			// the CLI ran in, and the CLI runs there; the extension host has
+			// to derive the same name or it lists an empty history for a BP
+			// full of conversations. So the sidebar uses this path, and the
+			// mount below makes it real on this side too.
+			"SIDEBAR_COPIES_ROOT=/workspace/copies",
 		)
 		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
+			// Same directory as the /workspace/workspace/copies mount above,
+			// under the name the agent container uses. Two targets for one
+			// subpath is cheap and keeps the change off the dashboard's own
+			// WORKSPACE_ROOT, which its file routes and terminal are built on.
+			wsVolume("copies", "/workspace/copies", false),
+			// Per-user Claude Code config dirs, shared with the coding-agent
+			// container (services/coding_agent.go mounts the same subpath at
+			// the same path) — that is where the CLI writes the transcripts
+			// this host reads, and the settings both halves must agree on.
 			wsVolume("claude-configs", "/claude-config", false))
 		for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
 			if v := os.Getenv(key); v != "" {

@@ -116,6 +116,16 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		wsVolume("copies", "/workspace/copies"),
 		wsVolume("coding-agent-home", "/home/agent"),
 		wsVolume("coding-agent-sessions", "/var/log/agent-sessions"),
+		// Per-user Claude Code config dirs, shared with the dashboard container
+		// (services/dashboard.go mounts the same subpath at the same path).
+		// Claude Code writes each conversation to
+		// $CLAUDE_CONFIG_DIR/projects/<cwd>/<uuid>.jsonl and the sidebar's
+		// extension host lists a BP's history by reading that directory. The
+		// CLI runs here, the extension runs there — so unless both see one
+		// directory the panel shows no history and can resume nothing.
+		// agent-session-wrapper picks this up and falls back to the old
+		// in-container location when it is absent.
+		wsVolume("claude-configs", "/claude-config"),
 	}
 
 	// Dev mode: mount source files directly into the container. The dev source

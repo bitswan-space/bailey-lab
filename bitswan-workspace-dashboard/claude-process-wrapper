@@ -72,7 +72,30 @@ fi
 # PATH and then fail every call, falling back to http://localhost:8079 with an
 # empty agent secret. Sourcing it here gives the agent the same environment the
 # terminal agent got from its login shell.
-remote='[ -f /etc/profile.d/bitswan-agent.sh ] && . /etc/profile.d/bitswan-agent.sh; exec claude'
+remote='[ -f /etc/profile.d/bitswan-agent.sh ] && . /etc/profile.d/bitswan-agent.sh;'
+
+# Environment the extension sets for the CLI it launches. ssh carries none of
+# it (only the SSH_* below, which sshd's AcceptEnv lists), so without this the
+# far side runs under a different identity than the extension believes it gave
+# it.
+#
+# CLAUDE_CODE_ENTRYPOINT is the one that bites. The extension sets it to
+# `claude-vscode`; dropped, the CLI falls back to `sdk-cli` and records that in
+# every transcript — and the sidebar hides sdk-cli/sdk-ts/sdk-py sessions from
+# its history as programmatic. So the panel could not see the conversations it
+# had just had: nothing in the history list, nothing to resume, a new
+# conversation every visit.
+#
+# Forwarded, never invented. An unset value means whatever called us did not
+# classify this process, and guessing one is how a probe or background
+# invocation would end up masquerading as somebody's conversation.
+for name in CLAUDE_CODE_ENTRYPOINT MCP_CONNECTION_NONBLOCKING CLAUDE_CODE_ENABLE_TASKS; do
+    value="${!name-}"
+    [ -n "$value" ] || continue
+    remote+=" export ${name}='${value//\'/\'\\\'\'}';"
+done
+
+remote+=' exec claude'
 for arg in "$@"; do
     remote+=" '${arg//\'/\'\\\'\'}'"
 done

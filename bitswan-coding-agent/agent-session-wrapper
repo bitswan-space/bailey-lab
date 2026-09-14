@@ -32,8 +32,44 @@ sanitize_email() {
     printf '%s_%s' "$clean" "$hash"
 }
 EMAIL_SLUG=$(sanitize_email "$USER_EMAIL")
-export CLAUDE_CONFIG_DIR="/home/agent/.claude_${EMAIL_SLUG}"
-mkdir -p "$CLAUDE_CONFIG_DIR"
+
+# Where that dir lives. /claude-config is a volume the workspace-dashboard
+# mounts too, under the same per-user name (configDirNameFor() in
+# server/src/services/vscode-sidebar.ts computes this exact slug) — because the
+# sidebar's extension host has to read what the CLI writes.
+#
+# Claude Code keeps each conversation as
+# $CLAUDE_CONFIG_DIR/projects/<cwd>/<uuid>.jsonl, and the extension lists a
+# BP's history by reading that directory itself. The CLI runs here and the
+# extension runs in the dashboard container, so with a config dir private to
+# this container the panel saw no history at all: nothing to resume, nothing to
+# open, every visit a new conversation. One shared dir per user is what makes
+# the two halves agree — on conversations, and on settings.json with them.
+#
+# The legacy per-container location stays the fallback for a workspace whose
+# compose predates the shared mount, and is copied across once when it doesn't.
+LEGACY_CONFIG_DIR="/home/agent/.claude_${EMAIL_SLUG}"
+SHARED_CONFIG_ROOT="${CLAUDE_CONFIG_ROOT:-/claude-config}"
+if [ -d "$SHARED_CONFIG_ROOT" ]; then
+    export CLAUDE_CONFIG_DIR="${SHARED_CONFIG_ROOT}/${EMAIL_SLUG}"
+    mkdir -p "$CLAUDE_CONFIG_DIR"
+    # One-time carry-over of conversations started before the dirs were shared.
+    # `cp -n` never overwrites, so a re-run cannot clobber newer state, and the
+    # marker keeps it to a single pass per user.
+    if [ -d "$LEGACY_CONFIG_DIR" ] && [ ! -e "${CLAUDE_CONFIG_DIR}/.migrated-from-agent-home" ]; then
+        cp -rn "${LEGACY_CONFIG_DIR}/." "$CLAUDE_CONFIG_DIR/" 2>/dev/null
+        touch "${CLAUDE_CONFIG_DIR}/.migrated-from-agent-home"
+    fi
+    # The sidebar's extension host writes $CLAUDE_CONFIG_DIR/ide/<port>.lock to
+    # advertise the editor socket it listens on — a port in the *dashboard*
+    # container. Sharing the config dir makes those locks visible here, where
+    # that port belongs to nothing at all, so leave them alone: this connection
+    # could never have worked across the two containers.
+    export CLAUDE_CODE_AUTO_CONNECT_IDE=false
+else
+    export CLAUDE_CONFIG_DIR="$LEGACY_CONFIG_DIR"
+    mkdir -p "$CLAUDE_CONFIG_DIR"
+fi
 
 # Attribute git commits made during this session to the actual user. Per-process
 # GIT_* env vars (not global git config) so concurrent sessions in this shared

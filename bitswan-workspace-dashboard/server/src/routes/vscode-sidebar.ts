@@ -10,6 +10,7 @@ import {
   pageFor,
   sidebarEnabled,
   startSidebarHostReaper,
+  webviewStateKey,
   type SidebarOpen,
 } from '../services/vscode-sidebar.js';
 
@@ -72,6 +73,7 @@ export function registerVscodeSidebarRoutes(
           assetBase: `${PREFIX}/asset`,
           extensionDir: extensionPath()!,
           assetUris: opened.assetUris,
+          stateKey: webviewStateKey({ email, ...s }),
         });
         reply.header('Content-Type', 'text/html; charset=utf-8');
         return reply.send(html);
