@@ -930,13 +930,18 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 		//
 		//   <gw>        — the netns OWNER. The worker joins this netns
 		//                 (network_mode: service:<gw>) with NET_ADMIN dropped.
-		//                 It installs the egress rules (DNAT :443/:80 to the
-		//                 proxy, with NO uid exemption) and then holds the netns.
-		//                 No proxy runs here, so there is no privileged uid in
-		//                 the worker's namespace to impersonate.
-		//   <gw>-proxy  — the SNI/Host allow-list proxy, in its OWN container and
-		//                 namespace on the stage network. It is never co-resident
-		//                 with the worker, so the worker cannot reach or spoof it.
+		//                 It points the namespace's DEFAULT ROUTE and resolver at
+		//                 the proxy (so EVERY TCP port, not just :443/:80, leaves
+		//                 through it — with NO uid exemption) and then holds the
+		//                 netns. No proxy runs here, so there is no privileged
+		//                 uid in the worker's namespace to impersonate.
+		//   <gw>-proxy  — the allow-list proxy + the worker's DNS forwarder, in
+		//                 its OWN container and namespace on the stage network.
+		//                 It is never co-resident with the worker, so the worker
+		//                 cannot reach or spoof it. NET_ADMIN is for the REDIRECT
+		//                 rules in its own namespace (funnelling the routed
+		//                 traffic onto its listeners); ip_forward lets monitor
+		//                 mode pass the non-TCP traffic it does not filter.
 		proxy := g.gw + "-proxy"
 		services[proxy] = map[string]interface{}{
 			"image": c.gatewayImage,
@@ -951,6 +956,8 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 			"pull_policy":    "missing",
 			"container_name": proxy,
 			"restart":        "unless-stopped",
+			"cap_add":        []interface{}{"NET_ADMIN"},
+			"sysctls":        []interface{}{"net.ipv4.ip_forward=1"},
 			"environment": map[string]interface{}{
 				"BITSWAN_FW_ROLE":     "proxy",
 				"BITSWAN_FW_MODE":     g.mode,
@@ -992,7 +999,7 @@ func (c *compileState) emitGateways(services map[string]interface{}, fwScope map
 				"BITSWAN_FW_MODE":  g.mode,
 				"BITSWAN_FW_PROXY": proxy,
 			},
-			// Install rules only once the proxy (the DNAT target) is up.
+			// Install rules only once the proxy (the default-route + DNS target) is up.
 			"depends_on": map[string]interface{}{
 				proxy: map[string]interface{}{"condition": "service_healthy"},
 			},

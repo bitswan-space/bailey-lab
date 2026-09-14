@@ -140,6 +140,8 @@ services:
         pull_policy: missing
         restart: unless-stopped
     ws4-fwgw-4337-live-dev-proxy:
+        cap_add:
+            - NET_ADMIN
         container_name: ws4-fwgw-4337-live-dev-proxy
         environment:
             BITSWAN_FW_ALLOW: ""
@@ -168,6 +170,8 @@ services:
                     - ws4-fwgw-4337-live-dev-proxy
         pull_policy: missing
         restart: unless-stopped
+        sysctls:
+            - net.ipv4.ip_forward=1
         volumes:
             - __ROOT__/firewall:/firewall
 version: "3"
