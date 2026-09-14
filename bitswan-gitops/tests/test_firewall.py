@@ -142,6 +142,37 @@ def test_attempts_feed_from_gateway_jsonl(tmp_path, monkeypatch):
     assert {a["host"] for a in fw2["attempts"]} == {"evil.com"}
 
 
+def test_attempts_feed_carries_destination_ports(tmp_path, monkeypatch):
+    """The gateway intercepts EVERY TCP port (the smtp.gmail.com:587 report):
+    a non-HTTP destination lands in needs-review like any other host, with the
+    ports it was dialed on aggregated so the operator sees what the BP was
+    doing. Records from older gateways (no port field) still count."""
+    svc = _svc(tmp_path, monkeypatch)
+    import os
+    import json
+
+    os.makedirs(str(tmp_path / "fw"), exist_ok=True)
+    recs = [
+        {"host": "smtp.gmail.com", "port": 587, "proto": "tcp", "decision": "blocked"},
+        {"host": "smtp.gmail.com", "port": 587, "proto": "tcp", "decision": "blocked"},
+        {"host": "smtp.gmail.com", "port": 465, "proto": "tcp", "decision": "blocked"},
+        {"host": "api.example.com", "proto": "tls"},  # legacy record, no port
+        {"host": "api.example.com", "port": 443, "proto": "tls"},
+        {"host": "1.1.1.1", "port": 53, "proto": "tcp", "decision": "blocked"},
+    ]
+    with open(fws.attempts_log_path("shop", "staging"), "w") as f:
+        for r in recs:
+            f.write(json.dumps({**r, "at": "2026-09-12T10:00:00Z"}) + "\n")
+    fw = svc.read_firewall("shop", "staging")
+    by_host = {a["host"]: a for a in fw["attempts"]}
+    assert by_host["smtp.gmail.com"]["count"] == 3
+    assert by_host["smtp.gmail.com"]["ports"] == [465, 587]
+    assert by_host["api.example.com"]["count"] == 2
+    assert by_host["api.example.com"]["ports"] == [443]
+    # an IP-literal destination (nothing resolved it) is reviewable too
+    assert by_host["1.1.1.1"]["ports"] == [53]
+
+
 # ── default (seeded) allow-list: AOC Keycloak (#311) ─────────────────────────
 # The platform injects the AOC Keycloak into every worker as KEYCLOAK_URL, then
 # the egress firewall flagged the worker for calling it — noise for a call the

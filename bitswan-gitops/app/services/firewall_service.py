@@ -177,8 +177,13 @@ def attempts_log_path(bp: str, realm: str) -> str:
 
 
 def read_attempts(bp: str, realm: str) -> dict:
-    """Aggregate the gateway's JSONL into {host: {count, first, last, proto}}.
-    Tolerates a missing/partial file (telemetry, best-effort)."""
+    """Aggregate the gateway's JSONL into
+    {host: {count, first, last, proto, ports}}. `ports` is the sorted set of
+    destination ports the host was dialed on — the gateway sees every TCP
+    port, not just 80/443, so an SMTP host shows up as e.g. ports [587] and
+    the operator can tell what the BP was trying to do before approving.
+    Records from gateways that predate the port field simply contribute no
+    port. Tolerates a missing/partial file (telemetry, best-effort)."""
     path = attempts_log_path(bp, realm)
     agg: dict[str, dict] = {}
     try:
@@ -197,13 +202,27 @@ def read_attempts(bp: str, realm: str) -> dict:
                 at = rec.get("at")
                 e = agg.setdefault(
                     host,
-                    {"count": 0, "first": at, "last": at, "proto": rec.get("proto")},
+                    {
+                        "count": 0,
+                        "first": at,
+                        "last": at,
+                        "proto": rec.get("proto"),
+                        "ports": [],
+                    },
                 )
                 e["count"] += 1
                 if at:
                     e["last"] = at
                     if not e["first"]:
                         e["first"] = at
+                port = rec.get("port")
+                if (
+                    isinstance(port, int)
+                    and 0 < port < 65536
+                    and port not in e["ports"]
+                ):
+                    e["ports"].append(port)
+                    e["ports"].sort()
     except FileNotFoundError:
         pass
     except Exception:

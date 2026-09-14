@@ -875,6 +875,9 @@ export interface FirewallAttempt {
   // eslint-disable-next-line no-restricted-syntax -- nullable telemetry
   last: string | null;
   proto?: string;
+  /** destination ports the host was dialed on (the gateway sees every TCP
+   *  port, so e.g. [587] tells the operator this is SMTP, not a web call) */
+  ports?: number[];
 }
 export interface FirewallReport {
   bp: string;

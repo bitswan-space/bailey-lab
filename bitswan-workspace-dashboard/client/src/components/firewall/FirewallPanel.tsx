@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
-import { api, type FirewallReport, type FirewallRule, type GdprRecord } from '@/lib/api';
+import { api, type FirewallAttempt, type FirewallReport, type FirewallRule, type GdprRecord } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { formatRelative, type WhenInput } from '@/lib/format-date';
 
@@ -33,7 +33,9 @@ const FIREWALL_POLL_MS = 4000;
 
 /**
  * Egress firewall panel (wireframe Firewall tab). Shows the outbound allow-list
- * for a BP stage: blocked/observed hosts that "need review" (approve/deny),
+ * for a BP stage. The gateway intercepts every outbound TCP port (HTTPS, SMTP,
+ * databases, …), so any host the BP dials — on any port — is reviewable here:
+ * blocked/observed hosts that "need review" (approve/deny),
  * hosts ready to promote from the previous stage, allowed hosts (revoke), and
  * denied hosts (re-approve). Approving a host opens the GDPR data-processing
  * form (what data leaves, why, where it's stored, jurisdiction, signed DPA PDF);
@@ -233,8 +235,8 @@ export function FirewallPanel({
     <div className="relative flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-3">
         <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-muted-foreground">
-          {stageLabel} can only reach the external hosts on this allow-list. Any other outbound
-          connection is{' '}
+          {stageLabel} can only reach the external hosts on this allow-list, on any port. Any other
+          outbound connection is{' '}
           {fw.posture === 'enforce' ? 'blocked and logged' : 'allowed but logged (monitor mode)'}{' '}
           here for you to approve or deny.
         </p>
@@ -262,7 +264,7 @@ export function FirewallPanel({
       {fw.attempts.length > 0 && (
         <Section title="Needs review" badge={fw.attempts.length} danger>
           {fw.attempts.map((a) => (
-            <Row key={a.host} host={a.host} sub={`${a.count} attempt${a.count === 1 ? '' : 's'} · last ${fmt(a.last)}`} blocked>
+            <Row key={a.host} host={a.host} sub={attemptSub(a)} blocked>
               {canEdit && (
                 <>
                   <Btn onClick={() => setApprove({ host: a.host, mode: 'approve' })} kind="approve">Approve</Btn>
@@ -693,6 +695,17 @@ function Row({
       {children && <div className="flex items-center gap-1.5">{children}</div>}
     </div>
   );
+}
+
+/** "3 attempts · port 587 · last 2 min ago" — the port(s) tell the operator
+ *  what kind of traffic this was (587 = SMTP submission) before they approve. */
+function attemptSub(a: FirewallAttempt): string {
+  const parts = [`${a.count} attempt${a.count === 1 ? '' : 's'}`];
+  if (a.ports && a.ports.length > 0) {
+    parts.push(`port${a.ports.length === 1 ? '' : 's'} ${a.ports.join(', ')}`);
+  }
+  parts.push(`last ${fmt(a.last)}`);
+  return parts.join(' · ');
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
