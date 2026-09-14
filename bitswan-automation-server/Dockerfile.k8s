@@ -1,0 +1,12 @@
+ARG RUNTIME_IMAGE=bitswan/automation-server-runtime:latest
+FROM ${RUNTIME_IMAGE}
+
+ARG KUBECTL_VERSION=v1.31.5
+RUN curl -fsSL -o /usr/local/bin/kubectl \
+        "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl" && \
+    chmod 0755 /usr/local/bin/kubectl && kubectl version --client=true
+
+COPY bitswan /usr/local/bin/bitswan
+RUN chmod 0755 /usr/local/bin/bitswan && /usr/local/bin/bitswan version
+
+CMD ["/usr/local/bin/bitswan", "automation-server-daemon", "__run"]

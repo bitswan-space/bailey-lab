@@ -101,16 +101,18 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 		return fmt.Errorf("failed to create BitSwan config directory: %w", err)
 	}
 
-	// Init bitswan network
-	if _, err := docker.EnsureDockerNetwork("bitswan_network", verbose); err != nil {
-		return err
-	}
-	// Dedicated per-workspace agent↔gitops bridge. The coding agent joins ONLY
-	// this network (never bitswan_network), so it can reach gitops's
-	// authenticated API/git but nothing else on the control-plane inner ring.
-	// Created up front because the gitops compose now declares it as external.
-	if _, err := docker.EnsureDockerNetwork(workspaceName+"-agent", verbose); err != nil {
-		return err
+	if !onKubernetes() {
+		// Init bitswan network
+		if _, err := docker.EnsureDockerNetwork("bitswan_network", verbose); err != nil {
+			return err
+		}
+		// Dedicated per-workspace agent↔gitops bridge. The coding agent joins ONLY
+		// this network (never bitswan_network), so it can reach gitops's
+		// authenticated API/git but nothing else on the control-plane inner ring.
+		// Created up front because the gitops compose now declares it as external.
+		if _, err := docker.EnsureDockerNetwork(workspaceName+"-agent", verbose); err != nil {
+			return err
+		}
 	}
 
 	// Ensure the global ingress proxy is running.
@@ -727,14 +729,37 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 		fmt.Printf("Warning: Failed to save metadata: %v\n", err)
 	}
 
-	// Docker compose project names must be lowercase
-	projectName := strings.ToLower(workspaceName) + "-site"
-	// Use --pull missing to pull images if they don't exist locally (needed for CI)
-	dockerComposeCom := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--pull", "missing")
-
 	fmt.Println("Launching BitSwan Workspace services...")
-	if err := util.RunCommandVerbose(dockerComposeCom, true); err != nil {
-		return fmt.Errorf("failed to start docker-compose: %w", err)
+	if onKubernetes() {
+		gi, di, ai := k8sWorkspaceImages(gitopsImage, dashboardImage, codingAgentImage)
+		if err := bringUpWorkspaceK8s(context.Background(), workspaceK8sConfig{
+			Workspace:          workspaceName,
+			Domain:             domain,
+			VolumeClaim:        k8sWorkspaceVolumeClaim(),
+			GitopsImage:        gi,
+			DashboardImage:     di,
+			CodingAgentImage:   ai,
+			PullPolicy:         k8sPullPolicy(),
+			GitopsSecret:       token,
+			CodingAgentSecret:  codingAgentSecret,
+			CertsDir:           os.Getenv("HOME") + "/.config/bitswan/certauthorities",
+			WithDashboard:      !noDashboard,
+			WithCodingAgent:    !noCodingAgent,
+			EditorSSHPublicKey: readWorkspaceSSHPublicKey(gitopsConfig),
+			InfraDriverImage:   envOrDefault("BITSWAN_INFRA_DRIVER_IMAGE", "bitswan/infra-driver:latest"),
+			InfraDriverToken:   config.InfraDriverToken,
+			IngressURL:         envOrDefault("BITSWAN_INGRESS_URL", fmt.Sprintf("http://bailey:%d", workspaceAPIPort)),
+		}); err != nil {
+			return fmt.Errorf("failed to start workspace services: %w", err)
+		}
+	} else {
+		// Docker compose project names must be lowercase
+		projectName := strings.ToLower(workspaceName) + "-site"
+		// Use --pull missing to pull images if they don't exist locally (needed for CI)
+		dockerComposeCom := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--pull", "missing")
+		if err := util.RunCommandVerbose(dockerComposeCom, true); err != nil {
+			return fmt.Errorf("failed to start docker-compose: %w", err)
+		}
 	}
 
 	fmt.Println("BitSwan GitOps initialized successfully!")
@@ -753,8 +778,10 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 			return fmt.Errorf("failed to create dashboard service: %w", err)
 		}
 
-		if err := dashboardService.Enable(token, bitswanDashboardImage, true); err != nil {
-			return fmt.Errorf("failed to enable dashboard service: %w", err)
+		if !onKubernetes() {
+			if err := dashboardService.Enable(token, bitswanDashboardImage, true); err != nil {
+				return fmt.Errorf("failed to enable dashboard service: %w", err)
+			}
 		}
 
 		dashboardHostname := fmt.Sprintf("%s-dashboard.%s", workspaceName, domain)
@@ -771,8 +798,10 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 			return fmt.Errorf("failed to register Dashboard service: %w", err)
 		}
 
-		if err := dashboardService.StartContainer(); err != nil {
-			return fmt.Errorf("failed to start dashboard container: %w", err)
+		if !onKubernetes() {
+			if err := dashboardService.StartContainer(); err != nil {
+				return fmt.Errorf("failed to start dashboard container: %w", err)
+			}
 		}
 
 		fmt.Println("------------WORKSPACE DASHBOARD INFO------------")
@@ -790,12 +819,14 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 
 		// Coding-agent has no durable live-dev mode (only gitops + dashboard do),
 		// so init never sets a dev config — enable with the plain image.
-		if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, domain, nil); err != nil {
-			return fmt.Errorf("failed to enable coding-agent service: %w", err)
-		}
+		if !onKubernetes() {
+			if err := codingAgentService.Enable(codingAgentSecret, bitswanCodingAgentImage, domain, nil); err != nil {
+				return fmt.Errorf("failed to enable coding-agent service: %w", err)
+			}
 
-		if err := codingAgentService.StartContainer(); err != nil {
-			return fmt.Errorf("failed to start coding-agent container: %w", err)
+			if err := codingAgentService.StartContainer(); err != nil {
+				return fmt.Errorf("failed to start coding-agent container: %w", err)
+			}
 		}
 
 		fmt.Println("------------CODING AGENT INFO------------")

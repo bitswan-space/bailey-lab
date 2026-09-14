@@ -1,4 +1,4 @@
-package dockerdriver
+package core
 
 import (
 	"fmt"
@@ -29,11 +29,11 @@ func escapesRel(rel string) bool {
 	return rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// containedJoin joins a tenant-supplied path element onto root and errors
+// ContainedJoin joins a tenant-supplied path element onto root and errors
 // unless the cleaned result lies strictly below root. Purely lexical (catches
-// `..` traversal and absolute elements); pair with assertRealUnder for the
+// `..` traversal and absolute elements); pair with AssertRealUnder for the
 // symlink case when the joined path is visible to this process.
-func containedJoin(root, elem string) (string, error) {
+func ContainedJoin(root, elem string) (string, error) {
 	cleanRoot := filepath.Clean(root)
 	joined := filepath.Join(cleanRoot, elem)
 	rel, err := filepath.Rel(cleanRoot, joined)
@@ -43,13 +43,13 @@ func containedJoin(root, elem string) (string, error) {
 	return joined, nil
 }
 
-// assertRealUnder verifies that path — already lexically contained in root —
+// AssertRealUnder verifies that path — already lexically contained in root —
 // still resolves strictly below root once symlinks are applied, so a symlink
 // planted inside root cannot redirect a bind-mount source outside it. Missing
 // paths pass: there is nothing on disk to follow, and the lexical check has
 // already run (the compiler may check a container-visible twin of a host-side
 // root, which need not exist in every environment).
-func assertRealUnder(root, path string) error {
+func AssertRealUnder(root, path string) error {
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -595,7 +595,8 @@ def _ingress_client_and_base() -> tuple:
 
     Prefers the Unix socket (BITSWAN_INGRESS_SOCKET) — access is controlled
     by the docker-compose bind-mount, no token needed.
-    Falls back to BITSWAN_INGRESS_URL for environments without the socket.
+    Falls back to BITSWAN_INGRESS_URL for environments without the socket,
+    where there is no socket to be the credential and BITSWAN_INGRESS_TOKEN is.
     """
     socket_path = os.environ.get(
         "BITSWAN_INGRESS_SOCKET", "/var/run/bitswan/automation-server.sock"
@@ -608,7 +609,13 @@ def _ingress_client_and_base() -> tuple:
     base_url = os.environ.get(
         "BITSWAN_INGRESS_URL", "http://bitswan-automation-server-daemon:8080"
     )
-    return httpx.Client(timeout=10), base_url
+    token = os.environ.get("BITSWAN_INGRESS_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError(
+            "no socket to reach the daemon by and BITSWAN_INGRESS_TOKEN is not set"
+        )
+    headers = {"Authorization": f"Bearer {token}"}
+    return httpx.Client(timeout=10, headers=headers), base_url
 
 
 def daemon_user_role(email: str) -> str:

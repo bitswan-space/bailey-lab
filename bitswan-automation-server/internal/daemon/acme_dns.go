@@ -52,7 +52,7 @@ const (
 // daemon container is reachable by name on the shared bitswan_network, and
 // docsPort is the daemon's TCP listener.
 func acmeBridgeEndpoint() string {
-	return fmt.Sprintf("http://bitswan-automation-server-daemon:%d%s", docsPort, acmeBridgePath)
+	return acmeBridgeEndpointFor()
 }
 
 // getWildcardCertDomain returns the automation server's domain when the AOC

@@ -255,7 +255,7 @@ func aocPublicSettings() (*config.AutomationOperationsCenterSettings, error) {
 // to the gate (:9080), DELIBERATELY bypassing the oauth2-proxy hop that fronts
 // protected hosts — public hosts must not trigger a Keycloak login.
 func registerPublicRoute(publicHost string) error {
-	upstream := daemonContainerName + gateListenAddr // e.g. bitswan-automation-server-daemon:9080
+	upstream := daemonGateUpstream() // e.g. bitswan-automation-server-daemon:9080
 	// A published host is one label under this server's own domain, so the
 	// wildcard certificate every other host here is served with covers it: same
 	// resolver, same TLS domains, no new challenge and no per-host cert. Which

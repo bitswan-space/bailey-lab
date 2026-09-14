@@ -394,6 +394,13 @@ providers:
     network: bitswan_network
 `
 
+	if onKubernetes() {
+		cfg = strings.Replace(cfg, `  docker:
+    exposedByDefault: false
+    network: bitswan_network
+`, "", 1)
+	}
+
 	if !mode.usesACME() {
 		// Certificates come from the file-provider TLS store (see
 		// traefikapi.InstallTLSCerts); Traefik picks them by SNI.
@@ -610,6 +617,24 @@ func initTraefikIngress(verbose bool) (bool, error) {
 	// and always succeeds — it can no longer tell whether Traefik is up. If the
 	// config has drifted (e.g. the DNS-01 resolver was just enabled), fall
 	// through and recreate the container.
+	if onKubernetes() {
+		if err := os.WriteFile(traefikConfigFilePath, []byte(traefikStaticConfig), 0644); err != nil {
+			return false, fmt.Errorf("failed to write traefik.yml: %w", err)
+		}
+		if err := os.WriteFile(traefikConfig+"/dynamic.yml", []byte(traefikDynamicConfig), 0644); err != nil {
+			return false, fmt.Errorf("failed to write traefik dynamic.yml: %w", err)
+		}
+		if err := os.MkdirAll(traefikCertsDir, 0740); err != nil {
+			return false, fmt.Errorf("failed to create ingress certs directory: %w", err)
+		}
+		if err := traefikapi.InitTraefik(); err != nil {
+			return false, fmt.Errorf("failed to init ingress: %w", err)
+		}
+		reconcileTLSMode()
+		warnAboutInstalledCertExpiry()
+		return false, nil
+	}
+
 	if containerRunning("traefik") {
 		currentConfig, _ := os.ReadFile(traefikConfigFilePath)
 		currentCompose, _ := os.ReadFile(traefikDockerComposePath)
@@ -850,7 +875,7 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 	// sub-traefik stays internal-only (HTTP :80 over bitswan_network); its
 	// inner→container routes come from the REST provider, not docker labels.
 	catchAllDomain := domain
-	if containerRunning("bitswan-protected-proxy") {
+	if protectedProxyAvailable() {
 		catchAllDomain = ""
 	}
 	traefikDockerCompose, err := dockercompose.CreateWorkspaceTraefikDockerComposeFile(workspaceName, traefikConfigForCompose, catchAllDomain, wildcardResolver, stageNetworks)
@@ -1062,6 +1087,9 @@ func workspaceDashboardEndpoint(workspaceName string) string {
 
 // isWorkspaceTraefikRunning checks if a workspace sub-traefik container is running.
 func isWorkspaceTraefikRunning(workspaceName string) bool {
+	if onKubernetes() {
+		return false
+	}
 	containerName := fmt.Sprintf("%s__traefik", workspaceName)
 	out, err := exec.Command("docker", "ps", "-q", "-f", fmt.Sprintf("name=%s", containerName)).Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
@@ -1116,7 +1144,11 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 	//     {workspace}-* host straight here. Restoring inner-only there would
 	//     404 every outer host (gitops, dashboard, frontends) until its next
 	//     deploy.
-	wrapAvailable := containerRunning("bitswan-protected-proxy")
+	wrapAvailable := protectedProxyAvailable()
+	if !wrapAvailable && mustWrapRoutes() {
+		fmt.Printf("Warning: the authentication proxy is not answering — "+
+			"%s's outer routes are left unpublished rather than published unwrapped.\n", workspaceName)
+	}
 	for _, r := range routes {
 		if r.Upstream == "" {
 			continue
@@ -1126,7 +1158,7 @@ func repushWorkspaceRoutesToSubTraefik(workspaceName string) {
 			continue
 		}
 		_ = traefikapi.AddRouteWithTraefik(toInnerHost(r.Hostname), r.Upstream, subURL)
-		if !wrapAvailable {
+		if !wrapAvailable && !mustWrapRoutes() {
 			_ = traefikapi.AddRouteWithTraefik(toOuterHost(r.Hostname), r.Upstream, subURL)
 		}
 	}
@@ -1205,7 +1237,11 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 		}
 	}
 
-	wrapAvailable := containerRunning("bitswan-protected-proxy")
+	wrapAvailable := protectedProxyAvailable()
+	if !wrapAvailable && mustWrapRoutes() {
+		return fmt.Errorf(
+			"the authentication proxy is not answering; refusing to publish %s without it", outer)
+	}
 	if wrapAvailable && workspaceName != "" && isWorkspaceTraefikRunning(workspaceName) {
 		// INNER hostname carries the actual app content: route it in
 		// the workspace's own traefik and through the auth chain in
@@ -1216,11 +1252,11 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 		if err := traefikapi.AddRouteWithTraefik(inner, req.Upstream, workspaceTraefikURL); err != nil {
 			return fmt.Errorf("failed to add inner route to workspace sub-traefik: %w", err)
 		}
-		if err := traefikapi.AddRouteWithTLSDomains(inner, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
+		if err := traefikapi.AddRouteWithTLSDomains(inner, protectedProxyUpstream(), "", certResolver, tlsDomains); err != nil {
 			return fmt.Errorf("failed to add inner route to platform traefik: %w", err)
 		}
 		// OUTER hostname serves only the wrap.
-		if err := traefikapi.AddRouteWithTLSDomains(outer, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
+		if err := traefikapi.AddRouteWithTLSDomains(outer, protectedProxyUpstream(), "", certResolver, tlsDomains); err != nil {
 			return fmt.Errorf("failed to add outer route to platform traefik: %w", err)
 		}
 		// Record the REAL upstream (the container), not the sub-traefik. The
@@ -1236,7 +1272,7 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 		// Two-tier routing without the wrap: platform-traefik →
 		// workspace sub-traefik → container, for both hostnames.
 		workspaceTraefikURL := traefikapi.GetWorkspaceTraefikBaseURL(workspaceName)
-		workspaceTraefikUpstream := fmt.Sprintf("%s__traefik:80", workspaceName)
+		workspaceTraefikUpstream := workspaceIngressUpstream(workspaceName)
 		for _, h := range []string{outer, inner} {
 			if err := traefikapi.AddRouteWithTraefik(h, req.Upstream, workspaceTraefikURL); err != nil {
 				return fmt.Errorf("failed to add route to workspace sub-traefik for %s: %w", h, err)
@@ -1260,7 +1296,7 @@ func addRouteTraefik(req IngressAddRouteRequest, workspaceName string) error {
 		// service must be reachable from the daemon (bitswan_network —
 		// true for all workspace services today).
 		for _, h := range []string{outer, inner} {
-			if err := traefikapi.AddRouteWithTLSDomains(h, "bitswan-protected-proxy:80", "", certResolver, tlsDomains); err != nil {
+			if err := traefikapi.AddRouteWithTLSDomains(h, protectedProxyUpstream(), "", certResolver, tlsDomains); err != nil {
 				return fmt.Errorf("failed to add route for %s: %w", h, err)
 			}
 		}

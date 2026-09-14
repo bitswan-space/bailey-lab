@@ -1,15 +1,5 @@
 #!/bin/sh
 # Egress-gateway entrypoint. Two roles, selected by $BITSWAN_FW_ROLE:
-#
-#   owner  — installs the egress rules in this network namespace and HOLDS it.
-#            The BP worker joins this netns (network_mode: service:<owner>) with
-#            NET_ADMIN dropped, so it cannot alter the rules. Critically, NO
-#            proxy runs here: the worker's :443/:80 is DNAT'd to the proxy
-#            container (a separate namespace), so there is no privileged uid in
-#            the worker's namespace to impersonate. A root worker that setuid()s
-#            to anything is still fully subject to these rules — the firewall is
-#            enforced OUTSIDE everything the worker can reach.
-#
 #   proxy  — the SNI/Host allow-list filter (the egress-gateway binary). Runs in
 #            its own container/namespace on the stage network, unprivileged.
 set -e
@@ -27,6 +17,8 @@ if [ "$ROLE" = "owner" ]; then
   # Used to scope the infra-peer allowance instead of all of RFC1918.
   STAGE_SUBNET=$(ip -o -f inet addr show scope global 2>/dev/null | awk '{print $4; exit}')
 
+  RESOLVERS=$(awk '/^nameserver/{print $2}' /etc/resolv.conf 2>/dev/null | tr '\n' ' ')
+
   # nat OUTPUT: keep Docker's embedded-DNS DNAT (flushing OUTPUT drops the jump
   # to DOCKER_OUTPUT), then DNAT all :443/:80 to the external proxy. NO uid
   # exemption — nothing in this netns is exempt.
@@ -38,17 +30,27 @@ if [ "$ROLE" = "owner" ]; then
   iptables -t nat -A OUTPUT -p tcp --dport 80  -j DNAT --to-destination "$PROXY_IP:18080"
 
   if [ "$BITSWAN_FW_MODE" = "enforce" ]; then
-    # Default-deny egress. Allow: loopback, established, DNS to Docker's embedded
-    # resolver ONLY (direct :53 to arbitrary resolvers is dropped — no DNS
-    # tunnelling), the worker's own stage subnet (infra peers — not all RFC1918),
-    # the proxy, and the :80/:443 the proxy enforces.
     iptables -F OUTPUT
     iptables -A OUTPUT -o lo -j ACCEPT
     iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    iptables -A OUTPUT -d 127.0.0.11/32 -p udp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -d 127.0.0.11/32 -p tcp --dport 53 -j ACCEPT
+    for r in $RESOLVERS 127.0.0.11; do
+      case "$r" in *:*) continue ;; esac
+      iptables -A OUTPUT -d "$r" -p udp --dport 53 -j ACCEPT
+      iptables -A OUTPUT -d "$r" -p tcp --dport 53 -j ACCEPT
+    done
     iptables -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
     [ -n "$STAGE_SUBNET" ] && iptables -A OUTPUT -d "$STAGE_SUBNET" -j ACCEPT
+    for peer in $(echo "${BITSWAN_FW_PEERS:-}" | tr ',' ' '); do
+      [ -n "$peer" ] || continue
+      peer_ip=$(host -t A "$peer" 2>/dev/null | awk '/has address/{print $NF; exit}')
+      [ -n "$peer_ip" ] || peer_ip=$(nslookup "$peer" 2>/dev/null | awk -F'[: \t]+' '/^Address/ && $0 !~ /#/ {ip=$2} END{print ip}')
+      if [ -n "$peer_ip" ]; then
+        iptables -A OUTPUT -d "$peer_ip/32" -j ACCEPT
+        echo "egress-gateway[owner]: peer $peer -> $peer_ip allowed"
+      else
+        echo "egress-gateway[owner]: WARNING peer $peer did not resolve; it will be blocked"
+      fi
+    done
     iptables -A OUTPUT -d "$PROXY_IP/32" -j ACCEPT
     iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
     iptables -A OUTPUT -p tcp --dport 80  -j ACCEPT
@@ -96,9 +98,12 @@ if [ "$ROLE" = "owner" ]; then
     echo "egress-gateway[owner]: no IPv6 stack (ip6tables OUTPUT unavailable); no v6 egress to filter"
   fi
 
-  # Signal readiness (the worker gates its start on this via the healthcheck) and
-  # hold the namespace open for the worker that shares it.
   touch /tmp/fw-ready
+
+  if [ "${BITSWAN_FW_HOLD:-1}" = "0" ]; then
+    echo "egress-gateway[owner]: rules installed (mode=${BITSWAN_FW_MODE:-monitor}, proxy=$PROXY_IP); exiting"
+    exit 0
+  fi
   echo "egress-gateway[owner]: rules installed (mode=${BITSWAN_FW_MODE:-monitor}, proxy=$PROXY_IP); holding netns"
   exec tail -f /dev/null
 fi

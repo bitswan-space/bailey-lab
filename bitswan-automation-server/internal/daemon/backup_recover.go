@@ -49,11 +49,11 @@ type RecoverRequest struct {
 
 	Stages []string `json:"stages,omitempty"` // empty = every enabled stage
 
-	SkipFiles       bool `json:"skip_files,omitempty"`
-	SkipContainers  bool `json:"skip_containers,omitempty"`
-	SkipPostgres    bool `json:"skip_postgres,omitempty"`
-	SkipCouchDB     bool `json:"skip_couchdb,omitempty"`
-	SkipGarage      bool `json:"skip_garage,omitempty"`
+	SkipFiles      bool `json:"skip_files,omitempty"`
+	SkipContainers bool `json:"skip_containers,omitempty"`
+	SkipPostgres   bool `json:"skip_postgres,omitempty"`
+	SkipCouchDB    bool `json:"skip_couchdb,omitempty"`
+	SkipGarage     bool `json:"skip_garage,omitempty"`
 
 	GarageMirror  bool `json:"garage_mirror,omitempty"`  // rclone sync (deletes extraneous)
 	DiscardBackup bool `json:"discard_backup,omitempty"` // drop the quarantined tree on success

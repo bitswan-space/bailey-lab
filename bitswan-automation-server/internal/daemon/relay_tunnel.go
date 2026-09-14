@@ -25,7 +25,7 @@ func relayLocalTarget() string {
 	if t := os.Getenv("BITSWAN_RELAY_LOCAL_TARGET"); t != "" {
 		return t
 	}
-	return "traefik:443"
+	return relayLocalTargetDefault()
 }
 
 // startRelayTunnel launches the reverse-proxy tunnel client when this server is

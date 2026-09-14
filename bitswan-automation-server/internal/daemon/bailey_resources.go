@@ -19,10 +19,10 @@ import (
 // runs the pure admit check. Used by the workspace-create gate (in-process) and
 // the /memory/admit endpoint (gitops promote gate).
 // admitInventory gathers the reservation-only inventory for admission. A package
-// var so tests can stub the docker dependency.
 var admitInventory = func(ctx context.Context) ([]memContainer, error) {
-	// Admission only needs RESERVATIONS (from labels via docker ps), never live
-	// usage — so skip the slow docker stats sample to keep the gate fast.
+	if onKubernetes() {
+		return baileyMemGovernor.Inventory(ctx)
+	}
 	return dockerGlobalInventory(ctx, false)
 }
 
@@ -69,7 +69,14 @@ func (s *Server) handleMemoryAdmit(w http.ResponseWriter, r *http.Request) {
 
 // baileyMemGovernor is the daemon's memory backend. A package var (not a Server
 // field) so it can be swapped in tests; defaults to the docker implementation.
-var baileyMemGovernor MemoryGovernor = dockerMemoryGovernor{}
+var baileyMemGovernor MemoryGovernor = newMemoryGovernor()
+
+func newMemoryGovernor() MemoryGovernor {
+	if onKubernetes() {
+		return k8sMemoryGovernor{}
+	}
+	return dockerMemoryGovernor{}
+}
 
 // desiredGroup is one (bp, stage) deployment group a workspace's gitops knows
 // about (from its bitswan.yaml). Used to surface SLEPT groups — deployed but

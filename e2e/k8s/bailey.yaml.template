@@ -1,0 +1,388 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["bailey"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bailey
+subjects:
+  - kind: ServiceAccount
+    name: bailey
+    namespace: ${NAMESPACE}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bitswan-infra-driver
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: bitswan-infra-driver
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: bitswan-infra-driver
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: bitswan-infra-driver
+subjects:
+  - kind: ServiceAccount
+    name: bitswan-infra-driver
+    namespace: ${NAMESPACE}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        memory: 64Mi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  hard:
+    requests.memory: ${NAMESPACE_MEMORY}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bailey-config
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: ${STORAGE_SIZE}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bailey-seed
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+data:
+  expected-namespace: ${NAMESPACE}
+  platform: kubernetes
+  domain: ${DOMAIN}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bailey-oauth
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+type: Opaque
+stringData:
+  OAUTH2_PROXY_PROVIDER: oidc
+  OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER}
+  OAUTH2_PROXY_CLIENT_ID: ${OIDC_CLIENT_ID}
+  OAUTH2_PROXY_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+  OAUTH2_PROXY_COOKIE_SECRET: ${OIDC_COOKIE_SECRET}
+  OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+  OAUTH2_PROXY_SCOPE: openid email profile
+  OAUTH2_PROXY_UPSTREAMS: http://127.0.0.1:9080
+  OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+  OAUTH2_PROXY_REVERSE_PROXY: "true"
+  OAUTH2_PROXY_PASS_HOST_HEADER: "true"
+  OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+  OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+  OAUTH2_PROXY_PASS_ACCESS_TOKEN: "true"
+  OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+  OAUTH2_PROXY_REDIRECT_URL: https://bailey.${DOMAIN}/oauth2/callback
+  OAUTH2_PROXY_COOKIE_DOMAINS: .${DOMAIN}
+  OAUTH2_PROXY_WHITELIST_DOMAINS: .${DOMAIN},${OIDC_HOST}
+  OAUTH2_PROXY_COOKIE_SECURE: "true"
+  OAUTH2_PROXY_COOKIE_SAMESITE: none
+  OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST: "true"
+  OAUTH2_PROXY_COOKIE_CSRF_EXPIRE: 1h
+  OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL: "true"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bailey-workspace-api
+  labels:
+    app.kubernetes.io/managed-by: bitswan
+type: Opaque
+stringData:
+  token: ${WORKSPACE_API_TOKEN}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: bailey
+  ports:
+    - name: http
+      port: 80
+    - name: https
+      port: 443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bailey-ingress
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: bailey
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+    - name: https
+      port: 443
+      targetPort: 443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bailey
+  labels:
+    app.kubernetes.io/name: bailey
+    app.kubernetes.io/managed-by: bitswan
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bailey
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bailey
+        app.kubernetes.io/managed-by: bitswan
+        bitswan.io/role: control-plane
+    spec:
+      serviceAccountName: bailey
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 0
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: bailey-config
+        - name: run
+          emptyDir: {}
+      initContainers:
+        - name: seed-state
+          image: ${DAEMON_IMAGE}
+          imagePullPolicy: ${PULL_POLICY}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              cd /root/.config/bitswan
+              mkdir -p traefik/certs traefik/acme protected-proxy
+              if [ ! -s traefik/traefik.yml ]; then
+                cat > traefik/traefik.yml <<'YAML'
+              entryPoints:
+                web:
+                  address: ":80"
+                websecure:
+                  address: ":443"
+              providers:
+                file:
+                  filename: /etc/traefik/dynamic.yml
+                  watch: true
+              YAML
+              fi
+              [ -s traefik/dynamic.yml ] || printf '{}\n' > traefik/dynamic.yml
+              CFG=automation_server_config.toml
+              touch "$CFG"
+              grep -q '^protected_domain' "$CFG" || \
+                printf 'protected_domain = "%s"\n%s' "${DOMAIN}" "$(cat "$CFG")" > "$CFG.new" \
+                && mv -f "$CFG.new" "$CFG" 2>/dev/null || true
+              ls -la . traefik
+          volumeMounts:
+            - name: config
+              mountPath: /root/.config/bitswan
+      containers:
+        - name: daemon
+          image: ${DAEMON_IMAGE}
+          imagePullPolicy: ${PULL_POLICY}
+          command: ["/usr/local/bin/bitswan", "automation-server-daemon", "__run"]
+          env:
+            - name: BITSWAN_PLATFORM
+              value: kubernetes
+            - name: BITSWAN_RELAY_LOCAL_TARGET
+              value: 127.0.0.1:443
+            - name: HOME
+              value: /root
+            - name: BITSWAN_K8S_VOLUME_CLAIM
+              value: bailey-config
+            - name: BITSWAN_K8S_PULL_POLICY
+              value: ${PULL_POLICY}
+            - name: BITSWAN_GITOPS_IMAGE
+              value: ${GITOPS_IMAGE}
+            - name: BITSWAN_DASHBOARD_IMAGE
+              value: ${DASHBOARD_IMAGE}
+            - name: BITSWAN_CODING_AGENT_IMAGE
+              value: ${CODING_AGENT_IMAGE}
+            - name: BITSWAN_INFRA_DRIVER_IMAGE
+              value: ${INFRA_DRIVER_IMAGE}
+            - name: BITSWAN_EGRESS_GATEWAY_IMAGE
+              value: ${EGRESS_GATEWAY_IMAGE}
+            - name: BITSWAN_K8S_REGISTRY_INSECURE
+              value: "true"
+            - name: BITSWAN_WORKSPACE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: bailey-workspace-api
+                  key: token
+          ports:
+            - name: docs
+              containerPort: 8080
+            - name: gate
+              containerPort: 9080
+          volumeMounts:
+            - name: config
+              mountPath: /root/.config/bitswan
+            - name: run
+              mountPath: /var/run/bitswan
+        - name: traefik
+          image: ${TRAEFIK_IMAGE}
+          args: ["--configFile=/etc/traefik/traefik.yml"]
+          ports:
+            - name: http
+              containerPort: 80
+            - name: https
+              containerPort: 443
+          volumeMounts:
+            - name: config
+              mountPath: /etc/traefik/traefik.yml
+              subPath: traefik/traefik.yml
+            - name: config
+              mountPath: /etc/traefik/dynamic.yml
+              subPath: traefik/dynamic.yml
+            - name: config
+              mountPath: /tls
+              subPath: traefik/certs
+            - name: config
+              mountPath: /acme
+              subPath: traefik/acme
+        - name: protected-proxy
+          image: ${PROXY_IMAGE}
+          envFrom:
+            - secretRef:
+                name: bailey-oauth
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 4180
+            initialDelaySeconds: 2
+            periodSeconds: 3
+        - name: redis
+          image: ${REDIS_IMAGE}
+          args: ["--appendonly", "yes", "--bind", "127.0.0.1", "--dir", "/data"]
+          volumeMounts:
+            - name: config
+              mountPath: /data
+              subPath: protected-proxy-redis

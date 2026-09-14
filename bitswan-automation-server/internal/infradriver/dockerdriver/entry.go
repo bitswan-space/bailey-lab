@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver"
+	"github.com/bitswan-space/bitswan-workspaces/internal/infradriver/core"
 )
 
 // fwGroup is one active/inactive egress-firewall group keyed by (ctx, stage, slot).
@@ -75,14 +76,14 @@ func (c *compileState) computeFirewallScope(deployments map[string]*Deployment) 
 		// (incl. the cloud metadata endpoint). Monitor realms (dev/live-dev)
 		// still get an observe-only gateway with no node, unchanged.
 		for _, sd := range c.slotDBPairs(conf) {
-			key := fwKey{depCtx, stage, sd.slot}
+			key := fwKey{depCtx, stage, sd.Slot}
 			if _, ok := scope[key]; !ok {
 				mode := postureFor(realm)
 				if fwnode != nil && fwnode.Posture != "" {
 					mode = fwnode.Posture
 				}
 				scope[key] = &fwGroup{
-					gw:    makeHostnameLabel(c.workspaceName, "fwgw", depCtx, stage, sd.slot),
+					gw:    makeHostnameLabel(c.workspaceName, "fwgw", depCtx, stage, sd.Slot),
 					mode:  mode,
 					allow: allowedHosts(c.bs, fwKeyBP, realm),
 					realm: realm,
@@ -167,14 +168,14 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 		name := conf.AutomationNameOr(depID)
 		depCtx := conf.Context
 		for _, sd := range c.slotDBPairs(conf) {
-			fw := fwActive(fwScope, depCtx, stage, sd.slot)
+			fw := fwActive(fwScope, depCtx, stage, sd.Slot)
 			if fw == nil || fw.mode != "enforce" {
 				continue
 			}
-			key := fwKey{depCtx, stage, sd.slot}
+			key := fwKey{depCtx, stage, sd.Slot}
 			app := take(key, cfg.Port)
 			ui := take(key, frontendUIPort)
-			ports[workerPortKey{depCtx, stage, sd.slot, name}] = workerPortAssignment{app: app, ui: ui}
+			ports[workerPortKey{depCtx, stage, sd.Slot, name}] = workerPortAssignment{app: app, ui: ui}
 		}
 	}
 
@@ -194,8 +195,8 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 			continue
 		}
 		for _, sd := range c.slotDBPairs(conf) {
-			key := fwKey{depCtx, stage, sd.slot}
-			fw := fwActive(fwScope, depCtx, stage, sd.slot)
+			key := fwKey{depCtx, stage, sd.Slot}
+			fw := fwActive(fwScope, depCtx, stage, sd.Slot)
 			port := cfg.Port
 			var host string
 			if fw != nil {
@@ -203,9 +204,9 @@ func (c *compileState) computeWorkerHosts(deployments map[string]*Deployment, fw
 				// Shared netns — resolve a collision-free port within the scope.
 				port = take(key, port)
 			} else {
-				host = makeHostnameLabel(c.workspaceName, name, depCtx, stage, sd.slot)
+				host = makeHostnameLabel(c.workspaceName, name, depCtx, stage, sd.Slot)
 			}
-			ports[workerPortKey{depCtx, stage, sd.slot, name}] = workerPortAssignment{app: port}
+			ports[workerPortKey{depCtx, stage, sd.Slot, name}] = workerPortAssignment{app: port}
 			out[key] = append(out[key], fmt.Sprintf("%s=%s:%d", name, host, port))
 		}
 	}
@@ -322,7 +323,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 	}
 
 	// Reflect on-disk services into conf so the infra merge can discover them.
-	if cfg.hasServices() && len(conf.Services) == 0 {
+	if cfg.HasServices() && len(conf.Services) == 0 {
 		conf.Services = map[string]interface{}{}
 		for _, svc := range cfg.Services {
 			conf.Services[svc.Type] = map[string]interface{}{"enabled": svc.Enabled}
@@ -421,7 +422,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		env["BITSWAN_DEPLOYMENT_CONTEXT"] = deploymentContext
 	}
 
-	if bpSanitized != "" && c.registry.isRegistered(bpSanitized, stageForDeployment(stage)) {
+	if bpSanitized != "" && c.registry.IsRegistered(bpSanitized, stageForDeployment(stage)) {
 		names := bpResourceNames(bpSanitized, db)
 		env["POSTGRES_DB"] = names["postgres_db"]
 		env["COUCHDB_DB_PREFIX"] = names["couchdb_prefix"]
@@ -529,7 +530,7 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 		// live slot must never be force-recreated here. Only single-slot
 		// (dev/staging) backends get the hash.
 		if slot == "" {
-			if h := secretsContentHash(values); h != "" {
+			if h := secretsContentHash(c.secretsDir, values); h != "" {
 				labels["gitops.secrets_hash"] = h
 			}
 		}
@@ -852,24 +853,8 @@ func (c *compileState) copyS3Coordinates(env map[string]interface{}, realm strin
 	}
 }
 
-// resolveServiceSecrets ports _resolve_service_secrets. Preserves TOML
-// declaration order — the env_file order it produces is observable.
 func (c *compileState) resolveServiceSecrets(cfg automationConfig, stage string) []string {
-	if !cfg.hasServices() {
-		return nil
-	}
-	mapped := stageForDeployment(stage)
-	var out []string
-	for _, svc := range cfg.Services {
-		if !svc.Enabled {
-			continue
-		}
-		if !isKnownInfraType(svc.Type) {
-			continue // unknown service type
-		}
-		out = append(out, infraServiceSecretsName(svc.Type, mapped))
-	}
-	return out
+	return core.ResolveServiceSecrets(cfg, stage)
 }
 
 // emitGateways ports the egress-gateway emission block. One gateway service per
