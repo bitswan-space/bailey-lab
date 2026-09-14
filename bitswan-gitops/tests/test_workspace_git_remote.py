@@ -11,7 +11,9 @@ def _mode(path):
     return stat.S_IMODE(os.stat(path).st_mode)
 
 
-def test_keypair_is_generated_lazily_with_private_modes_and_is_stable(tmp_path, monkeypatch):
+def test_keypair_is_generated_lazily_with_private_modes_and_is_stable(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("BITSWAN_WORKSPACE_NAME", "finance")
     secrets = str(tmp_path / "secrets")
     public = asyncio.run(remote.ensure_keypair(secrets))
@@ -67,14 +69,18 @@ def test_local_remotes_need_the_opt_in(monkeypatch):
 
 def test_remote_host_is_extracted_for_task_labels():
     assert remote.remote_host("git@github.com:acme/workspace.git") == "github.com"
-    assert remote.remote_host("ssh://git@host.example:2222/acme/x.git") == "host.example"
+    assert (
+        remote.remote_host("ssh://git@host.example:2222/acme/x.git") == "host.example"
+    )
     assert remote.remote_host("file:///srv/git/x.git") == "local"
 
 
 def test_config_and_status_round_trip_as_private_files(tmp_path):
     secrets = str(tmp_path / "secrets")
     assert remote.load_config(secrets)["url"] is None
-    saved = remote.save_config(secrets, "git@github.com:acme/ws.git", "admin@example.com")
+    saved = remote.save_config(
+        secrets, "git@github.com:acme/ws.git", "admin@example.com"
+    )
     loaded = remote.load_config(secrets)
     assert loaded["url"] == "git@github.com:acme/ws.git"
     assert loaded["updated_by"] == "admin@example.com"
@@ -82,7 +88,9 @@ def test_config_and_status_round_trip_as_private_files(tmp_path):
     assert _mode(os.path.join(remote.remote_dir(secrets), remote.CONFIG_FILE)) == 0o600
 
     assert remote.load_status(secrets)["result"] == "unconfigured"
-    remote.save_status(secrets, {"result": "ok", "branches": {"dev": {"result": "pushed"}}})
+    remote.save_status(
+        secrets, {"result": "ok", "branches": {"dev": {"result": "pushed"}}}
+    )
     assert remote.load_status(secrets)["branches"]["dev"]["result"] == "pushed"
     assert _mode(os.path.join(remote.remote_dir(secrets), remote.STATUS_FILE)) == 0o600
 

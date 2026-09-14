@@ -22,7 +22,9 @@ TOKEN = "test-gitops-secret"
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("BITSWAN_GITOPS_SECRET", TOKEN)
     monkeypatch.setattr(git_server, "GIT_REPOS_DIR", str(tmp_path / "git"))
-    monkeypatch.setattr(git_server, "HOOKS_SRC_DIR", str(tmp_path / "nonexistent-hooks"))
+    monkeypatch.setattr(
+        git_server, "HOOKS_SRC_DIR", str(tmp_path / "nonexistent-hooks")
+    )
     monkeypatch.setattr(remote_cfg, "ALLOW_LOCAL_REMOTES", True)
     svc = get_automation_service()
     monkeypatch.setattr(svc, "gitops_dir", str(tmp_path / "gitops"))
@@ -48,13 +50,17 @@ def _headers(email=None):
 
 def test_get_is_admin_only_and_fails_closed(client, monkeypatch):
     assert client.get("/workspace/git-remote", headers=_headers()).status_code == 403
-    assert client.get("/workspace/git-remote", headers=_headers(MEMBER)).status_code == 403
+    assert (
+        client.get("/workspace/git-remote", headers=_headers(MEMBER)).status_code == 403
+    )
 
     def broken(email):
         raise RuntimeError("daemon down")
 
     monkeypatch.setattr(routes, "daemon_user_role", broken)
-    assert client.get("/workspace/git-remote", headers=_headers(ADMIN)).status_code == 403
+    assert (
+        client.get("/workspace/git-remote", headers=_headers(ADMIN)).status_code == 403
+    )
 
 
 def test_get_generates_the_deploy_key_for_admins(client):
@@ -81,14 +87,19 @@ def test_put_rejects_https_and_keeps_the_previous_remote(client):
     )
     assert r.status_code == 400
     assert "Only SSH remotes" in r.json()["detail"]
-    assert client.get("/workspace/git-remote", headers=_headers(ADMIN)).json()["url"] is None
+    assert (
+        client.get("/workspace/git-remote", headers=_headers(ADMIN)).json()["url"]
+        is None
+    )
 
 
 def test_put_saves_the_remote_and_queues_the_first_push(client, tmp_path):
     remote = tmp_path / "remote.git"
     os.system(f"git init -q --bare {remote}")
     r = client.put(
-        "/workspace/git-remote", json={"url": f"file://{remote}"}, headers=_headers(ADMIN)
+        "/workspace/git-remote",
+        json={"url": f"file://{remote}"},
+        headers=_headers(ADMIN),
     )
     assert r.status_code == 200
     body = r.json()
@@ -101,15 +112,21 @@ def test_put_saves_the_remote_and_queues_the_first_push(client, tmp_path):
 
 def test_put_is_admin_only(client):
     r = client.put(
-        "/workspace/git-remote", json={"url": "git@github.com:acme/ws.git"}, headers=_headers(MEMBER)
+        "/workspace/git-remote",
+        json={"url": "git@github.com:acme/ws.git"},
+        headers=_headers(MEMBER),
     )
     assert r.status_code == 403
 
 
 def test_delete_clears_the_url_but_keeps_the_key(client):
-    before = client.get("/workspace/git-remote", headers=_headers(ADMIN)).json()["public_key"]
+    before = client.get("/workspace/git-remote", headers=_headers(ADMIN)).json()[
+        "public_key"
+    ]
     client.put(
-        "/workspace/git-remote", json={"url": "git@github.com:acme/ws.git"}, headers=_headers(ADMIN)
+        "/workspace/git-remote",
+        json={"url": "git@github.com:acme/ws.git"},
+        headers=_headers(ADMIN),
     )
     r = client.delete("/workspace/git-remote", headers=_headers(ADMIN))
     assert r.status_code == 200
@@ -121,9 +138,14 @@ def test_push_requires_a_remote_then_returns_a_task(client):
     r = client.post("/workspace/git-remote/push", headers=_headers(ADMIN))
     assert r.status_code == 400
     client.put(
-        "/workspace/git-remote", json={"url": "git@github.com:acme/ws.git"}, headers=_headers(ADMIN)
+        "/workspace/git-remote",
+        json={"url": "git@github.com:acme/ws.git"},
+        headers=_headers(ADMIN),
     )
     r = client.post("/workspace/git-remote/push", headers=_headers(ADMIN))
     assert r.status_code == 200
     assert r.json()["task_id"]
-    assert client.post("/workspace/git-remote/push", headers=_headers(MEMBER)).status_code == 403
+    assert (
+        client.post("/workspace/git-remote/push", headers=_headers(MEMBER)).status_code
+        == 403
+    )

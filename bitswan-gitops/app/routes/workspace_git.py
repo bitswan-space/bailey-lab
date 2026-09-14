@@ -43,9 +43,7 @@ async def get_git_remote(actor: str = Depends(require_admin)) -> dict:
 
 
 @router.put("/git-remote")
-async def set_git_remote(
-    body: RemoteBody, actor: str = Depends(require_admin)
-) -> dict:
+async def set_git_remote(body: RemoteBody, actor: str = Depends(require_admin)) -> dict:
     try:
         url = remote_cfg.validate_remote_url(body.url)
     except remote_cfg.RemoteUrlError as e:

@@ -53,7 +53,9 @@ async def _git(
     proc = await asyncio.create_subprocess_exec(
         "git",
         *args,
-        stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
+        stdin=asyncio.subprocess.PIPE
+        if stdin is not None
+        else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=full_env,
@@ -379,7 +381,7 @@ async def sync_mirror(
         heads[branch] = await _rev(f"refs/heads/{branch}")
     deletions: list[str] = []
     for branch in sorted(previously):
-        if branch[len(COPIES_PREFIX):] in copy_entries:
+        if branch[len(COPIES_PREFIX) :] in copy_entries:
             continue
         await _mgit("update-ref", "-d", f"refs/heads/{branch}")
         deletions.append(branch)
@@ -450,7 +452,12 @@ async def push_mirror(
             continue
         ref = f"refs/heads/{branch}"
         remote_sha = remote.get(ref)
-        row = {"local": local, "remote": remote_sha, "result": "pending", "detail": None}
+        row = {
+            "local": local,
+            "remote": remote_sha,
+            "result": "pending",
+            "detail": None,
+        }
         if remote_sha == local:
             row["result"] = "up_to_date"
         elif remote_sha is None or (
@@ -485,8 +492,13 @@ async def push_mirror(
 
     if refspecs:
         out, err, rc = await _mgit(
-            "push", "--porcelain", "--no-follow-tags", url, *refspecs,
-            env=env, timeout=PUSH_TIMEOUT_S,
+            "push",
+            "--porcelain",
+            "--no-follow-tags",
+            url,
+            *refspecs,
+            env=env,
+            timeout=PUSH_TIMEOUT_S,
         )
         rows = _parse_porcelain(out)
         if rc != 0 and not rows:
@@ -502,7 +514,7 @@ async def push_mirror(
                 else:
                     result["tags"]["pushed"] += 1
                 continue
-            branch = dst[len("refs/heads/"):] if dst.startswith("refs/heads/") else dst
+            branch = dst[len("refs/heads/") :] if dst.startswith("refs/heads/") else dst
             row = result["branches"].get(branch)
             if row is None:
                 continue
@@ -583,7 +595,10 @@ async def run_mirror_push(trigger: str, requester: str | None) -> dict:
             trigger=trigger,
         )
         pushed = await push_mirror(
-            cfg["url"], remote_cfg.ssh_env(secrets_dir), synced["heads"], synced["deletions"]
+            cfg["url"],
+            remote_cfg.ssh_env(secrets_dir),
+            synced["heads"],
+            synced["deletions"],
         )
     except Exception as e:
         status["result"] = "error"

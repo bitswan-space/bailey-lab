@@ -88,8 +88,21 @@ class Workspace:
 
     def tag_deploy(self, bp, ts, subject):
         bare = git_server.bp_bare_repo_path(bp)
-        _git("-c", "user.name=Bailey", "-c", "user.email=bailey@bitswan",
-             "-C", bare, "tag", "-a", "-f", f"deploy/{ts}", "-m", subject, "refs/heads/main")
+        _git(
+            "-c",
+            "user.name=Bailey",
+            "-c",
+            "user.email=bailey@bitswan",
+            "-C",
+            bare,
+            "tag",
+            "-a",
+            "-f",
+            f"deploy/{ts}",
+            "-m",
+            subject,
+            "refs/heads/main",
+        )
 
     def sync(self, requester=None, trigger="test"):
         return asyncio.run(
@@ -104,7 +117,9 @@ class Workspace:
     def push(self, requester=None, trigger="test"):
         synced = self.sync(requester, trigger)
         return synced, asyncio.run(
-            mirror.push_mirror(self.remote_url, {}, synced["heads"], synced["deletions"])
+            mirror.push_mirror(
+                self.remote_url, {}, synced["heads"], synced["deletions"]
+            )
         )
 
     def mirror_out(self, *args):
@@ -117,7 +132,9 @@ class Workspace:
 @pytest.fixture()
 def ws(tmp_path, monkeypatch):
     monkeypatch.setattr(git_server, "GIT_REPOS_DIR", str(tmp_path / "git"))
-    monkeypatch.setattr(git_server, "HOOKS_SRC_DIR", str(tmp_path / "nonexistent-hooks"))
+    monkeypatch.setattr(
+        git_server, "HOOKS_SRC_DIR", str(tmp_path / "nonexistent-hooks")
+    )
     monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path / "copies"))
     monkeypatch.delenv("BITSWAN_GIT_REMOTE", raising=False)
     monkeypatch.setattr(remote_cfg, "ALLOW_LOCAL_REMOTES", True)
@@ -157,8 +174,18 @@ def test_staging_uses_the_recorded_stage_commit_not_main(ws):
     assert ws.mirror_out("show", "dev:bpa/main.py") == "a2"
     assert ws.mirror_out("show", "staging:bpa/main.py") == "a1"
     assert ws.mirror_out("ls-tree", "--name-only", "staging").split() == ["bpa"]
-    assert _git("-C", mirror.mirror_path(), "rev-parse", "--verify", "-q",
-                "refs/heads/production", check=False).returncode != 0
+    assert (
+        _git(
+            "-C",
+            mirror.mirror_path(),
+            "rev-parse",
+            "--verify",
+            "-q",
+            "refs/heads/production",
+            check=False,
+        ).returncode
+        != 0
+    )
 
 
 def test_composite_parents_keep_bp_history_reachable(ws):
@@ -174,7 +201,10 @@ def test_composite_parents_keep_bp_history_reachable(ws):
     second = ws.mirror_out("rev-parse", "dev")
     parents = ws.mirror_out("log", "-1", "--format=%P", second).split()
     assert parents == [first, new_a]
-    assert ws.mirror_out("log", "-1", "--format=%s", second) == "Mirror dev: bpa → " + new_a[:7] + " (+1 unchanged)"
+    assert (
+        ws.mirror_out("log", "-1", "--format=%s", second)
+        == "Mirror dev: bpa → " + new_a[:7] + " (+1 unchanged)"
+    )
 
 
 def test_nothing_changes_when_the_tree_is_unchanged(ws):
@@ -185,7 +215,9 @@ def test_nothing_changes_when_the_tree_is_unchanged(ws):
 
 
 def test_gitops_branch_holds_each_bp_manifest_repo(ws):
-    state_a = ws.write_state("bpa", "business_processes:\n  bpa:\n    dev: {git_commit: abc}\n")
+    state_a = ws.write_state(
+        "bpa", "business_processes:\n  bpa:\n    dev: {git_commit: abc}\n"
+    )
     ws.sync()
     assert ws.mirror_out("ls-tree", "--name-only", "gitops").split() == ["bpa", "bpb"]
     assert "git_commit: abc" in ws.mirror_out("show", "gitops:bpa/bitswan.yaml")
@@ -197,18 +229,27 @@ def test_copy_branches_are_mirrored_and_deleted_when_the_copy_goes_away(ws):
     ws.push_copy_branch("bpb", "alice", "alice-b\n")
     ws.push_copy_branch("bpa", "exp-1", "experiment\n")
     synced, pushed = ws.push()
-    assert ws.mirror_out("ls-tree", "--name-only", "copies/alice").split() == ["bpa", "bpb"]
+    assert ws.mirror_out("ls-tree", "--name-only", "copies/alice").split() == [
+        "bpa",
+        "bpb",
+    ]
     assert ws.mirror_out("ls-tree", "--name-only", "copies/exp-1").split() == ["bpa"]
     assert ws.mirror_out("show", "copies/alice:bpa/main.py") == "alice-a"
     assert pushed["branches"]["copies/alice"]["result"] == "pushed"
-    assert "refs/heads/copies/exp-1" in ws.remote_out("for-each-ref", "--format=%(refname)")
+    assert "refs/heads/copies/exp-1" in ws.remote_out(
+        "for-each-ref", "--format=%(refname)"
+    )
 
     asyncio.run(git_server.delete_copy_branch("bpa", "exp-1"))
     synced, pushed = ws.push()
     assert synced["deletions"] == ["copies/exp-1"]
     assert pushed["branches"]["copies/exp-1"]["result"] == "deleted"
-    assert "refs/heads/copies/exp-1" not in ws.remote_out("for-each-ref", "--format=%(refname)")
-    assert "refs/heads/copies/alice" in ws.remote_out("for-each-ref", "--format=%(refname)")
+    assert "refs/heads/copies/exp-1" not in ws.remote_out(
+        "for-each-ref", "--format=%(refname)"
+    )
+    assert "refs/heads/copies/alice" in ws.remote_out(
+        "for-each-ref", "--format=%(refname)"
+    )
 
 
 def test_deleted_bp_leaves_the_stage_tree_but_its_history_stays(ws):
@@ -230,19 +271,31 @@ def test_missing_stage_commit_keeps_the_previous_tree_and_warns(ws):
     ws.stage_commits[("bpa", "staging")] = "deadbeef" * 5
     synced = ws.sync()
     assert ws.mirror_out("show", "staging:bpa/main.py") == "a1"
-    assert any(w.startswith("bpa/staging: commit deadbeef") and "kept" in w for w in synced["warnings"])
+    assert any(
+        w.startswith("bpa/staging: commit deadbeef") and "kept" in w
+        for w in synced["warnings"]
+    )
 
 
 def test_deploy_tags_are_namespaced_per_bp_with_their_subject(ws):
-    ws.tag_deploy("bpa", "1700000000", "alice@example.com deployed 2023-11-14 22:13 UTC")
+    ws.tag_deploy(
+        "bpa", "1700000000", "alice@example.com deployed 2023-11-14 22:13 UTC"
+    )
     ws.tag_deploy("bpb", "1700000000", "bob@example.com deployed 2023-11-14 22:13 UTC")
     synced, pushed = ws.push()
     assert synced["tags"] == {"created": 2, "existing": 0}
     assert ws.mirror_out("cat-file", "-t", "refs/tags/deploy/bpa/1700000000") == "tag"
-    assert "alice@example.com deployed" in ws.mirror_out("tag", "-l", "-n1", "deploy/bpa/1700000000")
+    assert "alice@example.com deployed" in ws.mirror_out(
+        "tag", "-l", "-n1", "deploy/bpa/1700000000"
+    )
     assert pushed["tags"]["pushed"] == 2
-    remote_tags = ws.remote_out("for-each-ref", "--format=%(refname)", "refs/tags/").split()
-    assert remote_tags == ["refs/tags/deploy/bpa/1700000000", "refs/tags/deploy/bpb/1700000000"]
+    remote_tags = ws.remote_out(
+        "for-each-ref", "--format=%(refname)", "refs/tags/"
+    ).split()
+    assert remote_tags == [
+        "refs/tags/deploy/bpa/1700000000",
+        "refs/tags/deploy/bpb/1700000000",
+    ]
 
 
 def test_commit_identity_is_the_requester_or_bailey_with_trailers(ws):
@@ -255,7 +308,10 @@ def test_commit_identity_is_the_requester_or_bailey_with_trailers(ws):
     assert "Bitswan-Requester: alice@example.com" in body
     ws.advance_bp("bpa", "a1\n")
     ws.sync(requester=None, trigger="schedule")
-    assert ws.mirror_out("log", "-1", "--format=%an <%ae>", "dev") == "Bailey <bailey@bitswan>"
+    assert (
+        ws.mirror_out("log", "-1", "--format=%an <%ae>", "dev")
+        == "Bailey <bailey@bitswan>"
+    )
 
 
 def test_first_push_creates_every_branch_and_the_second_is_up_to_date(ws):
@@ -263,7 +319,9 @@ def test_first_push_creates_every_branch_and_the_second_is_up_to_date(ws):
     synced, pushed = ws.push()
     assert pushed["result"] == "ok"
     assert {b: r["result"] for b, r in pushed["branches"].items()} == {
-        "dev": "pushed", "production": "pushed", "gitops": "pushed",
+        "dev": "pushed",
+        "production": "pushed",
+        "gitops": "pushed",
     }
     assert ws.remote_out("rev-parse", "dev") == ws.mirror_out("rev-parse", "dev")
     assert ws.remote_out("ls-tree", "--name-only", "production").split() == ["bpa"]
@@ -277,7 +335,9 @@ def test_foreign_commits_on_the_remote_are_reported_not_overwritten(ws):
     ws.push()
     foreign_clone = str(ws.tmp_path / "foreign")
     _git("clone", "-q", "--branch", "dev", ws.remote_url, foreign_clone)
-    foreign = _commit(foreign_clone, "bpa/notes.txt", "edited on github\n", "foreign edit")
+    foreign = _commit(
+        foreign_clone, "bpa/notes.txt", "edited on github\n", "foreign edit"
+    )
     _git("push", "-q", "origin", "dev", cwd=foreign_clone)
 
     ws.advance_bp("bpa", "a1\n")
@@ -294,7 +354,9 @@ def test_unreachable_remote_is_an_error_with_the_reason(ws, monkeypatch):
     monkeypatch.setattr(mirror, "LS_REMOTE_TIMEOUT_S", 20)
     synced = ws.sync()
     pushed = asyncio.run(
-        mirror.push_mirror(f"file://{ws.tmp_path}/does-not-exist.git", {}, synced["heads"], [])
+        mirror.push_mirror(
+            f"file://{ws.tmp_path}/does-not-exist.git", {}, synced["heads"], []
+        )
     )
     assert pushed["result"] == "error"
     assert "cannot reach remote" in pushed["error"]
@@ -320,7 +382,9 @@ def test_run_mirror_push_records_status_and_skips_when_unconfigured(ws, monkeypa
     assert status["trigger"] == "configure"
     saved = remote_cfg.load_status(ws.secrets_dir)
     assert saved["branches"]["gitops"]["result"] == "pushed"
-    status_file = os.path.join(remote_cfg.remote_dir(ws.secrets_dir), remote_cfg.STATUS_FILE)
+    status_file = os.path.join(
+        remote_cfg.remote_dir(ws.secrets_dir), remote_cfg.STATUS_FILE
+    )
     assert stat.S_IMODE(os.stat(status_file).st_mode) == 0o600
     assert os.path.isfile(remote_cfg.private_key_path(ws.secrets_dir))
 
@@ -328,7 +392,9 @@ def test_run_mirror_push_records_status_and_skips_when_unconfigured(ws, monkeypa
 def test_run_mirror_push_failure_is_recorded_and_raised(ws, monkeypatch):
     monkeypatch.setattr(mirror, "_service", lambda: _FakeService(ws))
     monkeypatch.setattr(mirror, "LS_REMOTE_TIMEOUT_S", 20)
-    remote_cfg.save_config(ws.secrets_dir, f"file://{ws.tmp_path}/missing.git", "admin@example.com")
+    remote_cfg.save_config(
+        ws.secrets_dir, f"file://{ws.tmp_path}/missing.git", "admin@example.com"
+    )
     with pytest.raises(mirror.MirrorError):
         asyncio.run(mirror.run_mirror_push("manual", "admin@example.com"))
     saved = remote_cfg.load_status(ws.secrets_dir)
@@ -371,7 +437,9 @@ def test_request_push_coalesces_queued_work_and_debounces_events(ws, monkeypatch
         first = mirror.request_push("manual", "admin@example.com", immediate=True)
         second = mirror.request_push("manual", "admin@example.com", immediate=True)
         assert first == second
-        assert [t["kind"] for t in queue.snapshot() if t["status"] == "queued"] == [mirror.TASK_KIND]
+        assert [t["kind"] for t in queue.snapshot() if t["status"] == "queued"] == [
+            mirror.TASK_KIND
+        ]
 
         gate.set()
         for _ in range(100):
@@ -384,6 +452,9 @@ def test_request_push_coalesces_queued_work_and_debounces_events(ws, monkeypatch
         assert mirror.request_push("deploy-state") is None
         assert mirror.request_push("deploy-state") is None
         await asyncio.sleep(0.3)
-        assert runs == [("manual", "admin@example.com"), ("deploy-state", "bob@example.com")]
+        assert runs == [
+            ("manual", "admin@example.com"),
+            ("deploy-state", "bob@example.com"),
+        ]
 
     asyncio.run(scenario())
