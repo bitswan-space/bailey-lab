@@ -70,11 +70,11 @@ func TestNetworkPrefixLen_SizesByRole(t *testing.T) {
 		role NetworkRole
 		want int
 	}{
-		{RoleStage, 24},
+		{RoleStage, 22},
 		{RoleAgent, 28},
 		{RolePlatform, 20},
 		{RoleInfra, 24},
-		{NetworkRole(""), 24},
+		{NetworkRole(""), 22},
 	} {
 		if got := networkPrefixLen(tc.role); got != tc.want {
 			t.Errorf("networkPrefixLen(%q) = /%d; want /%d", tc.role, got, tc.want)
@@ -87,6 +87,14 @@ func TestNetworkPrefixLen_SizesByRole(t *testing.T) {
 	// proxies themselves, so it cannot be one of the small ones.
 	if networkPrefixLen(RoleInfra) > 24 {
 		t.Errorf("build-proxy network is a /%d; too small for concurrent builds", networkPrefixLen(RoleInfra))
+	}
+	// The dev realm carries every live-dev copy: BITSWAN_MAX_LIVE_DEV instances
+	// (default 15), each an egress gateway, its proxy, and a frontend holding its
+	// own netns under the monitor gateway dev gets. Leave room for the cap to be
+	// raised well past its default before the network is the thing that stops it.
+	usable := (1 << uint(32-networkPrefixLen(RoleStage))) - 2
+	if perInstance, cap := 3, 15; usable < perInstance*cap*10 {
+		t.Errorf("a stage network holds %d addresses; too tight for %d× the default live-dev cap", usable, 10)
 	}
 }
 
@@ -309,8 +317,8 @@ func TestEnsureDockerNetworkSpec_CreatesWithAnExplicitSubnet(t *testing.T) {
 	if subnet == "" {
 		t.Fatal("created the network without --subnet; Docker would take a /16 from its default pools")
 	}
-	if subnet != "10.128.0.0/24" {
-		t.Errorf("--subnet %s; want 10.128.0.0/24", subnet)
+	if subnet != "10.128.0.0/22" {
+		t.Errorf("--subnet %s; want 10.128.0.0/22", subnet)
 	}
 }
 
@@ -345,8 +353,10 @@ func TestEnsureDockerNetworkSpec_AvoidsSubnetsDockerAlreadyHandedOut(t *testing.
 		t.Fatalf("EnsureDockerNetworkSpec: %v", err)
 	}
 
-	if got := argValue(createArgv(t, argvFile), "--subnet"); got != "10.128.2.0/24" {
-		t.Errorf("--subnet %s; want the first block clear of the existing two, 10.128.2.0/24", got)
+	// 10.128.0.0/22 would straddle both, so the first clear stage-sized block is
+	// the next aligned one.
+	if got := argValue(createArgv(t, argvFile), "--subnet"); got != "10.128.4.0/22" {
+		t.Errorf("--subnet %s; want the first block clear of the existing two, 10.128.4.0/22", got)
 	}
 }
 
@@ -420,8 +430,9 @@ func TestBaseHoldsFarMoreNetworksThanDockersDefaults(t *testing.T) {
 	if stages < 1000 {
 		t.Fatalf("%s holds only %d stage networks; Docker's own defaults hold about 31", DefaultSubnetBase, stages)
 	}
-	// Four networks per workspace: -dev, -staging, -production, -agent.
-	if workspaces := stages / 4; workspaces < 250 {
+	// Three stage networks per workspace; the /28 agent bridges pack sixteen to
+	// a block and do not add one.
+	if workspaces := stages / 3; workspaces < 250 {
 		t.Errorf("only %d workspaces fit; the whole point is to stop running out", workspaces)
 	}
 }

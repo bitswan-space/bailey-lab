@@ -72,7 +72,14 @@ func networkPrefixLen(role NetworkRole) int {
 		// about twelve builds at once.
 		return 24
 	default:
-		return 24 // a stage's automations: 254
+		// A stage network is the one whose occupancy is not bounded by the
+		// workspace's own size. Its dev realm also carries every live-dev copy —
+		// BITSWAN_MAX_LIVE_DEV instances (default 15), each costing an egress
+		// gateway, its proxy, and a frontend that keeps its own netns under a
+		// monitor gateway — and that cap is an operator knob. A /24 fills at
+		// about 80 instances; a /22 is 1022 addresses and still leaves the base
+		// room for ~340 workspaces.
+		return 22
 	}
 }
 

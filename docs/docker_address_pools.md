@@ -36,12 +36,20 @@ The default range is `10.128.0.0/12`, sliced per role:
 | Role | Size | Holds |
 | --- | --- | --- |
 | `platform` (`bitswan_network`) | `/20` | every workspace's gitops, the ingress, the proxies |
-| `stage` (`<ws>-dev`, `-staging`, `-production`) | `/24` | one stage's automations (254 addresses) |
+| `stage` (`<ws>-dev`, `-staging`, `-production`) | `/22` | one stage's automations, their egress gateways and infra — and, in the dev realm, every live-dev copy (1022 addresses) |
 | `agent` (`<ws>-agent`) | `/28` | the coding agent and gitops |
 | `infra` (build proxy) | `/24` | the two package proxies, plus every concurrent image build |
 
-That is 4096 stage-sized networks in the default base, against about 31 before —
-roughly a thousand workspaces. Allocation reads the daemon's existing networks
+That is 1024 stage-sized networks in the default base, against about 31 networks
+of any kind before — roughly 340 workspaces at three stage networks each.
+
+Stage networks are the generous ones on purpose. The dev realm carries not just
+the dev stage but every **live-dev copy**: `BITSWAN_MAX_LIVE_DEV` instances
+(default 15), each costing an egress gateway, its proxy, and a frontend that
+keeps its own network namespace under the monitor gateway dev gets. That cap is
+an operator knob, so the network should not be what stops someone raising it — a
+`/24` would fill at about 80 instances, a `/22` leaves roughly ten times the
+default cap in hand. Allocation reads the daemon's existing networks
 each time rather than keeping a ledger, so removing a network by hand needs no
 reconciliation, and it steers around the routes already on the host so a new
 subnet does not collide with a VPN or VPC leg.
