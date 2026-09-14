@@ -73,7 +73,7 @@ func TestNetworkPrefixLen_SizesByRole(t *testing.T) {
 		{RoleStage, 24},
 		{RoleAgent, 28},
 		{RolePlatform, 20},
-		{RoleInfra, 28},
+		{RoleInfra, 24},
 		{NetworkRole(""), 24},
 	} {
 		if got := networkPrefixLen(tc.role); got != tc.want {
@@ -82,6 +82,11 @@ func TestNetworkPrefixLen_SizesByRole(t *testing.T) {
 	}
 	if networkPrefixLen(RoleStage) <= 16 {
 		t.Error("a stage network must be smaller than the /16 a bare docker create takes")
+	}
+	// Every concurrent image build joins the build-proxy network alongside the two
+	// proxies themselves, so it cannot be one of the small ones.
+	if networkPrefixLen(RoleInfra) > 24 {
+		t.Errorf("build-proxy network is a /%d; too small for concurrent builds", networkPrefixLen(RoleInfra))
 	}
 }
 

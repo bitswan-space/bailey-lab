@@ -38,7 +38,7 @@ The default range is `10.128.0.0/12`, sliced per role:
 | `platform` (`bitswan_network`) | `/20` | every workspace's gitops, the ingress, the proxies |
 | `stage` (`<ws>-dev`, `-staging`, `-production`) | `/24` | one stage's automations (254 addresses) |
 | `agent` (`<ws>-agent`) | `/28` | the coding agent and gitops |
-| `infra` (build proxy) | `/28` | a proxy pair |
+| `infra` (build proxy) | `/24` | the two package proxies, plus every concurrent image build |
 
 That is 4096 stage-sized networks in the default base, against about 31 before —
 roughly a thousand workspaces. Allocation reads the daemon's existing networks

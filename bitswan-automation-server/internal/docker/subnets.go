@@ -66,7 +66,11 @@ func networkPrefixLen(role NetworkRole) int {
 	case RoleAgent:
 		return 28 // the agent and gitops, nothing else: 14
 	case RoleInfra:
-		return 28 // a proxy pair: 14
+		// The build proxies are two containers, but every concurrent image build
+		// joins this network too (build.go passes it to `docker build --network`),
+		// and workspace applies run concurrently. A /28 would cap the server at
+		// about twelve builds at once.
+		return 24
 	default:
 		return 24 // a stage's automations: 254
 	}
