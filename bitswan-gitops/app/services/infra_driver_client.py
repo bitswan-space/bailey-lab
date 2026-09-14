@@ -138,6 +138,14 @@ class Container:
     # was unreadable — and must stay distinct from 0, which is a container that
     # has never died. `or 0` would erase exactly that difference.
     restart_count: int | None = None
+    # When this container last started, unix SECONDS (same unit as `created`).
+    # Read by the same batched inspect as the count, with the same rule: None
+    # means "not read", never 0 — and a DRIVER OLDER than this field simply
+    # omits it, which is the one form of version skew this pair can have (the
+    # driver ships as its own image). It is the only field that moves when a
+    # container is restarted in place, so it is how a caller can tell that an
+    # operator's restart finished (bailey-lab #476).
+    started_at: int | None = None
 
     @classmethod
     def from_json(cls, d: dict) -> "Container":
@@ -150,6 +158,7 @@ class Container:
             created=d.get("created", 0) or 0,
             labels=d.get("labels") or {},
             restart_count=d.get("restart_count"),
+            started_at=d.get("started_at"),
         )
 
     def to_docker_dict(self) -> dict:
@@ -165,6 +174,10 @@ class Container:
             "Image": self.image,
             "Labels": self.labels,
             "RestartCount": self.restart_count,
+            # Unix SECONDS, like "Created" above — NOT docker inspect's RFC3339
+            # `State.StartedAt` string. The driver parses that form (9 fractional
+            # digits, which datetime.fromisoformat cannot read) and sends an int.
+            "StartedAt": self.started_at,
         }
 
 
@@ -414,10 +427,17 @@ class InfraDriverClient:
         labels: Optional[dict] = None,
         with_restart_counts: bool = False,
     ) -> list[Container]:
-        """`with_restart_counts` costs a `docker inspect` of the listed
-        containers on the driver side, so only the automations listing — the one
-        that shows the number — asks for it. Every other caller ("is this
-        container up?" before a backup, a restore, a SQL query) leaves it off."""
+        """`with_restart_counts` costs ONE batched `docker inspect` of the listed
+        containers on the driver side, which reads the restart count AND the
+        start time — so only the automations listing, the one that uses both,
+        asks for it. Every other caller ("is this container up?" before a backup,
+        a restore, a SQL query) leaves it off.
+
+        The key keeps the count's name on purpose: the driver is a separate image
+        and can be newer or older than this code, and an unrecognised filter key
+        is ignored rather than rejected — so renaming it would make a new driver
+        meeting an old gitops stop returning counts it reads fine. See
+        ContainerFilter in driver.go."""
         body = {
             "ctx": ctx.to_json(),
             "filter": {

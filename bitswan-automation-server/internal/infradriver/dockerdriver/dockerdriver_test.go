@@ -93,10 +93,10 @@ func TestParsePS(t *testing.T) {
 }
 
 func TestEveryListedContainerIsInspectedInOneExec(t *testing.T) {
-	// The count has to be readable whatever state the poll catches: a container
-	// that crashes every few minutes is `running` at most instants, so
-	// inspecting only the ones caught mid-restart made the number blink in and
-	// out. One exec covers them all — the measured cost is per-exec.
+	// Both readings have to be there whatever state the poll catches: a
+	// container that crashes every few minutes is `running` at most instants,
+	// so inspecting only the ones caught mid-restart made the number blink in
+	// and out. One exec covers them all — the measured cost is per-exec.
 	cs := []infradriver.Container{
 		{ID: "a", State: "running"},
 		{ID: "b", State: "restarting"},
@@ -111,41 +111,93 @@ func TestEveryListedContainerIsInspectedInOneExec(t *testing.T) {
 	}
 }
 
-func TestParseRestartCounts(t *testing.T) {
-	raw := []byte("abc123" + psSep + "23032\n" + "def456" + psSep + "0\n")
-	got := parseRestartCounts(raw)
-	if got["abc123"] != 23032 {
-		t.Errorf("abc123 = %d, want 23032", got["abc123"])
+func TestParseInspectReadings(t *testing.T) {
+	raw := []byte("abc123" + psSep + "23032" + psSep + "2026-09-10T18:26:13.744009882Z\n" +
+		"def456" + psSep + "0" + psSep + "2026-09-11T16:50:12.233568268Z\n")
+	counts, started := parseInspectReadings(raw)
+	if counts["abc123"] != 23032 {
+		t.Errorf("abc123 = %d, want 23032", counts["abc123"])
 	}
 	// A container really can report 0 while restarting (the first crash has
 	// not been counted yet); that is a read value, not an absent one.
-	n, ok := got["def456"]
+	n, ok := counts["def456"]
 	if !ok || n != 0 {
 		t.Errorf("def456 = %d (present=%v), want 0 present", n, ok)
 	}
-	if len(got) != 2 {
-		t.Errorf("got %d entries, want 2", len(got))
+	if len(counts) != 2 {
+		t.Errorf("got %d counts, want 2", len(counts))
+	}
+	// Docker's RFC3339Nano has 9 fractional digits; it is parsed HERE, in Go,
+	// and travels as unix seconds — Python's fromisoformat accepts 3 or 6.
+	if started["abc123"] != 1789064773 {
+		t.Errorf("abc123 started = %d, want 1789064773", started["abc123"])
+	}
+	if started["def456"] != 1789145412 {
+		t.Errorf("def456 started = %d, want 1789145412", started["def456"])
 	}
 }
 
-func TestParseRestartCountsNeverGuessesAndLosesOnlyTheBadLine(t *testing.T) {
+func TestBothReadingsRideOneInspect(t *testing.T) {
+	// The measured cost is per-EXEC, so a second command must never creep back
+	// in for the second field — and two inspects would be two instants, which
+	// would let one record carry a count and a start time from different
+	// moments (the "ONE record, ONE container" rule gitops enforces downstream).
+	if !strings.Contains(inspectReadingsFormat, "{{.RestartCount}}") {
+		t.Error("the inspect format must still read the restart count")
+	}
+	if !strings.Contains(inspectReadingsFormat, "{{.State.StartedAt}}") {
+		t.Error("the inspect format must read the start time in the SAME exec")
+	}
+	if n := strings.Count(inspectReadingsFormat, psSep); n != 2 {
+		t.Errorf("inspect format has %d separators, want 2 (id + 2 readings)", n)
+	}
+}
+
+func TestAStartTimeThatWasNeverSetIsAbsentNotTheZeroTime(t *testing.T) {
+	// A container created and never started reports Docker's zero time. That is
+	// an absence, and it must be dropped at this first hop — never travel as
+	// -62135596800, never as 0. A caller comparing start times to decide
+	// whether a container restarted would read either as a real instant.
+	raw := []byte("abc123" + psSep + "0" + psSep + "0001-01-01T00:00:00Z\n")
+	counts, started := parseInspectReadings(raw)
+	if _, ok := started["abc123"]; ok {
+		t.Errorf("the zero time must be absent, got %d", started["abc123"])
+	}
+	// …and it costs the container nothing else: the count beside it was fine.
+	if n, ok := counts["abc123"]; !ok || n != 0 {
+		t.Errorf("count = %d (present=%v), want 0 present", n, ok)
+	}
+}
+
+func TestAnUnreadableReadingCostsOnlyThatReading(t *testing.T) {
 	// A count we cannot read must not become 0 — "restarted 0 times" is a
 	// claim, and the whole bug behind #463 was the UI making claims like it.
-	// But one unreadable line must not cost every OTHER container its count:
-	// the crashlooper this feature exists for would be the one to lose it.
+	// Nor may one unreadable FIELD cost the container the other one, or one
+	// unreadable LINE cost every other container: the crashlooper this feature
+	// exists for would be the one to lose its number.
 	raw := []byte(strings.Join([]string{
-		"abc123" + psSep + "not-a-number",
+		"abc123" + psSep + "not-a-number" + psSep + "2026-09-10T18:26:13.744009882Z",
+		"bad789" + psSep + "7" + psSep + "not-a-timestamp",
 		"noseparatorhere",
-		"def456" + psSep + "23032",
+		"def456" + psSep + "23032" + psSep + "2026-09-11T16:50:12.233568268Z",
 	}, "\n") + "\n")
-	got := parseRestartCounts(raw)
-	if _, ok := got["abc123"]; ok {
+	counts, started := parseInspectReadings(raw)
+	if _, ok := counts["abc123"]; ok {
 		t.Error("a count that could not be read must be absent, not guessed at")
 	}
-	if got["def456"] != 23032 {
-		t.Errorf("def456 = %d, want 23032 — a bad line elsewhere must not cost it", got["def456"])
+	if started["abc123"] != 1789064773 {
+		t.Error("an unreadable count must not cost the container its start time")
 	}
-	if len(got) != 1 {
-		t.Errorf("got %d counts, want 1", len(got))
+	if counts["bad789"] != 7 {
+		t.Errorf("bad789 count = %d, want 7 — an unreadable timestamp must not cost the count", counts["bad789"])
+	}
+	if _, ok := started["bad789"]; ok {
+		t.Error("a start time that could not be read must be absent, not guessed at")
+	}
+	if counts["def456"] != 23032 {
+		t.Errorf("def456 = %d, want 23032 — a bad line elsewhere must not cost it", counts["def456"])
+	}
+	if len(counts) != 2 || len(started) != 2 {
+		t.Errorf("got %d counts / %d start times, want 2 / 2", len(counts), len(started))
 	}
 }

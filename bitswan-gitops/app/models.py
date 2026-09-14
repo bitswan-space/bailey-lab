@@ -27,12 +27,25 @@ class DeployedAutomation(BaseModel):
     # Memory governance (Containers tab): live usage vs the declared reservation,
     # the reservation policy, and whether usage exceeds the reservation.
     # How many times Docker's restart policy has brought the container back up
-    # after it died — the durable evidence a status dot cannot carry (a
+    # after it died — evidence a status dot cannot carry, though durable only
+    # within one container's life: an operator's Restart resets it to 0, and a
+    # deploy replaces the container (a
     # container crashlooping for two months looks the same as one that came up
     # fine, bailey-lab #463). None means the driver could not read it — the
     # container vanished under the inspect, or its line came back unreadable —
     # which is NOT the same claim as 0; the dashboard renders None as nothing.
     restart_count: int | None = None
+    # When this container last started. The ONE field that moves when a
+    # container is restarted in place — the id, the creation time and the restart
+    # count all stay exactly as they were, and the state is `running` on either
+    # side of a window too short to sample — so it is how the dashboard can tell
+    # that an operator's own Restart actually finished (bailey-lab #476).
+    #
+    # Always TIMEZONE-AWARE. A naive datetime serialises with no offset and the
+    # browser then reads it as local time, so a UTC+2 operator sees a restart
+    # that happened just now as two hours in the future. None means the driver
+    # could not read it (or it has never started) — never the epoch.
+    started_at: datetime | None = None
     mem_usage_bytes: int | None = None
     mem_reservation_mb: int | None = None
     mem_policy: str | None = None

@@ -75,6 +75,16 @@ import { stageHealth, type StageHealthKind } from '@/lib/stageHealth';
 import { memoryPair } from '@/lib/memory';
 import { stagePower } from '@/lib/stagePower';
 import {
+  beginPending,
+  dropPending,
+  pendingFailed,
+  pendingIssued,
+  stagePending,
+  usePendingActions,
+  type PendingAction,
+} from '@/lib/pendingActions';
+import { PendingActionMark, StagePendingMark } from '@/components/shared/PendingActionMark';
+import {
   api,
   errorMessage,
   isTransientNetworkError,
@@ -328,6 +338,7 @@ function StageNode({
   stage,
   deployed,
   health,
+  pendingLabel,
   active,
   onClick,
 }: {
@@ -340,6 +351,13 @@ function StageNode({
    * production wore a green tick (bailey-lab #463).
    */
   health: StageHealthKind;
+  /**
+   * The operator's own actions in flight on this stage, as one sentence ('' when
+   * there are none). It gets its OWN corner rather than sharing the badge's, so
+   * a stage can be visibly crash-looping and visibly being restarted by me at
+   * the same time — they are different facts (bailey-lab #476).
+   */
+  pendingLabel: string;
   active: boolean;
   onClick: () => void;
 }) {
@@ -382,6 +400,15 @@ function StageNode({
               <span className={cn('size-1.5 rounded-full', STAGE_BADGE[health].dot)} />
             )}
           </span>
+          {!!pendingLabel && (
+            <span
+              className="absolute -bottom-0.5 -left-0.5 flex size-[18px] items-center justify-center rounded-full border-2 border-background bg-background shadow-sm"
+              title={pendingLabel}
+            >
+              <Loader2 className="size-3 animate-spin text-primary" aria-hidden />
+              <span className="sr-only">{pendingLabel}</span>
+            </span>
+          )}
         </span>
       </span>
     </button>
@@ -1027,6 +1054,12 @@ interface Member {
   // Absent when the driver did not read it — never 0 in that case, because a
   // container that has never died is a different claim (bailey-lab #463).
   restartCount?: number;
+  // The container this member's buttons act on, and when it last started. The
+  // baseline an operator's own Restart is measured against: the start time is
+  // the only thing that moves when a container is restarted in place
+  // (bailey-lab #476). Absent when the driver did not read them.
+  containerId?: string;
+  startedAt?: string;
   // Why this member is asleep — 'memory-pressure' | 'manual' — or null when it
   // has a running container. Drives the stage's "Asleep" attribution.
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable
@@ -1109,23 +1142,33 @@ function StageServicesRow({ stage, only }: { stage: StageId; only?: ServiceType[
  *  expanders (single-open), reusing the shared LogsPane + OverviewPane. */
 function ContainerCard({
   m,
+  pending,
   onAction,
 }: {
   m: Member;
-  onAction: (action: 'start' | 'stop' | 'restart', id: string, name: string) => void;
+  pending?: PendingAction;
+  onAction: (action: 'start' | 'stop' | 'restart', m: Member) => void;
 }) {
   const [open, setOpen] = useState<'logs' | 'inspect' | null>(null);
   const meta = STATUS_META[m.display];
   // Up, not healthy: a restarting container is running (over and over), so the
   // useful action on it is Stop. Offering Start would be answering a question
   // nobody asked and implying it is down.
-  const running = isUpStatus(m.display);
+  //
+  // While an action of the operator's is in flight the pair follows the ACTION
+  // instead: a restart dips the observed state through `stopped`, and letting
+  // that swap Stop for Start under the cursor is how one button sends two
+  // different requests. The dot beside it is untouched either way.
+  const running = pending
+    ? pending.kind === 'restart' || pending.kind === 'stop'
+    : isUpStatus(m.display);
   const KindIcon = m.expose ? Globe : Boxes;
   const toggle = (p: 'logs' | 'inspect') => setOpen((cur) => (cur === p ? null : p));
   return (
     <div
       data-testid="container-card"
       data-container-status={m.display}
+      data-pending-action={pending?.kind}
       className="overflow-hidden rounded-[10px] border border-border bg-background"
     >
       <div className="flex flex-wrap items-center gap-2.5 px-4 py-3">
@@ -1139,6 +1182,7 @@ function ContainerCard({
           <span className={cn('size-2 rounded-full', meta.dot)} aria-hidden />
           <span className={cn('text-xs', meta.labelColor)}>{meta.label}</span>
         </span>
+        <PendingActionMark pending={pending} density="chip" />
         {m.replicas > 0 && (
           <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
             <Layers className="size-3" aria-hidden />
@@ -1171,19 +1215,25 @@ function ContainerCard({
           </span>
         )}
         {m.present && (
+          // Disabled while the operator's own action is in flight. Before this
+          // these buttons had no busy state at all, so five clicks sent five
+          // restarts.
           <div className="flex items-center gap-0.5">
             <Button variant="ghost" size="icon" className="size-8" title="Restart"
-              onClick={() => onAction('restart', m.id, m.name)}>
+              disabled={!!pending}
+              onClick={() => onAction('restart', m)}>
               <RotateCcw className="size-3.5" aria-hidden />
             </Button>
             {running ? (
               <Button variant="ghost" size="icon" className="size-8 text-red-600" title="Stop"
-                onClick={() => onAction('stop', m.id, m.name)}>
+                disabled={!!pending}
+                onClick={() => onAction('stop', m)}>
                 <Square className="size-3.5" aria-hidden />
               </Button>
             ) : (
               <Button variant="ghost" size="icon" className="size-8 text-emerald-600" title="Start"
-                onClick={() => onAction('start', m.id, m.name)}>
+                disabled={!!pending}
+                onClick={() => onAction('start', m)}>
                 <Play className="size-3.5" aria-hidden />
               </Button>
             )}
@@ -1242,9 +1292,10 @@ function ContainersSection({
   stage: StageId;
   stageLabel: string;
   bp: string;
-  onAction: (action: 'start' | 'stop' | 'restart', id: string, name: string) => void;
+  onAction: (action: 'start' | 'stop' | 'restart', m: Member) => void;
   onRefresh: () => void;
 }) {
+  const pending = usePendingActions();
   // Sub-tab: the stage's containers vs its data (read-only explorers scoped
   // to this BP's per-stage bucket/database). Deep-linked via `?csub=`.
   const [csub] = useUrlEnum('csub', ['automation', 'objects', 'sql'] as const, 'automation');
@@ -1264,7 +1315,13 @@ function ContainersSection({
     bp,
     stage: (stage === 'dr' ? 'production' : stage) as 'dev' | 'staging' | 'production',
   };
-  const [busy, setBusy] = useState(false);
+  // Narrowed to the power actions on purpose: a shared busy flag would have let
+  // an unrelated member's Restart lock this stage's Wake button.
+  const powerPending = stagePending(
+    members.map((m) => m.id),
+    pending,
+    { kinds: ['wake', 'sleep'] },
+  );
   // "Running" is the live container state, NOT whether a deploy record exists —
   // an asleep stage still has its records (present=true) but no running container.
   const isUp = (m: Member) => isUpStatus(m.display);
@@ -1292,20 +1349,36 @@ function ContainersSection({
   const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
 
   const power = async (action: 'sleep' | 'wake') => {
-    setBusy(true);
-    const work = api.stagePower(action, bp, stage, null);
-    toast.promise(work, {
-      loading: action === 'sleep' ? `Putting ${stageLabel} to sleep…` : `Waking ${stageLabel}…`,
-      success: action === 'sleep' ? `${stageLabel} put to sleep` : `${stageLabel} woken`,
-      error: (e: unknown) => `Failed to ${action} ${stageLabel}: ${String(e)}`,
-    });
+    // One button, one action — even though it covers every member. They share a
+    // groupId so the stage line and the Activity row say "Waking Production"
+    // rather than three unrelated starts, and it ends when the last member is
+    // seen through, not when the request returns.
+    const groupId = `${bp}:${stage}:${action}:${Date.now()}`;
+    const acted = members.map((m) => m.id);
+    for (const m of members) {
+      beginPending({
+        deploymentId: m.id,
+        kind: action,
+        name: stageLabel,
+        baseline: { startedAt: m.startedAt, containerId: m.containerId, status: m.display },
+        groupId,
+        groupTotal: acted.length,
+      });
+    }
     try {
-      await work;
+      const res = await api.stagePower(action, bp, stage, null);
+      // The server reports which deployments it actually touched. A member it
+      // skipped must lose its mark now: left standing, its only possible ending
+      // is a false "gave up waiting" a few minutes later.
+      const touched = res.slept ?? res.deployment_ids;
+      if (touched) {
+        for (const id of acted) if (!touched.includes(id)) dropPending(id);
+      }
+      for (const id of acted) pendingIssued(id);
       onRefresh();
-    } catch {
-      /* toast handled */
-    } finally {
-      setBusy(false);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      for (const id of acted) pendingFailed(id, why);
     }
   };
 
@@ -1342,15 +1415,18 @@ function ContainersSection({
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
           <span className="text-[12.5px] text-muted-foreground">{powerState.label}</span>
+          {/* Beside the sentence, never instead of it: powerState still says
+              what the stage IS, this says what the operator just did to it. */}
+          <StagePendingMark label={powerPending.label} density="line" />
           <span className="ml-auto flex items-center gap-2">
             {powerState.canWake && (
-              <Button variant="outline" size="sm" className="h-7" disabled={busy}
+              <Button variant="outline" size="sm" className="h-7" disabled={powerPending.count > 0}
                 onClick={() => power('wake')}>
                 <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
               </Button>
             )}
             {powerState.canSleep && (
-              <Button variant="outline" size="sm" className="h-7" disabled={busy}
+              <Button variant="outline" size="sm" className="h-7" disabled={powerPending.count > 0}
                 onClick={() => power('sleep')}>
                 <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
               </Button>
@@ -1365,7 +1441,9 @@ function ContainersSection({
           {emptyReason ?? `No containers in ${stageLabel}.`}
         </div>
       ) : (
-        members.map((m) => <ContainerCard key={m.id} m={m} onAction={onAction} />)
+        members.map((m) => (
+          <ContainerCard key={m.id} m={m} pending={pending.get(m.id)} onAction={onAction} />
+        ))
       )}
         </>
       )}
@@ -2600,6 +2678,8 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
         memReservationMB: a?.mem_reservation_mb ?? null,
         memOver: a?.mem_over_reservation ?? false,
         restartCount: a?.restart_count ?? undefined,
+        containerId: a?.container_id ?? undefined,
+        startedAt: a?.started_at ?? undefined,
         asleepReason: a?.asleep_reason ?? null,
       };
     });
@@ -2712,24 +2792,29 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   );
 
   const runContainer = useCallback(
-    async (action: 'start' | 'stop' | 'restart', id: string, name: string) => {
-      const verb = { start: 'Starting', stop: 'Stopping', restart: 'Restarting' }[action];
-      const call =
-        action === 'start'
-          ? api.startAutomation(id)
-          : action === 'stop'
-            ? api.stopAutomation(id)
-            : api.restartAutomation(id);
-      toast.promise(call, {
-        loading: `${verb} ${name}…`,
-        success: `${name} ${action === 'stop' ? 'stopped' : action === 'start' ? 'started' : 'restarted'}`,
-        error: (e: unknown) =>
-          isTransientNetworkError(e) ? `${name} ${action}ed` : `Failed to ${action} ${name}`,
+    async (action: 'start' | 'stop' | 'restart', m: Member) => {
+      // The mark goes up on the click frame and comes down when the container
+      // is SEEN through — which is also when the Activity row's success line
+      // lands, because both read the one record (bailey-lab #476). The old
+      // toast.promise here reported "restarted" the moment gitops answered,
+      // which is when the restart was issued, not when it was finished.
+      beginPending({
+        deploymentId: m.id,
+        kind: action,
+        name: m.name,
+        baseline: { startedAt: m.startedAt, containerId: m.containerId, status: m.display },
       });
       try {
-        await call;
-      } catch {
-        /* toast handled */
+        if (action === 'start') await api.startAutomation(m.id);
+        else if (action === 'stop') await api.stopAutomation(m.id);
+        else await api.restartAutomation(m.id);
+        pendingIssued(m.id);
+      } catch (e) {
+        // A dropped connection on a synchronous restart very often means it DID
+        // happen, so it is not reported as a failure — the observation settles
+        // it either way now, which is what makes that honest.
+        if (isTransientNetworkError(e)) pendingIssued(m.id);
+        else pendingFailed(m.id, e instanceof Error ? e.message : String(e));
       }
     },
     [],
@@ -2756,20 +2841,37 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
   // Its containers are the STANDBY slot's (`<id>@<slot>`) and the slot name is
   // only fetched while DR is the open view, so anywhere else we would be
   // reading the live slot's containers and calling them DR's.
-  const statusesForStage = useCallback(
+  const memberIdsForStage = useCallback(
     // eslint-disable-next-line no-restricted-syntax -- undefined IS the answer here: "not resolved", which stageHealth reads as a claim it must not make
-    (id: StageId): DisplayStatus[] | undefined => {
+    (id: StageId): string[] | undefined => {
       if (id === 'dr' && !drSlot) return undefined;
       const h = byStage[stageDataId(id)];
       const cur = h?.history.find((e) => e.commit === h.current) ?? h?.history[0];
       if (!cur) return undefined;
-      return Object.keys(cur.members ?? {}).map((mid) => {
-        const lookupId = id === 'dr' && drSlot ? `${mid}@${drSlot}` : mid;
-        return displayFor(automations.find((x) => x.deployment_id === lookupId));
-      });
+      return Object.keys(cur.members ?? {}).map((mid) =>
+        id === 'dr' && drSlot ? `${mid}@${drSlot}` : mid,
+      );
     },
-    [byStage, automations, drSlot],
+    [byStage, drSlot],
   );
+  const statusesForStage = useCallback(
+    // eslint-disable-next-line no-restricted-syntax -- undefined IS the answer here: "not resolved", which stageHealth reads as a claim it must not make
+    (id: StageId): DisplayStatus[] | undefined =>
+      memberIdsForStage(id)?.map((lookupId) =>
+        displayFor(automations.find((x) => x.deployment_id === lookupId)),
+      ),
+    [memberIdsForStage, automations],
+  );
+  // The operator's own actions in flight on a stage — the second marker on the
+  // pipeline node, and the second line on the stage card. Same member ids the
+  // statuses come from, so a stage whose containers cannot be resolved (DR
+  // outside its own view) claims nothing here either.
+  const pending = usePendingActions();
+  const pendingForStage = useCallback(
+    (id: StageId) => stagePending(memberIdsForStage(id) ?? [], pending),
+    [memberIdsForStage, pending],
+  );
+  const activeStagePending = pendingForStage(activeStage);
 
   // "{N} containers promote together" — the BP's container count, stable across
   // stages (max members seen on any stage's current deployment).
@@ -2948,6 +3050,7 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                   stage={s}
                   deployed={deployed}
                   health={stageHealth({ deployed, statuses: statusesForStage(s.id) }).kind}
+                  pendingLabel={pendingForStage(s.id).label}
                   active={isActive}
                   onClick={() => setActiveStage(s.id)}
                 />
@@ -3117,6 +3220,11 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                     </span>
                   </div>
                 )}
+                {/* Beside the health line, never instead of it — "1 service not
+                    running" stays exactly as it is, and gains the context that
+                    explains it when the operator caused it themselves. An
+                    active deploy still owns the line above. */}
+                <StagePendingMark label={activeStagePending.label} density="line" className="mt-0.5" />
                 {stageFailure && (
                   <div className="mt-1.5 rounded-md bg-red-50 px-2.5 py-1.5 text-[12px] font-medium text-red-700 ring-1 ring-red-200">
                     Last deploy to {STAGE_LABEL[activeStage]} failed: {stageFailure}
@@ -3195,6 +3303,12 @@ export function DeploymentsTab({ bp }: { bp: BusinessProcess }) {
                           {subtitle}
                         </span>
                       </span>
+                      {/* This subtitle is the most user-facing line on the card
+                          and it reads the observed state — so during the
+                          operator's own restart it says "Stopped" under an app
+                          they are deliberately restarting. The subtitle is left
+                          exactly as it is; the mark says who did it. */}
+                      <PendingActionMark pending={pending.get(f.id)} density="dot" />
                       {openable ? (
                         running ? (
                           <ExternalLink className="size-3.5 shrink-0 text-primary" aria-hidden />
