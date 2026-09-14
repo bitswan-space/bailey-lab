@@ -57,7 +57,7 @@ USER root
 
 # Runtime tooling for local snapshots. No restic here: off-site backups are
 # made by the automation-server daemon (whole-server repo), not per workspace.
-RUN apt-get update && apt-get install -y curl jq tar && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y curl jq tar openssh-client && rm -rf /var/lib/apt/lists/*
 
 # Supply-chain scanning: syft (SBOM) + grype (CVEs). Static Go binaries; grype
 # downloads its vuln DB on first run (and the daily re-scan job refreshes it).

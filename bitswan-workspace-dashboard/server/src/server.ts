@@ -18,6 +18,7 @@ import { registerCopyRoutes } from './routes/copies.js';
 import { registerCopyFilesRoutes } from './routes/copy-files.js';
 import { registerMeRoutes } from './routes/me.js';
 import { registerTaskRoutes } from './routes/tasks.js';
+import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
 import { startAgentUploadsSweeper } from './services/agent-uploads.js';
 import { requestContext } from './lib/requestContext.js';
 
@@ -82,6 +83,7 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerSnapshotRoutes(app, { gitops });
   registerDataExplorerRoutes(app, { gitops });
   registerTaskRoutes(app, { gitops });
+  registerWorkspaceSettingsRoutes(app, { gitops });
   registerEventRoutes(app, { gitops });
   registerPublicEndpointRoutes(app);
 

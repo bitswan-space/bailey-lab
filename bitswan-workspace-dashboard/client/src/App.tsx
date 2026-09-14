@@ -58,6 +58,7 @@ const FLOW_TABS: FlowTab[] = [
   'requirements',
   'deploy',
   'deployments',
+  'settings',
 ];
 
 // Tab values that have been renamed since links were shared and sessions
@@ -1099,6 +1100,7 @@ function Shell() {
         <WorkspaceView
           bp={bp}
           wt={wt}
+          role={role}
           copyCreating={copyCreating}
           addingBp={addingBp}
           tab={tab}

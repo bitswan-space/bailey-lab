@@ -1071,6 +1071,56 @@ export interface CreateAutomationResponse {
   created: { name: string; relativePath: string }[];
 }
 
+export type GitRemoteBranchResult =
+  | 'pushed'
+  | 'up_to_date'
+  | 'diverged'
+  | 'rejected'
+  | 'deleted'
+  | 'error'
+  | 'pending';
+
+export interface GitRemoteBranch {
+  result: GitRemoteBranchResult;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable sha
+  local?: string | null;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable sha
+  remote?: string | null;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable text
+  detail?: string | null;
+}
+
+export interface GitRemoteStatus {
+  result: 'ok' | 'partial' | 'diverged' | 'error' | 'unconfigured';
+  trigger?: string;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable timestamp
+  last_attempt_at: string | null;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable timestamp
+  last_success_at: string | null;
+  in_progress?: boolean;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable text
+  error: string | null;
+  duration_s?: number;
+  branches: Record<string, GitRemoteBranch>;
+  tags?: Record<string, number>;
+  warnings?: string[];
+}
+
+export interface GitRemote {
+  // eslint-disable-next-line no-restricted-syntax -- null = no remote configured
+  url: string | null;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable timestamp
+  updated_at?: string | null;
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable email
+  updated_by?: string | null;
+  public_key: string;
+  fingerprint: string;
+  status: GitRemoteStatus;
+  // eslint-disable-next-line no-restricted-syntax -- null = nothing was queued
+  task_id?: string | null;
+  coalesced?: boolean;
+}
+
 export const api = {
   /**
    * Identify the logged-in user and ensure their personal copy exists
@@ -1761,6 +1811,13 @@ export const api = {
   /** Git task queue. The live feed comes over the `/api/events` SSE stream;
    *  this is the initial snapshot fetch on mount. */
   tasks: () => getJson<{ tasks: GitTask[] }>('/api/tasks'),
+
+  gitRemote: {
+    get: () => getJson<GitRemote>('/api/workspace/git-remote'),
+    set: (url: string) => putJson<GitRemote>('/api/workspace/git-remote', { url }),
+    clear: () => delJson<GitRemote>('/api/workspace/git-remote', {}),
+    push: () => postJson<GitRemote>('/api/workspace/git-remote/push', {}),
+  },
 
   /** Read-only data explorer (Object Storage / SQL panels). List endpoints
    *  return null on 404 = "this BP has no database/bucket at this scope". */

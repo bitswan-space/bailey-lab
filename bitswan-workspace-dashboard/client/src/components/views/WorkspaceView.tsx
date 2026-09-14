@@ -5,6 +5,7 @@ import { EnvironmentPanel } from '@/components/agents/EnvironmentPanel';
 import { DeploymentsTab } from '@/components/views/DeploymentsTab';
 import { SyncTab } from '@/components/views/SyncTab';
 import { SyncDeployTab } from '@/components/views/SyncDeployTab';
+import { SettingsTab } from '@/components/views/SettingsTab';
 import { RequirementsTab } from '@/components/requirements/RequirementsTab';
 import { ReadmeCard } from '@/components/workspace/ReadmeCard';
 import { SpecificationTab } from '@/components/workspace/SpecificationTab';
@@ -29,6 +30,7 @@ interface WorkspaceViewProps {
    *  gate says "adding…" rather than "it isn't in this copy". */
   // eslint-disable-next-line no-restricted-syntax -- null = nothing in flight
   addingBp?: string | null;
+  role: 'admin' | 'auditor' | 'member';
   tab: FlowTab;
   onTab: (t: FlowTab) => void;
   /** An editor save landed in the current copy (dirtiness changed). */
@@ -77,6 +79,7 @@ export function WorkspaceView({
   wt,
   copyCreating = false,
   addingBp = null,
+  role,
   tab,
   onTab,
   onCopyEdited,
@@ -97,6 +100,10 @@ export function WorkspaceView({
   // exists (a brand-new operator opens here), so it precedes the empty state.
   if (tab === 'get-started') {
     return <GetStartedTab onTab={onTab} onNewBp={onNewBp} />;
+  }
+
+  if (tab === 'settings') {
+    return <SettingsTab role={role} onTab={onTab} />;
   }
 
   if (!bp) {

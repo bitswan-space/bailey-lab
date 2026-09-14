@@ -807,7 +807,8 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     ).not.toContainText(/\bcopy\b/i);
 
     await d.getByRole('button', { name: /^Advanced$/ }).first().click();
-    // The popover has exactly two sections. Wait for BOTH labels before the
+    // The popover has two sections for everyone (plus Workspace for admins,
+    // asserted in `workspace-settings`). Wait for BOTH labels before the
     // shutter so the shot can never catch a half-populated menu (the colleague
     // list and the experiment list are filled from the copies SSE feed).
     // (The apostrophe class covers both the ASCII and the typographic form —
@@ -855,6 +856,53 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     ).toBeVisible({ timeout: SLA });
     await capture(dashPage, 'advanced-menu');
     await dashPage.keyboard.press('Escape');
+  });
+
+  await chapter('workspace-settings', async () => {
+    await d.getByRole('button', { name: /^Advanced$/ }).first().click();
+    await expect(
+      d.getByText(/^Workspace$/).first(),
+      'the Advanced menu has no Workspace section for an admin (the signed-in operator is one)',
+    ).toBeVisible({ timeout: SLA });
+    await d.getByRole('button', { name: /^Settings\b/ }).first().click();
+    await expect(
+      d.getByText(/^Workspace settings$/).first(),
+      'Advanced → Settings did not open the workspace settings screen',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      d.getByText(/SSH public key/i).first(),
+      'the settings screen never showed the deploy-key section',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      d.getByText(/^ssh-ed25519 /).first(),
+      'no public key was rendered — gitops did not answer with the workspace deploy key',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      d.getByRole('button', { name: /Copy public key/i }).first(),
+      'the deploy key has no Copy button',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      d.getByText(/No remote configured yet/i).first(),
+      'a fresh workspace did not show the honest "no remote yet" state',
+    ).toBeVisible({ timeout: SLA });
+    await expect(
+      d.getByRole('button', { name: /^Save$/ }).first(),
+      'Save is enabled with an empty remote URL',
+    ).toBeDisabled();
+    await expect(
+      d.getByRole('button', { name: /^Clear$/ }),
+      'a Clear button is offered although no remote is configured',
+    ).toHaveCount(0);
+    await expect(
+      topBarEl().getByRole('button', { name: /^Settings$/ }),
+      'Settings grew a chip in the top bar — it is reached from Advanced only',
+    ).toHaveCount(0);
+    await capture(dashPage, 'workspace-settings');
+    await clickTopTab(/^Get started$/);
+    await expect(
+      d.getByText(/^Workspace settings$/),
+      'leaving Settings through a step chip did not close it',
+    ).toHaveCount(0);
   });
 
   // ---- Create the invoice-processing business process ----

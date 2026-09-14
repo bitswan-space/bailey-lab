@@ -17,6 +17,7 @@ from app.routes.snapshots import router as snapshots_router
 from app.routes.data_explorer import router as data_explorer_router
 from app.routes.templates import router as templates_router
 from app.routes.tasks import router as tasks_router
+from app.routes.workspace_git import router as workspace_git_router
 from app.task_queue import current_requester
 from app.dependencies import verify_token
 
@@ -119,6 +120,7 @@ app.include_router(snapshots_router, dependencies=[Depends(verify_token)])
 # Read-only data explorer (dashboard Object Storage / SQL panels)
 app.include_router(data_explorer_router, dependencies=[Depends(verify_token)])
 app.include_router(tasks_router, dependencies=[Depends(verify_token)])
+app.include_router(workspace_git_router, dependencies=[Depends(verify_token)])
 
 
 def custom_openapi():
