@@ -479,7 +479,12 @@ function renderChapter(ch, idx) {
   return `<section class="page chapter" id="${chapterAnchor(ch, idx)}"><div class="pad">
     <div class="chapter-head"><span class="chapter-num">CH ${esc(num)}</span><span class="chapter-eyebrow">${esc(ch.eyebrow || '')}</span></div>
     <h2>${esc(ch.title)}</h2>
-    ${ch.lede ? `<p class="lede">${esc(ch.lede)}</p>` : ''}
+    ${/* Prose, so it carries markup like the other prose fields (sell, steps,
+         callout.text) rather than being escaped like the short labels around
+         it. Ch.10's lede has emphasised "one business process" / "Deploy" /
+         "Sync" since it was written, and escaping printed the tags at the
+         reader instead. */ ''}
+    ${ch.lede ? `<p class="lede">${ch.lede}</p>` : ''}
     ${leadShot}
     ${two}
     ${callout}
