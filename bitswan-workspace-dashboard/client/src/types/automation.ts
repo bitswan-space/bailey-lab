@@ -25,7 +25,9 @@ export interface DeployedAutomation {
   // containers split. Optional for back-compat with older gitops payloads.
   expose?: boolean;
   // Times Docker's restart policy has brought the container back up after it
-  // died — the durable evidence a status dot cannot carry (bailey-lab #463).
+  // died — evidence a status dot cannot carry (bailey-lab #463), though durable
+  // only within one container's life: an operator's own Restart resets it to 0
+  // and a deploy replaces the container.
   // Absent/null means the driver could not read it, which is NOT the same as 0.
   restart_count?: number | null;
   // When this container last started, ISO-8601 with an explicit offset. The ONE

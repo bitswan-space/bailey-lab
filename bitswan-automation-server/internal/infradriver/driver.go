@@ -234,9 +234,15 @@ type Container struct {
 	// its count. Callers must render nil as unknown, because "restarted 0
 	// times" is a different (and stronger) claim than silence.
 	//
-	// Only policy-driven restarts count: an operator's `docker restart` leaves
-	// it at 0 (measured), so a non-zero value always means the container died
-	// on its own.
+	// Only the restart POLICY increments it, so a non-zero value always means
+	// the container died on its own. But it is durable only within ONE
+	// container's life, which is narrower than it looks: an operator's
+	// `docker restart` SETS IT BACK TO 0 (measured directly — 7 then 0, 1, 2 …
+	// as the policy re-climbs it), a stop+start does the same, and any deploy
+	// replaces the container outright. So a service that crashlooped 23,000
+	// times and was then restarted by hand reads 0, and nothing here remembers
+	// otherwise. Keeping that history needs a record of the ACTION, server-side
+	// (bailey-lab #478) — not a field on the container.
 	RestartCount *int `json:"restart_count,omitempty"`
 	// When this container last started, in unix SECONDS (same unit as Created
 	// above). Read by the same batched inspect as RestartCount, so it carries

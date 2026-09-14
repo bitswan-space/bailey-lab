@@ -27,7 +27,9 @@ class DeployedAutomation(BaseModel):
     # Memory governance (Containers tab): live usage vs the declared reservation,
     # the reservation policy, and whether usage exceeds the reservation.
     # How many times Docker's restart policy has brought the container back up
-    # after it died — the durable evidence a status dot cannot carry (a
+    # after it died — evidence a status dot cannot carry, though durable only
+    # within one container's life: an operator's Restart resets it to 0, and a
+    # deploy replaces the container (a
     # container crashlooping for two months looks the same as one that came up
     # fine, bailey-lab #463). None means the driver could not read it — the
     # container vanished under the inspect, or its line came back unreadable —
