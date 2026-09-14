@@ -32,6 +32,11 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "secrets_dir", str(tmp_path / "secrets"))
     roles = {ADMIN: "admin", MEMBER: "member"}
     monkeypatch.setattr(routes, "daemon_user_role", lambda email: roles[email])
+
+    async def fake_run(trigger, requester):
+        return {"result": "ok"}
+
+    monkeypatch.setattr(mirror, "run_mirror_push", fake_run)
     mirror.reset_for_tests()
     api = FastAPI()
     api.add_middleware(_RequesterMiddleware)
