@@ -22,8 +22,9 @@ import (
 // — 65534 addresses for a network holding one workspace's automations for one stage.
 // Thirty-two of those is the entire default supply, which is why a stock daemon is
 // dry at about seven workspaces. Sizing per role instead (see networkPrefixLen) puts
-// 4096 networks in the default base, and a daemon-wide default-address-pools `size`
-// cannot do that: it is one size for every network on the host.
+// 1024 stage-sized networks in the default base — 338 workspaces, measured by running
+// the allocator — and a daemon-wide default-address-pools `size` cannot do that: it is
+// one size for every network on the host.
 //
 // Networks that already exist are never touched — Docker keeps their addresses in
 // its local store, nothing renumbers, and the old /16s come back as workspaces are
