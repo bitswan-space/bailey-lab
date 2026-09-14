@@ -6,10 +6,9 @@ import type { GitopsClient } from '../services/gitops.js';
 import { isValidBpId, isValidCopyName } from '../services/workspace.js';
 import { findSessionMeta, latestSession } from '../services/agent-sessions.js';
 import {
-  BUILD_AUTOMATION_PROMPT,
-  mergeBackPrompt,
-  SYNC_PROMPT,
-  WRITE_TESTS_PROMPT,
+  isSessionKind,
+  promptForKind,
+  type SessionKind,
 } from '../services/agent-prompts.js';
 import { emailFromRequest } from '../lib/user.js';
 
@@ -50,41 +49,6 @@ export function agentSshTarget(): AgentSshTarget {
   // app/services/agent_ssh_proxy.py.
   const ws = process.env.BITSWAN_WORKSPACE_NAME ?? 'default';
   return { host: `${ws}-gitops`, port: 2222 };
-}
-
-type SessionKind = 'claude' | 'sync' | 'merge-parent' | 'write-tests' | 'automation';
-
-function isSessionKind(value: unknown): value is SessionKind {
-  return (
-    value === 'claude' ||
-    value === 'sync' ||
-    value === 'merge-parent' ||
-    value === 'write-tests' ||
-    value === 'automation'
-  );
-}
-
-/**
- * The canned prompt each session kind carries. Used both to seed a fresh
- * conversation (embedded into the launch command by `buildAutoCmd`) and to
- * serve `/api/coding-agent/prompt`, where the client fetches the same text
- * to inject into an already-running session.
- *
- * Plain 'claude' sessions have NO prompt — the agent's standing guidance
- * comes from the CLAUDE.md baked into the coding-agent image, which Claude
- * loads on every session (fresh and resumed alike).
- *
- * `'merge-parent'` carries no FIXED prompt: its text is parameterized by
- * `parent` (the experiment's parent copy, the branch it rebases onto), so
- * `parent` is required for it — see `mergeBackPrompt`. Missing it yields no
- * prompt, same as any kind with nothing to say.
- */
-function promptForKind(kind: SessionKind, parent?: string): string | undefined {
-  if (kind === 'sync') return SYNC_PROMPT;
-  if (kind === 'merge-parent') return parent ? mergeBackPrompt(parent) : undefined;
-  if (kind === 'write-tests') return WRITE_TESTS_PROMPT;
-  if (kind === 'automation') return BUILD_AUTOMATION_PROMPT;
-  return undefined;
 }
 
 /**

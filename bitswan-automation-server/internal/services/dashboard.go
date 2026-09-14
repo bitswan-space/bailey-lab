@@ -14,6 +14,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// claudeExtensionCacheDir is where the dashboard container downloads the pinned
+// Claude Code VS Code extension. Deliberately not /claude-extension: that path
+// is the read-only bind for an operator-supplied copy
+// (BITSWAN_CLAUDE_EXTENSION_DIR), and the container's entrypoint treats this
+// directory's existence as permission to write into it.
+const claudeExtensionCacheDir = "/claude-extension-cache"
+
 // DashboardService manages the workspace-dashboard sidecar deployment for a workspace.
 // It owns its own docker-compose-dashboard.yml file and lifecycle.
 type DashboardService struct {
@@ -118,6 +125,39 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string), caEnvVars...)
 	}
 
+	sidebarEnabled := false
+	enableAgentSidebar := func(extensionPathInContainer string) {
+		sidebarEnabled = true
+		bitswanDashboard["environment"] = append(bitswanDashboard["environment"].([]string),
+			"CLAUDE_EXTENSION_PATH="+extensionPathInContainer,
+			"SIDEBAR_CONFIG_ROOT=/claude-config",
+			// The copies tree as the coding-agent container sees it. Claude
+			// Code names a conversation's transcript directory after the cwd
+			// the CLI ran in, and the CLI runs there; the extension host has
+			// to derive the same name or it lists an empty history for a BP
+			// full of conversations. So the sidebar uses this path, and the
+			// mount below makes it real on this side too.
+			"SIDEBAR_COPIES_ROOT=/workspace/copies",
+		)
+		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
+			// Same directory as the /workspace/workspace/copies mount above,
+			// under the name the agent container uses. Two targets for one
+			// subpath is cheap and keeps the change off the dashboard's own
+			// WORKSPACE_ROOT, which its file routes and terminal are built on.
+			wsVolume("copies", "/workspace/copies", false),
+			// Per-user Claude Code config dirs, shared with the coding-agent
+			// container (services/coding_agent.go mounts the same subpath at
+			// the same path) — that is where the CLI writes the transcripts
+			// this host reads, and the settings both halves must agree on.
+			wsVolume("claude-configs", "/claude-config", false))
+		for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+			if v := os.Getenv(key); v != "" {
+				bitswanDashboard["environment"] = append(
+					bitswanDashboard["environment"].([]string), key+"="+v)
+			}
+		}
+	}
+
 	// Hot-reload dev mode: mount the source directory and let the container's
 	// entrypoint run `npm install` + `npm run dev` instead of the pre-built bundle.
 	if devConfig != nil && devConfig.SourceDir != "" {
@@ -128,7 +168,53 @@ func (d *DashboardService) CreateDockerComposeWithDevMode(gitopsSecretToken, bit
 			"BITSWAN_DEV_MODE=true",
 			"BITSWAN_DASHBOARD_DEV_DIR="+dashboardDevContainerPath,
 		)
+		if _, err := os.Stat(filepath.Join(devConfig.SourceDir, ".claude-extension")); err == nil {
+			enableAgentSidebar(dashboardDevContainerPath + "/.claude-extension")
+		}
 	}
+
+	if hostExtension := os.Getenv("BITSWAN_CLAUDE_EXTENSION_DIR"); hostExtension != "" && !sidebarEnabled {
+		if ExtensionDirVisible(hostExtension) {
+			bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
+				hostExtension+":/claude-extension:ro")
+			enableAgentSidebar("/claude-extension")
+		}
+	}
+
+	// Nothing supplied an extension, so the dashboard fetches one itself: mount
+	// an empty persistent directory and let its entrypoint download the pinned
+	// release into it (see bitswan-workspace-dashboard/entrypoint.sh). This is
+	// the ordinary path — the two branches above are the escape hatches for a
+	// dev tree and for an operator-managed copy.
+	//
+	// A distinct mount point matters. /claude-extension is already taken by the
+	// read-only bind above, and two mounts on one path is a compose-level
+	// conflict; it also gives the entrypoint an unambiguous signal for "this
+	// directory is mine to write to", so a hand-managed extension is never
+	// overwritten. The vsix unpacks with an `extension/` prefix, hence the
+	// subdirectory in the path the server is pointed at.
+	if !sidebarEnabled {
+		bitswanDashboard["volumes"] = append(bitswanDashboard["volumes"].([]interface{}),
+			wsVolume("claude-extension", claudeExtensionCacheDir, false))
+		enableAgentSidebar(claudeExtensionCacheDir + "/extension")
+	}
+
+	// The pinned Claude Code version, when an operator overrode the image
+	// default. Same shape as the ANTHROPIC_* pass-through: unset ⇒ absent, so
+	// the image's own pin wins.
+	if v := os.Getenv("BITSWAN_CLAUDE_CODE_VERSION"); v != "" {
+		bitswanDashboard["environment"] = append(
+			bitswanDashboard["environment"].([]string), "CLAUDE_CODE_VERSION="+v)
+	}
+
+	// There is deliberately no switch for where the sidebar's agent runs. Claude
+	// Code runs in the coding-agent container, always, via
+	// claude-process-wrapper. This container holds the deploy secret, the
+	// workspace SSH key and every user's Claude credentials, and the agent
+	// executes model-chosen shell commands — so "run it here instead" is not a
+	// configuration, it is a hole. The dashboard's entrypoint takes the execute
+	// bit off the extension's own bundled copy on every start, and its server
+	// refuses to open a panel while that copy is runnable.
 
 	dockerCompose := map[string]interface{}{
 		"version": "3.8",
@@ -355,4 +441,18 @@ func (d *DashboardService) runCommand(cmd *exec.Cmd) error {
 		return fmt.Errorf("command failed: %w\nOutput: %s", err, string(output))
 	}
 	return nil
+}
+
+func ExtensionDirVisible(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(dir); err == nil {
+		return true
+	}
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	_, err := os.Stat(filepath.Join("/host", dir))
+	return err == nil
 }

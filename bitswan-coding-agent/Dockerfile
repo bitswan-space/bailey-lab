@@ -39,35 +39,38 @@ RUN useradd -m -s /bin/bash -u 1000 agent \
     && mkdir -p /home/agent/.ssh \
     && chown -R agent:agent /home/agent
 
-# Install Claude Code CLI
+# Claude Code CLI — installed at RUNTIME, not baked into this image.
 #
-# Claude Code updates itself. Its updater runs `npm -g config get prefix` and
-# checks that directory for write permission; a plain `npm install -g` puts it
-# in the root-owned /usr prefix, so every session the agent user gets the
-# "Auto-update failed" banner (issue #269).
+# The CLI is Anthropic's proprietary software ("© Anthropic PBC. All rights
+# reserved."), and ~208 MB of the package is one prebuilt native executable.
+# Baking it in would redistribute that binary inside every published
+# bitswan/coding-agent image. entrypoint-agent.sh installs it on first start
+# instead, so nothing third-party ships in this image.
 #
-# So there are two prefixes, both writable by the runtime user:
-#   * CLAUDE_CODE_BUNDLED_PREFIX (below) — installed at build time so a fresh
-#     container has a working `claude` immediately, with no network round trip.
-#   * CLAUDE_CODE_PREFIX (/home/agent/.npm-global) — what entrypoint-agent.sh
-#     configures as npm's global prefix, so self-updates land there. /home/agent
-#     is a persistent volume (see internal/services/coding_agent.go), so an
-#     update survives container restarts *and* recreation.
-# PATH prefers the self-updated copy and falls back to the bundled one.
+# Two prefixes, both writable by the runtime user — Claude Code's updater runs
+# `npm -g config get prefix` and checks that directory for write permission; a
+# plain `npm install -g` puts it in the root-owned /usr prefix, so every session
+# the agent user gets the "Auto-update failed" banner (issue #269):
+#   * CLAUDE_CODE_PREFIX (/home/agent/.npm-global) — where entrypoint-agent.sh
+#     installs. /home/agent is a persistent volume (see
+#     internal/services/coding_agent.go), so the download happens once per
+#     workspace and survives container restarts *and* recreation.
+#   * CLAUDE_CODE_BUNDLED_PREFIX (/opt/claude-code) — no longer populated at
+#     build time, but kept on PATH as a fallback slot so an operator can still
+#     pre-seed an image (air-gapped installs) without touching the entrypoint.
+# PATH prefers the runtime-installed copy and falls back to the bundled slot.
 #
-# The version below is only a floor: whatever is installed at build time gets
-# superseded at runtime by Claude Code's own updater, so it does not need
-# routine bumping. It stays pinned rather than `@latest` because this layer is
-# cached — `@latest` would be resolved once and then silently frozen by the
-# layer cache, which is worse than an honest pin. Override for a one-off build
-# with `docker build --build-arg CLAUDE_CODE_VERSION=...`.
+# CLAUDE_CODE_VERSION is a hard pin, not a floor: the dashboard's VS Code
+# extension host is coupled to a specific Claude Code build, so the CLI and the
+# extension must move together. entrypoint-agent.sh sets DISABLE_AUTOUPDATER so
+# the CLI cannot walk away from that pin on its own. Keep this in lockstep with
+# the repo-root CLAUDE_CODE_VERSION file and the workspace-dashboard image —
+# internal/services/claude_code_version_test.go fails if they drift.
 ENV CLAUDE_CODE_PREFIX=/home/agent/.npm-global
 ENV CLAUDE_CODE_BUNDLED_PREFIX=/opt/claude-code
 ENV PATH="${CLAUDE_CODE_PREFIX}/bin:${CLAUDE_CODE_BUNDLED_PREFIX}/bin:${PATH}"
-ARG CLAUDE_CODE_VERSION=2.1.197
-RUN npm install -g --prefix "${CLAUDE_CODE_BUNDLED_PREFIX}" \
-        @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
-    && chown -R agent:agent "${CLAUDE_CODE_BUNDLED_PREFIX}"
+ARG CLAUDE_CODE_VERSION=2.1.268
+ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
 # sshd sessions do not inherit this image's env: login shells get PATH from
 # /etc/profile (which overwrites it) plus /etc/profile.d/bitswan-agent.sh,

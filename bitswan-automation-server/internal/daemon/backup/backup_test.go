@@ -227,6 +227,17 @@ func TestResticEnvAndArgs(t *testing.T) {
 	if got := strings.Join(args, " "); got != want {
 		t.Errorf("BackupArgs = %q, want %q", got, want)
 	}
+
+	// Excludes land before the paths, or restic reads them as another thing to
+	// back up. Absolute, so no pattern can match a same-named directory
+	// elsewhere in the tree.
+	args = r.BackupArgsExcluding([]string{"files", "ws:tenant-a"},
+		[]string{"/data/tenant-a/claude-extension"}, "/data/tenant-a")
+	want = "backup --host srv-123 --tag files --tag ws:tenant-a " +
+		"--exclude /data/tenant-a/claude-extension /data/tenant-a"
+	if got := strings.Join(args, " "); got != want {
+		t.Errorf("BackupArgsExcluding = %q, want %q", got, want)
+	}
 }
 
 func TestEnsureRepoToleratesExisting(t *testing.T) {

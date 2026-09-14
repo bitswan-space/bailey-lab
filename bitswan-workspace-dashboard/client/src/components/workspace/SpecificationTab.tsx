@@ -38,7 +38,6 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { useSessions } from '@/components/agents/SessionProvider';
 import { FlowchartEditorModal } from '@/components/workspace/FlowchartEditorModal';
 import {
   SpecAttachments,
@@ -272,7 +271,6 @@ function serializeDoc(state: EditorState): string {
  * the coding agent sees everything the user authored.
  */
 export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: SpecificationTabProps) {
-  const { sendPrompt } = useSessions();
   const [editorState, setEditorState] = useState<EditorState>();
   const [load, setLoad] = useState<LoadState>({ kind: 'loading' });
   const [save, setSave] = useState<SaveState>({ kind: 'clean' });
@@ -590,14 +588,24 @@ export function SpecificationTab({ bp, copy, onShowAgents, onSaved }: Specificat
     dispatchTransaction(state.tr.delete(pos, pos + node.nodeSize));
   }, [mermaidDeletePos, dispatchTransaction]);
 
-  // "Build automation" sends the description to the coding agent: flush
-  // any unsaved edits first (the agent reads README.md from disk), then
-  // hand the automation prompt to the BP's agent — typed into the running
-  // session, or seeding a fresh one — and flip to the Coding Agent tab.
+  // "Build automation" sends the description to the coding agent: flush any
+  // unsaved edits first (the agent reads README.md from disk), then hand over
+  // the automation prompt — it arrives in the panel's composer for the user to
+  // send — and flip to the Coding Agent tab.
+  //
+  // The save is awaited: the prompt tells the agent to read README.md as the
+  // specification, so handing it over before the edit lands on disk would
+  // point it at the previous version.
   const onBuildAutomation = () => {
-    void doSave(false);
-    void sendPrompt(copy, bp.name, 'automation');
-    onShowAgents();
+    void (async () => {
+      await doSave(false);
+      try {
+        await api.codingAgent.handOffTask(copy, bp.id, 'automation');
+      } catch (err) {
+        toast.error(`Could not hand the task to the agent: ${String(err)}`);
+      }
+      onShowAgents();
+    })();
   };
 
   // ---- Render -------------------------------------------------------------

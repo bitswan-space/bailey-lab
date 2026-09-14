@@ -268,8 +268,8 @@ func (e *Engine) RunAll(ctx context.Context, log func(string)) (*RunReport, erro
 }
 
 // resticStep runs one `restic backup` and folds its outcome into a StepResult.
-func resticStep(ctx context.Context, restic *Restic, tags []string, path string) StepResult {
-	stdout, stderr, err := restic.Run(ctx, restic.BackupArgs(tags, path)...)
+func resticStep(ctx context.Context, restic *Restic, tags []string, path string, excludes ...string) StepResult {
+	stdout, stderr, err := restic.Run(ctx, restic.BackupArgsExcluding(tags, excludes, path)...)
 	output := strings.TrimSpace(stdout)
 	if output == "" {
 		output = strings.TrimSpace(stderr)
@@ -286,10 +286,19 @@ func resticStep(ctx context.Context, restic *Restic, tags []string, path string)
 
 // backupWorkspace captures one workspace: its whole tree (secrets included —
 // the entire point of server-level backups), then per-stage DB dumps.
+//
+// One exclusion: claude-extension, the ~218 MB Claude Code VS Code extension the
+// dashboard container downloads for itself. It is an immutable third-party
+// artifact pinned by version and re-fetched on demand, so capturing it would add
+// a fifth of a gigabyte per workspace to every snapshot to preserve something a
+// restore can reproduce from the registry. The directory itself is recreated on
+// recovery by ensureWorkspaceVolumeDirs — an empty one is all the dashboard
+// needs to download into.
 func (e *Engine) backupWorkspace(ctx context.Context, restic *Restic, ws string, log func(string)) WorkspaceReport {
 	report := WorkspaceReport{}
 
-	report["files"] = resticStep(ctx, restic, []string{"files", "ws:" + ws}, workspaceDir(ws))
+	report["files"] = resticStep(ctx, restic, []string{"files", "ws:" + ws}, workspaceDir(ws),
+		filepath.Join(workspaceDir(ws), "claude-extension"))
 
 	client, wctx, err := driverForWorkspace(ws)
 	if err != nil {

@@ -19,11 +19,10 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useRequirements } from '@/hooks/useRequirements';
-import { useSessions } from '@/components/agents/SessionProvider';
 import { RequirementsTable } from './RequirementsTable';
 import { useUrlEnum, useUrlParam } from '@/lib/urlState';
 import { cn } from '@/lib/utils';
-import type { Requirement, ReqStatus } from '@/lib/api';
+import { api, type Requirement, type ReqStatus } from '@/lib/api';
 
 interface Props {
   copy: string;
@@ -62,7 +61,6 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     remove,
     runTests,
   } = useRequirements(copy, bp);
-  const { sendPrompt } = useSessions();
   // Ids this person sent back, per (copy, bp). The row offers Undo only for
   // these: any other `retest` row was put there by a test run, the agent, or
   // somebody else, and offering to mark it `pass` would be the hand-set verdict
@@ -262,11 +260,14 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  // "Write tests" / "Build automation": hand the canned prompt to the BP's
-  // agent — typed into the running session, or seeding a fresh one.
+  // "Write tests" / "Build automation" give the agent the job, then show it.
+  // The prompt lands in the panel's composer for the user to send — see
+  // api.codingAgent.handOffTask. Navigating is not conditional on the
+  // hand-off: a panel with an empty box is recoverable, being left on this
+  // tab wondering what happened is not.
   const onStartCanned = (kind: 'write-tests' | 'automation') => {
-    sendPrompt(copy, bp, kind).catch((err) => {
-      toast.error(`Failed to hand the task to the agent: ${String(err)}`);
+    api.codingAgent.handOffTask(copy, bp, kind).catch((err: unknown) => {
+      toast.error(`Could not hand the task to the agent: ${String(err)}`);
     });
     onShowAgents();
   };

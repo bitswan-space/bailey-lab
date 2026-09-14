@@ -34,6 +34,12 @@ export default defineConfig({
     port: VITE_PORT,
     strictPort: true,
     allowedHosts: VITE_ALLOWED_HOSTS,
+    // The hosted Claude sidebar runs in a sandboxed frame with an opaque
+    // origin, so its module-script fetch is cross-origin and preflighted.
+    // Vite's own CORS middleware answers that OPTIONS without an
+    // Access-Control-Allow-Origin for `null`, which blocks the bundle; turning
+    // it off lets the preflight reach the Fastify route that does allow it.
+    cors: false,
     // HMR through the Bailey protected ingress: the browser loads this app on
     // the inner host over TLS (443), so pin vite's HMR client to the public
     // wss endpoint (wss://<inner-host>:443/) rather than letting it guess the

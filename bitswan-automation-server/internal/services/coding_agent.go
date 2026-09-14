@@ -92,12 +92,40 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 	if sshPubKey != "" {
 		envVars = append(envVars, "EDITOR_SSH_PUBLIC_KEY="+sshPubKey)
 	}
+	// Pass an alternate Claude endpoint through to the agent when the daemon was
+	// started with one. Unset in production, so nothing changes there; the e2e
+	// sets it to a mock Anthropic API on the <ws>-agent network so the
+	// walkthrough can drive a real agent conversation with no real credentials
+	// and no outbound network (see e2e/mock-anthropic/).
+	for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+		if v := os.Getenv(key); v != "" {
+			envVars = append(envVars, key+"="+v)
+		}
+	}
+
+	// The pinned Claude Code version the entrypoint installs at startup, when an
+	// operator overrode the image default. Must stay in step with the dashboard's
+	// extension pin (services/dashboard.go) — the extension host is coupled to a
+	// specific Claude Code build. Unset ⇒ absent, so the image's own pin wins.
+	if v := os.Getenv("BITSWAN_CLAUDE_CODE_VERSION"); v != "" {
+		envVars = append(envVars, "CLAUDE_CODE_VERSION="+v)
+	}
 
 	volumes := []interface{}{
 		// Each agent session works in its own copy at /workspace/copies/<name>.
 		wsVolume("copies", "/workspace/copies"),
 		wsVolume("coding-agent-home", "/home/agent"),
 		wsVolume("coding-agent-sessions", "/var/log/agent-sessions"),
+		// Per-user Claude Code config dirs, shared with the dashboard container
+		// (services/dashboard.go mounts the same subpath at the same path).
+		// Claude Code writes each conversation to
+		// $CLAUDE_CONFIG_DIR/projects/<cwd>/<uuid>.jsonl and the sidebar's
+		// extension host lists a BP's history by reading that directory. The
+		// CLI runs here, the extension runs there — so unless both see one
+		// directory the panel shows no history and can resume nothing.
+		// agent-session-wrapper picks this up and falls back to the old
+		// in-container location when it is absent.
+		wsVolume("claude-configs", "/claude-config"),
 	}
 
 	// Dev mode: mount source files directly into the container. The dev source
