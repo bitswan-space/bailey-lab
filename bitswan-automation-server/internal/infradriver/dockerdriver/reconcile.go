@@ -45,7 +45,12 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 	report("networks", "Ensuring stage networks...")
 	for _, realm := range []string{"dev", "staging", "production"} {
 		net := wctx.WorkspaceName + "-" + realm
-		if _, err := docker.EnsureDockerNetwork(net, false); err != nil {
+		if _, err := docker.EnsureDockerNetworkSpec(docker.NetworkSpec{
+			Name:      net,
+			Role:      docker.RoleStage,
+			Workspace: wctx.WorkspaceName,
+			Stage:     realm,
+		}, false); err != nil {
 			return fmt.Errorf("ensure network %s: %w", net, err)
 		}
 	}

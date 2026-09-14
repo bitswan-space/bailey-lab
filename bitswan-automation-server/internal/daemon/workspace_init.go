@@ -102,14 +102,21 @@ func (s *Server) runWorkspaceInit(req WorkspaceInitRequest, confirmCh <-chan str
 	}
 
 	// Init bitswan network
-	if _, err := docker.EnsureDockerNetwork("bitswan_network", verbose); err != nil {
+	if _, err := docker.EnsureDockerNetworkSpec(docker.NetworkSpec{
+		Name: "bitswan_network",
+		Role: docker.RolePlatform,
+	}, verbose); err != nil {
 		return err
 	}
 	// Dedicated per-workspace agent↔gitops bridge. The coding agent joins ONLY
 	// this network (never bitswan_network), so it can reach gitops's
 	// authenticated API/git but nothing else on the control-plane inner ring.
 	// Created up front because the gitops compose now declares it as external.
-	if _, err := docker.EnsureDockerNetwork(workspaceName+"-agent", verbose); err != nil {
+	if _, err := docker.EnsureDockerNetworkSpec(docker.NetworkSpec{
+		Name:      workspaceName + "-agent",
+		Role:      docker.RoleAgent,
+		Workspace: workspaceName,
+	}, verbose); err != nil {
 		return err
 	}
 

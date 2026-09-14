@@ -238,10 +238,13 @@ func startDaemonContainer(startMessage, successMessage string) error {
 
 	if !networkExists {
 		fmt.Println("Creating BitSwan Docker network...")
-		createNetworkCmd := exec.Command("docker", "network", "create", networkName)
-		createNetworkCmd.Stdout = os.Stdout
-		createNetworkCmd.Stderr = os.Stderr
-		if err := createNetworkCmd.Run(); err != nil {
+		// Through EnsureDockerNetworkSpec so the daemon's own network comes out of
+		// Bailey's address range like every other one, rather than taking a /16
+		// from Docker's default pools.
+		if _, err := docker.EnsureDockerNetworkSpec(docker.NetworkSpec{
+			Name: networkName,
+			Role: docker.RolePlatform,
+		}, true); err != nil {
 			// Network might have been created by another process, check again
 			networkExists, checkErr := checkNetworkExists(networkName)
 			if checkErr != nil || !networkExists {
