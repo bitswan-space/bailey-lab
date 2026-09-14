@@ -430,7 +430,11 @@ func gitopsContainerFilterArgs(workspaceName string) []string {
 // a workspace whose gitops has not yet been re-upped onto the new network.
 func (c *CodingAgentService) EnsureAgentNetwork() error {
 	net := AgentNetworkName(c.WorkspaceName)
-	if _, err := docker.EnsureDockerNetwork(net, false); err != nil {
+	if _, err := docker.EnsureDockerNetworkSpec(docker.NetworkSpec{
+		Name:      net,
+		Role:      docker.RoleAgent,
+		Workspace: c.WorkspaceName,
+	}, false); err != nil {
 		return fmt.Errorf("failed to ensure agent network %q: %w", net, err)
 	}
 	// Find the gitops container — and ONLY gitops (see gitopsContainerFilterArgs

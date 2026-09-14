@@ -8,6 +8,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/aoc"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
+	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
 	"gopkg.in/yaml.v3"
@@ -17,6 +18,18 @@ import (
 // workspace's docker-compose.yml. `bitswan workspace update` saves the current
 // compose here before regenerating; `bitswan rollback` restores it.
 const composeRollbackSuffix = ".rollback"
+
+// ensureAgentNetwork creates the workspace's agent↔gitops bridge if it is missing,
+// from Bailey's own address range. Best-effort by design at these call sites: a
+// genuine failure surfaces on the compose up that follows ("network not found"),
+// which is a better place to report it than a rollback half-way through.
+func ensureAgentNetwork(workspaceName string) {
+	_, _ = docker.EnsureDockerNetworkSpec(docker.NetworkSpec{
+		Name:      workspaceName + "-agent",
+		Role:      docker.RoleAgent,
+		Workspace: workspaceName,
+	}, false)
+}
 
 func workspaceDeploymentDir(workspaceName string) string {
 	return filepath.Join(os.Getenv("HOME"), ".config", "bitswan", "workspaces", workspaceName, "deployment")
@@ -84,7 +97,7 @@ func RollbackWorkspaceDeployment(workspaceName string) error {
 	}
 	// The restored compose declares the <ws>-agent bridge external; make sure it
 	// exists before bringing gitops back up. Idempotent.
-	_ = exec.Command("docker", "network", "create", workspaceName+"-agent").Run()
+	ensureAgentNetwork(workspaceName)
 	upCmd := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--remove-orphans")
 	upCmd.Dir = deployDir
 	upCmd.Stdout = os.Stdout
@@ -127,7 +140,7 @@ func RestoreWorkspaceComposeAndRedeploy(workspaceName, composeContent string) er
 	}
 	// The restored compose declares the <ws>-agent bridge external; make sure it
 	// exists before bringing gitops back up. Idempotent.
-	_ = exec.Command("docker", "network", "create", workspaceName+"-agent").Run()
+	ensureAgentNetwork(workspaceName)
 	upCmd := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--remove-orphans")
 	upCmd.Dir = deployDir
 	upCmd.Stdout = os.Stdout
@@ -292,7 +305,7 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 	// (which declares <ws>-agent as external) comes up. Idempotent — this also
 	// migrates workspaces created before the agent was moved off bitswan_network.
 	// A genuine failure surfaces on the compose up below ("network not found").
-	_ = exec.Command("docker", "network", "create", workspaceName+"-agent").Run()
+	ensureAgentNetwork(workspaceName)
 
 	fmt.Println("Starting GitOps containers...")
 	upCmd := exec.Command("docker", "compose", "-p", projectName, "up", "-d", "--remove-orphans")

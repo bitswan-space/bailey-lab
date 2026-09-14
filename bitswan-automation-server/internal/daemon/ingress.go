@@ -833,7 +833,12 @@ func initWorkspaceTraefik(workspaceName, domain string, verbose bool) (bool, err
 		workspaceName + "-production",
 	}
 	for _, net := range stageNetworks {
-		if _, err := docker.EnsureDockerNetwork(net, verbose); err != nil {
+		if _, err := docker.EnsureDockerNetworkSpec(docker.NetworkSpec{
+			Name:      net,
+			Role:      docker.RoleStage,
+			Workspace: workspaceName,
+			Stage:     strings.TrimPrefix(net, workspaceName+"-"),
+		}, verbose); err != nil {
 			return false, fmt.Errorf("failed to ensure stage network %s: %w", net, err)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -85,8 +86,23 @@ func checkNetworkExists(networkName string) (bool, error) {
 	return false, nil
 }
 
-// EnsureDockerNetwork ensures a Docker network exists, creating it if necessary
+// EnsureDockerNetwork ensures a Docker network exists, creating it if necessary.
+// The network still comes out of Bailey's address range, but with no role to size
+// or label it by; prefer EnsureDockerNetworkSpec, which records what it is for.
 func EnsureDockerNetwork(name string, verbose bool) (bool, error) {
+	return EnsureDockerNetworkSpec(NetworkSpec{Name: name}, verbose)
+}
+
+// createAttempts bounds the retry below. Two concurrent creates can pick the same
+// free block; Docker rejects the loser, and re-reading the daemon's networks is
+// enough to settle it. More than a couple of rounds means something other than a
+// race is wrong.
+const createAttempts = 4
+
+// EnsureDockerNetworkSpec ensures a Docker network exists, creating it from
+// Bailey's own address range (see subnets.go) and labelling it with what it is for.
+func EnsureDockerNetworkSpec(spec NetworkSpec, verbose bool) (bool, error) {
+	name := spec.Name
 	exists, err := checkNetworkExists(name)
 	if err != nil {
 		return false, fmt.Errorf("error checking network %s: %w", name, err)
@@ -100,13 +116,41 @@ func EnsureDockerNetwork(name string, verbose bool) (bool, error) {
 	if verbose {
 		fmt.Printf("Creating Docker network '%s'...\n", name)
 	}
-	cmd := exec.Command("docker", "network", "create", name)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if verbose {
-		cmd.Stdout = os.Stdout
-	}
-	if err := cmd.Run(); err != nil {
+
+	var lastErr error
+	var refused []*net.IPNet
+	for attempt := 0; attempt < createAttempts; attempt++ {
+		args := []string{"network", "create"}
+		// A subnet we choose keeps this create off Docker's default address pools.
+		// If we cannot choose one — no daemon to ask, a base that is full or
+		// misconfigured — fall through to an unqualified create, which is what
+		// Bailey always did: a network from the default pools beats no network,
+		// and pool exhaustion still reports itself below.
+		subnet, subnetErr := nextFreeSubnet(spec.Role, refused)
+		if subnetErr == nil {
+			args = append(args, "--subnet", subnet.String())
+		} else if verbose {
+			fmt.Printf("Falling back to Docker's own address pools for '%s': %v\n", name, subnetErr)
+		}
+		for _, label := range spec.Labels() {
+			args = append(args, "--label", label)
+		}
+		args = append(args, name)
+
+		cmd := exec.Command("docker", args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if verbose {
+			cmd.Stdout = os.Stdout
+		}
+		err := cmd.Run()
+		if err == nil {
+			if verbose {
+				fmt.Printf("Docker network '%s' created!\n", name)
+			}
+			return true, nil
+		}
+
 		out := stderr.String()
 		if verbose {
 			fmt.Fprint(os.Stderr, out)
@@ -117,15 +161,31 @@ func EnsureDockerNetwork(name string, verbose bool) (bool, error) {
 		if AddressPoolsExhausted(out) {
 			return false, NewAddressPoolsExhaustedError(fmt.Sprintf("create Docker network %q", name), out, err)
 		}
+		if subnetErr == nil && subnetOverlap(out) {
+			// Someone took the block between our read and our create. Re-read,
+			// and rule this one out so the next attempt cannot pick it again.
+			refused = append(refused, subnet)
+			lastErr = fmt.Errorf("create Docker network %q: %s", name, strings.TrimSpace(out))
+			continue
+		}
 		if msg := strings.TrimSpace(out); msg != "" {
 			return false, fmt.Errorf("create Docker network %q: %s", name, msg)
 		}
 		return false, fmt.Errorf("create Docker network %q: %w", name, err)
 	}
-	if verbose {
-		fmt.Printf("Docker network '%s' created!\n", name)
+	if lastErr == nil {
+		// Unreachable while every `continue` above records why. Belt and braces:
+		// a false with no error is the swallowed failure this package exists to
+		// stop returning.
+		lastErr = fmt.Errorf("create Docker network %q: gave up after %d attempts", name, createAttempts)
 	}
-	return true, nil
+	return false, lastErr
+}
+
+// subnetOverlap reports whether Docker turned a create down because the subnet we
+// asked for is already spoken for.
+func subnetOverlap(output string) bool {
+	return strings.Contains(strings.ToLower(output), "overlaps")
 }
 
 // PromptUser prompts the user with a yes/no question

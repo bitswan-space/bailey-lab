@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 )
 
 // The daemon owns a pair of shared, read-through PACKAGE PROXIES that every
@@ -113,7 +115,10 @@ func startBuildProxies() {
 	go func() {
 		// Dedicated network (idempotent — ignore "already exists" / pool errors;
 		// if it can't be created the proxies won't come up and builds go direct).
-		_ = exec.Command("docker", "network", "create", buildProxyNetwork).Run()
+		_, _ = docker.EnsureDockerNetworkSpec(docker.NetworkSpec{
+			Name: buildProxyNetwork,
+			Role: docker.RoleInfra,
+		}, false)
 
 		// Go module proxy (Athens). ATHENS_STORAGE_TYPE=disk REQUIRES an existing
 		// storage root — the image default is a `/path/on/disk` placeholder that
