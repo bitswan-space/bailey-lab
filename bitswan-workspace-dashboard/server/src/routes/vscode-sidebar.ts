@@ -3,11 +3,13 @@ import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { emailFromRequest } from '../lib/user.js';
 import { isValidBpId, isValidCopyName } from '../services/workspace.js';
+import { isSessionKind, promptForKind } from '../services/agent-prompts.js';
 import {
   ASSET_BASE_PLACEHOLDER,
   extensionPath,
   openSidebar,
   pageFor,
+  sendPrompt,
   sidebarEnabled,
   startSidebarHostReaper,
   webviewStateKey,
@@ -79,6 +81,46 @@ export function registerVscodeSidebarRoutes(
         return reply.send(html);
       } catch (err) {
         app.log.warn({ err, ...s }, 'sidebar activate failed');
+        return reply.code(500).send({ error: String(err) });
+      }
+    },
+  );
+
+  /**
+   * Hand the panel a task: Sync, Build automation, Write tests, Merge back.
+   *
+   * These buttons live in other tabs and used to type their prompt into the
+   * terminal session before switching to it. The panel has no terminal, so the
+   * text goes into its composer instead and the user presses enter — which is
+   * what the extension's own hand-off does everywhere it appears.
+   *
+   * The caller navigates to the Coding Agent tab regardless of what this
+   * returns; `delivered: false` means the prompt is waiting for the panel to
+   * come up, not that anything went wrong.
+   */
+  app.post<{ Body: { copy?: string; bp?: string; kind?: string; parent?: string } }>(
+    `${PREFIX}/prompt`,
+    async (req, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      if (!sidebarEnabled()) return reply.code(503).send({ error: 'sidebar not available' });
+      const body = req.body ?? {};
+      const s = scope(body);
+      if (!s) return reply.code(400).send({ error: 'copy and bp are required' });
+      if (!isSessionKind(body.kind)) return reply.code(400).send({ error: 'unknown kind' });
+      // A parent is a copy name — it becomes a branch name in the prompt text.
+      const parent = body.parent?.trim();
+      if (parent !== undefined && parent !== '' && !isValidCopyName(parent)) {
+        return reply.code(400).send({ error: 'invalid parent' });
+      }
+      const text = promptForKind(body.kind, parent || undefined);
+      if (!text) return reply.code(400).send({ error: `kind ${body.kind} has no canned prompt` });
+      const email = await emailFromRequest(req, app.log);
+      if (!email) return reply.code(403).send({ error: 'no verified identity' });
+
+      try {
+        return await sendPrompt({ email, ...s, workspaceRoot, text });
+      } catch (err) {
+        app.log.warn({ err, ...s, kind: body.kind }, 'sidebar prompt hand-off failed');
         return reply.code(500).send({ error: String(err) });
       }
     },

@@ -22,7 +22,7 @@ import { useRequirements } from '@/hooks/useRequirements';
 import { RequirementsTable } from './RequirementsTable';
 import { useUrlEnum, useUrlParam } from '@/lib/urlState';
 import { cn } from '@/lib/utils';
-import type { Requirement, ReqStatus } from '@/lib/api';
+import { api, type Requirement, type ReqStatus } from '@/lib/api';
 
 interface Props {
   copy: string;
@@ -260,10 +260,15 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  // "Write tests" / "Build automation" open the agent. They used to type a
-  // canned prompt into the terminal session first; the hosted sidebar exposes
-  // no command for injecting one, so they navigate and the user asks.
-  const onStartCanned = (_kind: 'write-tests' | 'automation') => {
+  // "Write tests" / "Build automation" give the agent the job, then show it.
+  // The prompt lands in the panel's composer for the user to send — see
+  // api.codingAgent.handOffTask. Navigating is not conditional on the
+  // hand-off: a panel with an empty box is recoverable, being left on this
+  // tab wondering what happened is not.
+  const onStartCanned = (kind: 'write-tests' | 'automation') => {
+    api.codingAgent.handOffTask(copy, bp, kind).catch((err: unknown) => {
+      toast.error(`Could not hand the task to the agent: ${String(err)}`);
+    });
     onShowAgents();
   };
 

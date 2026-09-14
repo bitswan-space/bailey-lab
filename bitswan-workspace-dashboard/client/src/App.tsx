@@ -492,15 +492,14 @@ function Shell() {
         if (res.status === 'needs_rebase') {
           toast.error(`${bpLabelForCopy}: ${res.message}`, { id, duration: 10000 });
           // Hand off to the Coding Agent on this copy to resolve the conflict.
-          // HANDING OFF MEANS GIVING IT THE TASK. Opening the tab was all this
-          // did, so the user arrived at an agent that had been told nothing,
-          // sitting at an empty prompt, with no way to know that finishing a
-          // rebase was now their job to describe. Both hand-offs sent a prompt
-          // until the terminal session layer was removed.
-          // REGRESSION, KNOWINGLY TAKEN: the prompt hand-off went with the
-          // terminal session layer. This opens the tab and tells the agent
-          // nothing, which is the state the paragraph above was written about.
-          // Restoring it needs a way to seed the hosted sidebar's composer.
+          // HANDING OFF MEANS GIVING IT THE TASK: the rebase prompt goes into
+          // the panel's composer, and the user sends it. Navigating happens
+          // either way — an agent with an empty box is a worse outcome than
+          // this, but being left on this tab with a failed pull and no idea
+          // where the work went is worse still.
+          api.codingAgent.handOffTask(copyName, bpDir, 'sync').catch((err: unknown) => {
+            toast.error(`Could not hand the rebase to the agent: ${errorMessage(err)}`);
+          });
           setCopy(copyName);
           handleTab('agent');
           return;
@@ -783,10 +782,14 @@ function Shell() {
         unlock();
         toast.error(`“${label}”: ${res.message}`, { id, duration: 10000 });
         if (bpId) {
-          // The agent works inside the experiment, rebasing it onto the
-          // parent branch; the merge fast-forwards once it's done. The prompt
-          // that used to describe that task went with the terminal session
-          // layer, so the user has to ask for it themselves for now.
+          // The agent works inside the experiment, rebasing it onto the parent
+          // branch; the merge fast-forwards once it's done. The prompt saying
+          // so goes into the panel's composer for the user to send.
+          api.codingAgent
+            .handOffTask(name, bpId, 'merge-parent', parent)
+            .catch((err: unknown) => {
+              toast.error(`Could not hand the merge to the agent: ${errorMessage(err)}`);
+            });
         }
         handleTab('agent');
         return;

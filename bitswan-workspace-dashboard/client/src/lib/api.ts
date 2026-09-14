@@ -1478,6 +1478,31 @@ export const api = {
     return content;
   },
 
+  codingAgent: {
+    /**
+     * Hand the Coding Agent a task from another tab — Sync, Build automation,
+     * Write tests, Merge back.
+     *
+     * The prompt text lives on the server; this names the job and the scope.
+     * It lands in the panel's composer, where the user presses enter: the
+     * hosted panel has no terminal to type into, and the extension's own
+     * hand-off prefills rather than sends. `delivered: false` means the panel
+     * is not up yet and the prompt is waiting for it — navigate anyway.
+     */
+    handOffTask: (
+      copy: string,
+      bp: string,
+      kind: 'sync' | 'merge-parent' | 'write-tests' | 'automation',
+      parent?: string,
+    ) =>
+      postJson<{ delivered: boolean }>('/api/coding-agent/sidebar/prompt', {
+        copy,
+        bp,
+        kind,
+        ...(parent ? { parent } : {}),
+      }),
+  },
+
   copyFiles: {
     tree: (name: string) =>
       getJson<FileTreeNode[]>(`/api/copies/${encodeURIComponent(name)}/files`),

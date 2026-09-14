@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const WORKER = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../vscode-host/worker.js');
 const READY_TIMEOUT_MS = 90_000;
+const PROMPT_TIMEOUT_MS = 15_000;
 const IDLE_EVICT_MS = 30 * 60_000;
 const REAP_INTERVAL_MS = 5 * 60_000;
 
@@ -287,6 +288,8 @@ interface Host {
   ready: Promise<void>;
   listeners: Map<string, Set<(payload: unknown) => void>>;
   lastUsedAt: number;
+  /** A task prompt waiting for a page to show it in. See sendPrompt. */
+  pendingPrompt?: string;
 }
 
 const hosts = new Map<string, Host>();
@@ -521,6 +524,9 @@ export async function openSidebar(opts: {
     assetUris: opened.assetUris,
     onToWebview: (listener) => {
       host.listeners.get(id)?.add(listener);
+      // A page is now listening, so a prompt parked before one was can be
+      // delivered. This is the flush half of sendPrompt.
+      flushPendingPrompt(host);
       return () => {
         host.listeners.get(id)?.delete(listener);
       };
@@ -534,6 +540,90 @@ export async function openSidebar(opts: {
       if (host.child.connected) host.child.send({ t: 'close', id });
     },
   };
+}
+
+/**
+ * Whether any page is currently listening to this host.
+ *
+ * Not the same as "a page has opened": /view registers an id, the websocket
+ * that carries messages to it arrives a moment later. A prompt delivered in
+ * between would be posted by the extension to a webview nothing is reading,
+ * and silently lost.
+ */
+function hasListeningPage(host: Host): boolean {
+  for (const set of host.listeners.values()) if (set.size > 0) return true;
+  return false;
+}
+
+function deliverPrompt(host: Host, text: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (!host.child.connected) {
+      reject(new Error('the extension host is gone'));
+      return;
+    }
+    const id = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      host.child.off('message', onMessage);
+      reject(new Error('the extension did not answer the prompt hand-off'));
+    }, PROMPT_TIMEOUT_MS);
+    const onMessage = (m: { t?: string; id?: string; message?: string }) => {
+      if (m?.id !== id) return;
+      clearTimeout(timer);
+      host.child.off('message', onMessage);
+      if (m.t === 'prompted') resolve();
+      else if (m.t === 'promptFailed') reject(new Error(m.message ?? 'prompt hand-off failed'));
+    };
+    host.child.on('message', onMessage);
+    host.lastUsedAt = Date.now();
+    host.child.send({ t: 'prompt', id, text });
+  });
+}
+
+function flushPendingPrompt(host: Host): void {
+  const text = host.pendingPrompt;
+  if (text === undefined) return;
+  host.pendingPrompt = undefined;
+  // Nothing upstream is waiting on this any more — the request that queued it
+  // returned as soon as the prompt was accepted. Log rather than throw into a
+  // listener registration.
+  deliverPrompt(host, text).catch((err: unknown) => {
+    console.warn('[sidebar] could not hand the queued task prompt to the panel', err);
+  });
+}
+
+/**
+ * Put a task prompt in the panel's composer.
+ *
+ * The dashboard has buttons that give the agent a job — Sync, Build
+ * automation, Write tests — and handing one over used to mean typing it into
+ * the terminal session. The hosted panel has no terminal, so this uses the
+ * extension's own hand-off instead: `claude-vscode.editor.open`, a contributed
+ * command, which opens a new conversation with the text already in the input.
+ * It prefills rather than sends, which is the extension's own behaviour for
+ * this everywhere; the user presses enter.
+ *
+ * Queued when no page is listening yet, because the click that starts a task
+ * usually happens on a different tab and the panel is a navigation away. The
+ * extension parks such a hand-off too, but drops it after 15 seconds — far
+ * less than a cold host's first activation — so the wait is held here instead,
+ * where it can be flushed the moment a page attaches. An unclaimed prompt dies
+ * with the host, which idles out after half an hour.
+ */
+export async function sendPrompt(opts: {
+  email: string;
+  copy: string;
+  bp: string;
+  workspaceRoot: string;
+  text: string;
+}): Promise<{ delivered: boolean }> {
+  const host = hostFor(opts);
+  await host.ready;
+  if (!hasListeningPage(host)) {
+    host.pendingPrompt = opts.text;
+    return { delivered: false };
+  }
+  await deliverPrompt(host, opts.text);
+  return { delivered: true };
 }
 
 export function evictIdleSidebarHosts(now = Date.now()): number {

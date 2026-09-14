@@ -95,3 +95,41 @@ export const BUILD_AUTOMATION_PROMPT =
   '`bitswan-coding-agent requirements update --id <id> --status <pass|fail>` as you go. ' +
   'Otherwise implement what the README describes and propose requirements for it.';
 
+/**
+ * The jobs the dashboard can hand the agent. 'claude' is a plain session with
+ * no canned prompt at all.
+ */
+export type SessionKind = 'claude' | 'sync' | 'merge-parent' | 'write-tests' | 'automation';
+
+export function isSessionKind(value: unknown): value is SessionKind {
+  return (
+    value === 'claude' ||
+    value === 'sync' ||
+    value === 'merge-parent' ||
+    value === 'write-tests' ||
+    value === 'automation'
+  );
+}
+
+/**
+ * The canned prompt each session kind carries. Used to seed a fresh terminal
+ * conversation (embedded into the launch command by `buildAutoCmd`), to serve
+ * `/api/coding-agent/prompt`, and to fill the hosted panel's composer when a
+ * button in another tab hands over a task.
+ *
+ * Plain 'claude' sessions have NO prompt — the agent's standing guidance
+ * comes from the CLAUDE.md baked into the coding-agent image, which Claude
+ * loads on every session (fresh and resumed alike).
+ *
+ * `'merge-parent'` carries no FIXED prompt: its text is parameterized by
+ * `parent` (the experiment's parent copy, the branch it rebases onto), so
+ * `parent` is required for it — see `mergeBackPrompt`. Missing it yields no
+ * prompt, same as any kind with nothing to say.
+ */
+export function promptForKind(kind: SessionKind, parent?: string): string | undefined {
+  if (kind === 'sync') return SYNC_PROMPT;
+  if (kind === 'merge-parent') return parent ? mergeBackPrompt(parent) : undefined;
+  if (kind === 'write-tests') return WRITE_TESTS_PROMPT;
+  if (kind === 'automation') return BUILD_AUTOMATION_PROMPT;
+  return undefined;
+}

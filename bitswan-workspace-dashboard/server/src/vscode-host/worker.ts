@@ -15,7 +15,12 @@ interface CloseMsg {
   t: 'close';
   id: string;
 }
-type Inbound = OpenMsg | ToExtMsg | CloseMsg;
+interface PromptMsg {
+  t: 'prompt';
+  id: string;
+  text: string;
+}
+type Inbound = OpenMsg | ToExtMsg | CloseMsg | PromptMsg;
 
 const extensionPath = process.env.CLAUDE_EXTENSION_PATH ?? '';
 const workspaceFolder = process.env.SIDEBAR_WORKSPACE_FOLDER ?? process.cwd();
@@ -34,9 +39,18 @@ const workspaceFolder = process.env.SIDEBAR_WORKSPACE_FOLDER ?? process.cwd();
  * rather than a second one per UI.
  */
 function settingsForHost(): Record<string, unknown> {
+  const settings: Record<string, unknown> = {
+    // Where the extension opens a conversation when something asks it to. A
+    // sidebar is the only surface this host has — it registers no editor
+    // panels, and `window.createWebviewPanel` is a stub here — so anything
+    // that routed to a panel would open into nothing at all. It is also what
+    // makes `claude-vscode.editor.open` deliver a task prompt to the sidebar
+    // (see the `prompt` message below).
+    'claudeCode.preferredLocation': 'sidebar',
+  };
   const wrapper = process.env.SIDEBAR_CLAUDE_WRAPPER;
-  if (!wrapper) return {};
-  return { 'claudeCode.claudeProcessWrapper': wrapper };
+  if (wrapper) settings['claudeCode.claudeProcessWrapper'] = wrapper;
+  return settings;
 }
 
 function send(message: unknown): void {
@@ -66,6 +80,19 @@ interface Sidebar {
   assetUris: unknown;
 }
 
+/**
+ * The extension's own hand-off for "open a conversation with this text in it".
+ * It is a contributed command (package.json `contributes.commands`), which
+ * makes it the most stable surface available for this: the webview protocol
+ * underneath it is private and unversioned.
+ *
+ * It prefills the composer rather than sending — the webview does
+ * `setInputText(initialPrompt)` — so the user still presses enter on a task
+ * that is about to rebase their branch. The terminal agent this replaced typed
+ * and submitted; matching that would mean driving the private protocol.
+ */
+const EDITOR_OPEN_COMMAND = 'claude-vscode.editor.open';
+
 let sidebar: Promise<Sidebar> | undefined;
 let resolved: Sidebar | undefined;
 const attached = new Set<string>();
@@ -73,7 +100,7 @@ const attached = new Set<string>();
 function ensureSidebar(resourceBase: string): Promise<Sidebar> {
   if (!sidebar) {
     const pending = (async (): Promise<Sidebar> => {
-      const registration = await activation;
+      const { registration } = await activation;
       const view = await resolveWebviewView(registration, { extensionPath, resourceBase });
       const assetUris = await prefetchAssetUris(view);
       // Registered once, for the life of the view: every attached page gets
@@ -132,7 +159,7 @@ const activation = activateExtension({
       host.state.webviewViewProviders.find((r) => r.viewId === 'claudeVSCodeSidebar') ??
       host.state.webviewViewProviders[0];
     if (!registration) throw new Error('extension registered no webview view');
-    return registration;
+    return { host, registration };
   },
 );
 
@@ -162,6 +189,27 @@ process.on('message', (raw: Inbound) => {
     if (raw.t === 'close') {
       // The page went away; the view and its conversation stay.
       attached.delete(raw.id);
+      return;
+    }
+    if (raw.t === 'prompt') {
+      try {
+        const { host } = await activation;
+        if (!resolved) throw new Error('no sidebar view is open to put a prompt in');
+        const open = host.state.commands.get(EDITOR_OPEN_COMMAND);
+        if (typeof open !== 'function') {
+          throw new Error(`the extension registered no ${EDITOR_OPEN_COMMAND}`);
+        }
+        // (sessionId, initialPrompt, viewColumn, sessionGroupId, fullEditor, opts).
+        // No session id: start a new conversation. `honor-preferred-location`
+        // is what sends it to the sidebar rather than an editor panel, and
+        // settingsForHost above is what makes the sidebar the preference.
+        await open(undefined, raw.text, undefined, undefined, false, {
+          programmatic: 'honor-preferred-location',
+        });
+        send({ t: 'prompted', id: raw.id });
+      } catch (err) {
+        send({ t: 'promptFailed', id: raw.id, message: String((err as Error)?.message ?? err) });
+      }
     }
   })();
 });
