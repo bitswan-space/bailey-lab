@@ -20,6 +20,25 @@ type Inbound = OpenMsg | ToExtMsg | CloseMsg;
 const extensionPath = process.env.CLAUDE_EXTENSION_PATH ?? '';
 const workspaceFolder = process.env.SIDEBAR_WORKSPACE_FOLDER ?? process.cwd();
 
+/**
+ * Settings handed to the extension at activation.
+ *
+ * `claudeProcessWrapper` moves the agent process out of this container and into
+ * the coding-agent one, where `git`, `bitswan-coding-agent` and the gitops
+ * credentials actually live (see ../../claude-process-wrapper). Without it the
+ * panel runs an agent that can edit BP files and do nothing else with them.
+ *
+ * When the wrapper is set the far side owns the Claude identity — the agent's
+ * session wrapper derives CLAUDE_CONFIG_DIR from the verified email, exactly as
+ * the terminal agent did — so the user has one Claude account per workspace
+ * rather than a second one per UI.
+ */
+function settingsForHost(): Record<string, unknown> {
+  const wrapper = process.env.SIDEBAR_CLAUDE_WRAPPER;
+  if (!wrapper) return {};
+  return { 'claudeCode.claudeProcessWrapper': wrapper };
+}
+
 function send(message: unknown): void {
   process.send?.(message);
 }
@@ -52,7 +71,11 @@ function prefetchAssetUris(view: ResolvedWebview): Promise<unknown> {
   });
 }
 
-const activation = activateExtension({ extensionPath, workspaceFolder }).then(
+const activation = activateExtension({
+  extensionPath,
+  workspaceFolder,
+  settings: settingsForHost(),
+}).then(
   (host) => {
     host.state.onOpenExternal = (url) => send({ t: 'openExternal', url });
     const registration =

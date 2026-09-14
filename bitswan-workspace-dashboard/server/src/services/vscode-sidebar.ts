@@ -13,8 +13,28 @@ export function extensionPath(): string | undefined {
   return process.env.CLAUDE_EXTENSION_PATH || undefined;
 }
 
+/**
+ * Whether the sidebar can actually be served.
+ *
+ * The env var alone is not enough: the daemon sets CLAUDE_EXTENSION_PATH
+ * unconditionally, and the extension is downloaded into that directory by the
+ * container's entrypoint. Between "the daemon wired it up" and "the download
+ * finished" the path names a directory that is empty or absent, and reporting
+ * `available: true` there is how the Coding Agent tab came to render a bare
+ * `{"error":"sidebar not available"}` — the status endpoint promised a panel
+ * the /view route then refused.
+ *
+ * Stat the tree instead. extension.js is the file the host actually requires
+ * (see vscode-host/host.ts), so its presence is the honest signal.
+ */
 export function sidebarEnabled(): boolean {
-  return Boolean(extensionPath());
+  const dir = extensionPath();
+  if (!dir) return false;
+  try {
+    return fs.statSync(path.join(dir, 'extension.js')).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function configRoot(): string {
@@ -237,6 +257,76 @@ function hostKey(opts: { email: string; copy: string; bp: string }): string {
   return `${opts.email} ${opts.copy} ${opts.bp}`;
 }
 
+const WRAPPER = '/usr/local/bin/claude-process-wrapper';
+
+/**
+ * The bundled CLI the extension would launch if it ever stopped honouring
+ * claudeProcessWrapper. It must never be runnable in this container — see
+ * assertBundledClaudeDisarmed.
+ */
+function bundledClaudePath(ext: string): string {
+  return path.join(ext, 'resources', 'native-binary', 'claude');
+}
+
+/**
+ * Refuse to start a host while the extension's own `claude` is executable here.
+ *
+ * The agent runs in the coding-agent container, always. Not as a default — as
+ * an invariant. This container reaches the whole workspace: it holds
+ * BITSWAN_DEPLOY_SECRET, the workspace SSH key, every user's Claude credentials
+ * under /claude-config, and its own server bundle. The agent executes
+ * model-chosen shell commands, so running it here would put all of that one
+ * tool call away, and would undo the isolation the product is built on —
+ * routes/coding-agent.ts keeps the dashboard off the agent's network precisely
+ * because the agent runs untrusted code.
+ *
+ * The entrypoint takes the execute bit off at startup. This is the second half
+ * of that: if anything re-armed it, fail the panel rather than risk the
+ * extension spawning it. Failing closed is the point — a broken Coding Agent
+ * tab is a visible, fixable problem; an agent quietly running next to the
+ * deploy secret is not.
+ */
+export function assertBundledClaudeDisarmed(ext: string): void {
+  const binary = bundledClaudePath(ext);
+  let mode: number;
+  try {
+    mode = fs.statSync(binary).mode;
+  } catch {
+    // Absent is the safest state of all.
+    return;
+  }
+  if (mode & 0o111) {
+    throw new Error(
+      `refusing to start the agent: ${binary} is executable in the dashboard container. ` +
+        'Claude Code must only ever run in the coding-agent container. ' +
+        'Restart the dashboard to let its entrypoint remove the execute bit.',
+    );
+  }
+}
+
+/**
+ * Scope handed to claude-process-wrapper, which runs `claude` in the
+ * coding-agent container: identity (it keys the per-user Claude config dir and
+ * attributes commits) and which BP clone to land in.
+ */
+function agentExecEnv(opts: { email: string; copy: string; bp: string }): Record<string, string> {
+  const ws = process.env.BITSWAN_WORKSPACE_NAME ?? 'default';
+  return {
+    SIDEBAR_CLAUDE_WRAPPER: WRAPPER,
+    // Same target the terminal path used: the agent's sshd is reached through
+    // the raw TCP proxy gitops runs on :2222, because the dashboard is not on
+    // the agent's network. CODING_AGENT_HOST overrides both, for dev composes
+    // where the agent is directly reachable.
+    SIDEBAR_AGENT_SSH_HOST: process.env.CODING_AGENT_HOST ?? `${ws}-gitops`,
+    SIDEBAR_AGENT_SSH_PORT: process.env.CODING_AGENT_HOST
+      ? (process.env.CODING_AGENT_SSH_PORT ?? '22')
+      : '2222',
+    SIDEBAR_USER_EMAIL: opts.email,
+    SIDEBAR_COPY: opts.copy,
+    SIDEBAR_BP: opts.bp,
+  };
+}
+
 function spawnHost(opts: {
   email: string;
   copy: string;
@@ -245,6 +335,7 @@ function spawnHost(opts: {
 }): Host {
   const ext = extensionPath();
   if (!ext) throw new Error('CLAUDE_EXTENSION_PATH is not set');
+  assertBundledClaudeDisarmed(ext);
 
   const configDir = path.join(configRoot(), configDirNameFor(opts.email));
   fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
@@ -257,6 +348,12 @@ function spawnHost(opts: {
       CLAUDE_EXTENSION_PATH: ext,
       CLAUDE_CONFIG_DIR: configDir,
       SIDEBAR_WORKSPACE_FOLDER: path.join(opts.workspaceRoot, 'copies', opts.copy, opts.bp),
+      // The extension passes its own env straight through to whatever it
+      // launches, so these reach claude-process-wrapper as its environment.
+      // They are the scope the far side needs: identity (which keys the
+      // per-user Claude config dir and attributes commits) and which BP clone
+      // to land in.
+      ...agentExecEnv(opts),
     },
   });
 

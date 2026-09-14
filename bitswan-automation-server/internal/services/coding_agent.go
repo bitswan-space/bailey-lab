@@ -103,6 +103,14 @@ func (c *CodingAgentService) CreateDockerComposeWithDevMode(gitopsAgentSecret, c
 		}
 	}
 
+	// The pinned Claude Code version the entrypoint installs at startup, when an
+	// operator overrode the image default. Must stay in step with the dashboard's
+	// extension pin (services/dashboard.go) — the extension host is coupled to a
+	// specific Claude Code build. Unset ⇒ absent, so the image's own pin wins.
+	if v := os.Getenv("BITSWAN_CLAUDE_CODE_VERSION"); v != "" {
+		envVars = append(envVars, "CLAUDE_CODE_VERSION="+v)
+	}
+
 	volumes := []interface{}{
 		// Each agent session works in its own copy at /workspace/copies/<name>.
 		wsVolume("copies", "/workspace/copies"),

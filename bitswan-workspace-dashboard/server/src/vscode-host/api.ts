@@ -146,10 +146,23 @@ export interface HostState {
   messagesToUser: { level: string; message: string }[];
 }
 
-export function createHostState(workspaceFolder: string): HostState {
+/**
+ * `settings` seeds `workspace.getConfiguration`, keyed exactly as the extension
+ * asks for them — `claudeCode.claudeProcessWrapper`, not `claudeProcessWrapper`
+ * — because a section lookup prefixes the key (see configurationSection below).
+ *
+ * This is how the host configures the extension rather than patching it: the
+ * extension reads settings 36 times during activation, and the ones that matter
+ * to us (which executable to launch, whether to prompt for login) are all
+ * published, documented settings.
+ */
+export function createHostState(
+  workspaceFolder: string,
+  settings?: Record<string, unknown>,
+): HostState {
   return {
     workspaceFolder,
-    configuration: new Map(),
+    configuration: new Map(Object.entries(settings ?? {})),
     commands: new Map(),
     webviewViewProviders: [],
     messagesToUser: [],

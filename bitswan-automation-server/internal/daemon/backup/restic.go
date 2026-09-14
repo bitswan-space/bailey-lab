@@ -122,9 +122,24 @@ func (r *Restic) run(
 // (the container hostname changes across daemon recreations, and retention
 // groups by host,tags) and the series tags.
 func (r *Restic) BackupArgs(tags []string, paths ...string) []string {
+	return r.BackupArgsExcluding(tags, nil, paths...)
+}
+
+// BackupArgsExcluding is BackupArgs with --exclude paths, for trees that sit
+// inside a captured directory but are not workspace state — currently the
+// downloaded Claude Code extension, which is a large immutable third-party
+// artifact the dashboard re-fetches on demand.
+//
+// Callers pass absolute paths rather than patterns. restic treats a pattern
+// without a slash as "any file with this name, anywhere", which is exactly the
+// kind of exclude that silently eats something it was never meant to.
+func (r *Restic) BackupArgsExcluding(tags []string, excludes []string, paths ...string) []string {
 	args := []string{"backup", "--host", r.Target.ServerID}
 	for _, t := range tags {
 		args = append(args, "--tag", t)
+	}
+	for _, e := range excludes {
+		args = append(args, "--exclude", e)
 	}
 	return append(args, paths...)
 }

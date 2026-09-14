@@ -318,6 +318,13 @@ func startDaemonContainer(startMessage, successMessage string) error {
 		// e2e points it at a mock Anthropic API so the walkthrough can hold a real
 		// agent conversation with no credentials and no outbound network.
 		"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+		// Claude Code pins, forwarded on to both the coding-agent and the
+		// dashboard. BITSWAN_CLAUDE_CODE_VERSION overrides the version each
+		// container fetches at startup (they must match — the dashboard's
+		// extension host is coupled to a specific Claude Code build);
+		// BITSWAN_CLAUDE_EXTENSION_DIR points the dashboard at an unpacked copy
+		// an operator manages, instead of downloading one.
+		"BITSWAN_CLAUDE_CODE_VERSION",
 		"BITSWAN_CLAUDE_EXTENSION_DIR"} {
 		if v := os.Getenv(key); v != "" {
 			runArgs = append(runArgs, "-e", fmt.Sprintf("%s=%s", key, v))

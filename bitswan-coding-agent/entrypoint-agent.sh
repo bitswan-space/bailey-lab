@@ -29,6 +29,52 @@ if ! grep -q '^prefix=' /home/agent/.npmrc; then
     printf 'prefix=%s\n' "$CLAUDE_CODE_PREFIX" >> /home/agent/.npmrc
 fi
 
+# Install Claude Code at the pinned version.
+#
+# The image no longer bakes it in (see the Dockerfile: ~208 MB of Anthropic's
+# proprietary native binary that we must not redistribute), so it is fetched
+# here on first start into $CLAUDE_CODE_PREFIX — a persistent volume, so this
+# costs one download per workspace, not one per container start.
+#
+# This blocks sshd deliberately. Nothing upstream gates on agent readiness
+# (the dashboard's ssh path waits only for DNS), so a session arriving before
+# `claude` exists would just fail; better to come up a minute late than broken.
+CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-}"
+CLAUDE_PKG_JSON="$CLAUDE_CODE_PREFIX/lib/node_modules/@anthropic-ai/claude-code/package.json"
+
+installed_claude_version() {
+    [ -f "$CLAUDE_PKG_JSON" ] || return 1
+    node -e 'process.stdout.write(require(process.argv[1]).version||"")' \
+        "$CLAUDE_PKG_JSON" 2>/dev/null
+}
+
+if [ -z "$CLAUDE_CODE_VERSION" ] || [ "$CLAUDE_CODE_VERSION" = "skip" ]; then
+    echo "[entrypoint] Claude Code install skipped (CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION:-unset})"
+elif [ "$(installed_claude_version)" = "$CLAUDE_CODE_VERSION" ]; then
+    echo "[entrypoint] Claude Code ${CLAUDE_CODE_VERSION} already installed"
+else
+    echo "[entrypoint] Installing Claude Code ${CLAUDE_CODE_VERSION} (first start downloads ~94 MB)..."
+    claude_installed=false
+    for attempt in 1 2 3; do
+        if npm install -g --prefix "$CLAUDE_CODE_PREFIX" \
+                "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; then
+            claude_installed=true
+            break
+        fi
+        echo "[entrypoint] Claude Code install attempt ${attempt} failed; retrying in $((attempt * 5))s"
+        sleep $((attempt * 5))
+    done
+    if $claude_installed; then
+        echo "[entrypoint] Claude Code ${CLAUDE_CODE_VERSION} installed"
+    else
+        # Keep going: sshd and the bitswan-coding-agent CLI still work, and the
+        # next container start retries. A container that refuses to boot because
+        # a registry blipped would be worse.
+        echo "[entrypoint] WARNING: could not install Claude Code ${CLAUDE_CODE_VERSION} —" \
+             "agent sessions will fail until the next restart succeeds"
+    fi
+fi
+
 # Configure git for the agent user
 su - agent -c 'git config --global user.name "BitSwan Coding Agent"'
 su - agent -c 'git config --global user.email "agent@bitswan.local"'
@@ -61,16 +107,30 @@ export BITSWAN_AGENT_MODE=true
 # SSH login shells don't inherit Docker container env vars
 {
     # /etc/profile overwrites whatever PATH pam_env set, and profile.d is
-    # sourced after it, so re-prepend the Claude Code prefixes here. Updated
-    # install first, image-bundled fallback second.
+    # sourced after it, so re-prepend the Claude Code prefixes here. Runtime
+    # install first, image-bundled fallback slot second.
     echo "export PATH=\"${CLAUDE_CODE_PREFIX}/bin:${CLAUDE_CODE_BUNDLED_PREFIX}/bin:\$PATH\""
     echo "export BITSWAN_GITOPS_URL=\"$BITSWAN_GITOPS_URL\""
     echo "export BITSWAN_GITOPS_AGENT_SECRET=\"$BITSWAN_GITOPS_AGENT_SECRET\""
     echo "export BITSWAN_GIT_REMOTE=\"$BITSWAN_GIT_REMOTE\""
     echo "export BITSWAN_WORKSPACE_NAME=\"$BITSWAN_WORKSPACE_NAME\""
     echo "export BITSWAN_AGENT_MODE=true"
+    # Hold the pin. Claude Code's updater would otherwise replace the version
+    # installed above, drifting the CLI away from the dashboard's extension,
+    # which is coupled to a specific build.
+    echo "export DISABLE_AUTOUPDATER=1"
 } > /etc/profile.d/bitswan-agent.sh
 chmod 644 /etc/profile.d/bitswan-agent.sh
+
+# agent-session-wrapper runs `bash -c "$SSH_ORIGINAL_COMMAND"` for
+# non-interactive sessions — not a login shell, so profile.d above is never
+# sourced and the env comes from /etc/environment via pam_env instead. The
+# Dockerfile seeds that file with PATH; append the pin so it holds on this path
+# too. Rewritten (not appended blindly) so restarts do not stack duplicates.
+grep -v '^DISABLE_AUTOUPDATER=' /etc/environment > /etc/environment.tmp 2>/dev/null \
+    || cp /etc/environment /etc/environment.tmp 2>/dev/null
+echo 'DISABLE_AUTOUPDATER=1' >> /etc/environment.tmp
+mv /etc/environment.tmp /etc/environment
 
 echo "BitSwan Coding Agent ready"
 

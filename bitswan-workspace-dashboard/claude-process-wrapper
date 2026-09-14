@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# claudeProcessWrapper for the Claude Code extension: run `claude` in the
+# coding-agent container instead of in this one.
+#
+# The extension resolves a launcher through its `claudeCode.claudeProcessWrapper`
+# setting and speaks a stream protocol to whatever that launcher starts, over
+# plain stdio. So a transparent stdio proxy is all that is needed to move the
+# agent process somewhere else — no patching of the extension, which also keeps
+# us inside "installed and run as published".
+#
+# Why move it, and why there is no way to turn this off.
+#
+# Security first: the dashboard container controls the whole workspace. It holds
+# BITSWAN_DEPLOY_SECRET, the workspace SSH key, every user's Claude credentials
+# under /claude-config, and its own server bundle. An agent executes
+# model-chosen shell commands, so running Claude Code here would put all of that
+# one tool call away — and would invert the isolation the rest of the product
+# assumes: routes/coding-agent.ts spells out why the dashboard is deliberately
+# NOT on the agent's network ("the agent runs untrusted code and the dashboard
+# trusts X-Forwarded-Email"). The coding-agent container is unprivileged by
+# comparison: copies, its own home, session logs, and a gitops secret scoped to
+# committing.
+#
+# Capability second: that container is also where the tooling already is — git,
+# bitswan-coding-agent, the gitops credentials. An agent in the dashboard could
+# edit BP files and then do nothing with them: no requirements workflow, no
+# deployments, no commit.
+#
+# So this is an invariant, not a default. There is no fallback to the CLI
+# bundled inside the extension: the dashboard's entrypoint removes its execute
+# bit on every start, and the server refuses to open a panel while it is
+# runnable. If this transport is broken the panel fails — which is the intended
+# outcome, not a regression to work around.
+#
+# The transport is the one the terminal agent already used: ssh to the agent's
+# sshd through the gitops TCP proxy. Its ForceCommand wrapper
+# (bitswan-coding-agent/agent-session-wrapper) does the rest for us on the far
+# side — derives the per-user CLAUDE_CONFIG_DIR from SSH_USER_EMAIL, sets the
+# git identity, cds into the BP clone, then execs our command. That is also why
+# the user's Claude credentials end up in the same per-user directory the
+# terminal agent used, rather than a second identity for the same person.
+set -uo pipefail
+
+fail() { echo "claude-process-wrapper: $*" >&2; exit 127; }
+
+: "${SIDEBAR_AGENT_SSH_HOST:?SIDEBAR_AGENT_SSH_HOST not set}"
+: "${SIDEBAR_AGENT_SSH_PORT:=22}"
+: "${SIDEBAR_USER_EMAIL:?SIDEBAR_USER_EMAIL not set}"
+: "${SIDEBAR_COPY:?SIDEBAR_COPY not set}"
+: "${SIDEBAR_BP:?SIDEBAR_BP not set}"
+
+SSH_KEY="${SIDEBAR_AGENT_SSH_KEY:-/workspace/.ssh/id_ed25519}"
+[ -r "$SSH_KEY" ] || fail "ssh key $SSH_KEY is not readable"
+
+# The extension passes the bundled binary's path as the first argument when the
+# vsix ships one (`executableArgs: [bundled]`), so that a wrapper can exec it.
+# We are launching a different copy entirely, so drop it — but only when it is
+# recognisably that path, so we never eat a real argument if a future build
+# stops passing it.
+if [ $# -gt 0 ] && [ -n "${CLAUDE_EXTENSION_PATH:-}" ] && [ "${1#"$CLAUDE_EXTENSION_PATH"/}" != "$1" ]; then
+    shift
+fi
+
+# Rebuild the argv for `bash -c` on the far side. Every argument is single
+# quoted with embedded quotes escaped: these are model- and user-influenced
+# strings arriving over a websocket, and they are about to become a remote
+# shell command.
+#
+# The leading source is not optional. agent-session-wrapper runs a command
+# session with `bash -c`, not a login shell, so /etc/profile.d is never read and
+# the BITSWAN_GITOPS_* variables are absent — `bitswan-coding-agent` would be on
+# PATH and then fail every call, falling back to http://localhost:8079 with an
+# empty agent secret. Sourcing it here gives the agent the same environment the
+# terminal agent got from its login shell.
+remote='[ -f /etc/profile.d/bitswan-agent.sh ] && . /etc/profile.d/bitswan-agent.sh; exec claude'
+for arg in "$@"; do
+    remote+=" '${arg//\'/\'\\\'\'}'"
+done
+
+# The far side reads the scope from SSH_*; sshd only accepts these three plus
+# the two the terminal path used (AcceptEnv in bitswan-coding-agent/Dockerfile).
+export SSH_USER_EMAIL="$SIDEBAR_USER_EMAIL"
+export SSH_WORKTREE="$SIDEBAR_COPY"
+export SSH_BP="$SIDEBAR_BP"
+
+# No -tt: this is a pipe, not a terminal. A PTY would echo input back and
+# translate newlines, corrupting the stream protocol the extension speaks.
+# BatchMode keeps a misconfigured key from hanging the panel on a prompt
+# instead of failing it.
+exec ssh \
+    -p "$SIDEBAR_AGENT_SSH_PORT" \
+    -i "$SSH_KEY" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o BatchMode=yes \
+    -o LogLevel=ERROR \
+    -o ServerAliveInterval=30 \
+    -o 'SendEnv=SSH_USER_EMAIL SSH_WORKTREE SSH_BP' \
+    "agent@${SIDEBAR_AGENT_SSH_HOST}" \
+    "$remote"

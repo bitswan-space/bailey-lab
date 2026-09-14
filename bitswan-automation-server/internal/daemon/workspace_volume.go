@@ -29,6 +29,10 @@ var workspaceVolumeSubdirs = []string{
 	"coding-agent-home",
 	"coding-agent-sessions",
 	"claude-configs",
+	// Where the dashboard container downloads the pinned Claude Code VS Code
+	// extension. Excluded from backups (see backup/engine.go): it is a large,
+	// immutable, re-downloadable third-party artifact, not workspace state.
+	"claude-extension",
 }
 
 // ensureWorkspaceVolumeDirs creates any missing standard subdirectories for a

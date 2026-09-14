@@ -33,6 +33,12 @@ var imagePinEnvVars = []string{
 	"BITSWAN_BUILD_NETWORK",
 	"BITSWAN_GOPROXY",
 	"BITSWAN_NPM_REGISTRY",
+	// Claude Code wiring. The version pins what the CLI and extension fetch at
+	// startup; the extension dir points at an operator-managed unpacked copy
+	// instead of downloading one. Both are daemon-env-only, so they belong here
+	// for the same reason as the rest.
+	"BITSWAN_CLAUDE_CODE_VERSION",
+	"BITSWAN_CLAUDE_EXTENSION_DIR",
 }
 
 // serverVolumeNames are the server-level Docker volumes, recorded so a recovery

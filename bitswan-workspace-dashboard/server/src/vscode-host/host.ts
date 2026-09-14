@@ -126,8 +126,9 @@ export async function activateExtension(opts: {
   extensionPath: string;
   workspaceFolder: string;
   storageRoot?: string;
+  settings?: Record<string, unknown>;
 }): Promise<ExtensionHost> {
-  const state = createHostState(opts.workspaceFolder);
+  const state = createHostState(opts.workspaceFolder, opts.settings);
   const api = buildVscodeApi(state);
   const shim = proxiedApi(api);
 

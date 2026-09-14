@@ -158,6 +158,14 @@ export ANTHROPIC_BASE_URL="http://${MOCK_CLAUDE_CTR}:${MOCK_CLAUDE_PORT}"
 export ANTHROPIC_API_KEY="sk-ant-e2e-mock-0000000000000000000000000000000000"
 export ANTHROPIC_AUTH_TOKEN="sk-ant-e2e-mock-0000000000000000000000000000000000"
 
+# The containers fetch Claude Code (CLI and extension) from the public
+# registries at startup. The e2e is built around the agent never reaching the
+# internet — that is what the mock Anthropic API above is for — so turn the
+# fetch off and keep using a pre-unpacked extension when one is present. This
+# also keeps the Coding Agent chapter gated exactly as before rather than
+# silently starting to run on CI runners.
+export BITSWAN_CLAUDE_CODE_VERSION=skip
+
 CLAUDE_EXTENSION_DIR="$REPO_ROOT/bitswan-workspace-dashboard/.claude-extension"
 if [ -d "$CLAUDE_EXTENSION_DIR" ]; then
   export BITSWAN_CLAUDE_EXTENSION_DIR="$CLAUDE_EXTENSION_DIR"
@@ -185,6 +193,7 @@ sudo env \
   ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   ANTHROPIC_AUTH_TOKEN="$ANTHROPIC_AUTH_TOKEN" \
   BITSWAN_CLAUDE_EXTENSION_DIR="${BITSWAN_CLAUDE_EXTENSION_DIR:-}" \
+  BITSWAN_CLAUDE_CODE_VERSION="$BITSWAN_CLAUDE_CODE_VERSION" \
   "$BITSWAN" automation-server-daemon init
 sleep 5
 "$BITSWAN" automation-server-daemon status

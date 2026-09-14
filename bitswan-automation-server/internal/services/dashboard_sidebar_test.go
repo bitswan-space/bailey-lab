@@ -21,11 +21,38 @@ func composeFor(t *testing.T, devSourceDir string) string {
 	return out
 }
 
-func TestAgentSidebarOffWithoutAnExtension(t *testing.T) {
+func TestAgentSidebarDownloadsWhenNothingSuppliesAnExtension(t *testing.T) {
 	t.Setenv("BITSWAN_CLAUDE_EXTENSION_DIR", "")
 	out := composeFor(t, "")
-	if strings.Contains(out, "CLAUDE_EXTENSION_PATH") {
-		t.Errorf("no extension anywhere, so the sidebar must stay off:\n%s", out)
+	for _, want := range []string{
+		"CLAUDE_EXTENSION_PATH=/claude-extension-cache/extension",
+		"workspaces/finance/claude-extension",
+		"SIDEBAR_CONFIG_ROOT=/claude-config",
+		"workspaces/finance/claude-configs",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("compose is missing %q:\n%s", want, out)
+		}
+	}
+	// The read-only bind is for an operator-supplied copy. Mounting it here too
+	// would collide with the cache volume the entrypoint downloads into.
+	if strings.Contains(out, ":/claude-extension:ro") {
+		t.Errorf("nothing supplied an extension, so nothing should be bind-mounted:\n%s", out)
+	}
+}
+
+func TestAgentSidebarForwardsAPinnedVersion(t *testing.T) {
+	t.Setenv("BITSWAN_CLAUDE_EXTENSION_DIR", "")
+	t.Setenv("BITSWAN_CLAUDE_CODE_VERSION", "2.1.268")
+	if out := composeFor(t, ""); !strings.Contains(out, "CLAUDE_CODE_VERSION=2.1.268") {
+		t.Errorf("the daemon's pin must reach the container:\n%s", out)
+	}
+
+	// Unset means "use the image's own pin" — forwarding an empty value would
+	// override that default with nothing and disable the download.
+	t.Setenv("BITSWAN_CLAUDE_CODE_VERSION", "")
+	if out := composeFor(t, ""); strings.Contains(out, "CLAUDE_CODE_VERSION") {
+		t.Errorf("an unset version must not be forwarded as empty:\n%s", out)
 	}
 }
 
@@ -68,11 +95,17 @@ func TestAgentSidebarPrefersTheDevSourceTree(t *testing.T) {
 	}
 }
 
-func TestAgentSidebarIgnoresAnExtensionDirThatIsNotThere(t *testing.T) {
+func TestAgentSidebarFallsBackWhenTheExtensionDirIsNotThere(t *testing.T) {
 	t.Setenv("BITSWAN_CLAUDE_EXTENSION_DIR", "/does/not/exist/claude-extension")
 	out := composeFor(t, "")
-	if strings.Contains(out, "CLAUDE_EXTENSION_PATH") {
-		t.Errorf("a path that resolves nowhere must not switch the sidebar on:\n%s", out)
+	// A path that resolves nowhere must not become a mount — Docker would
+	// create it as an empty directory and the sidebar would serve nothing.
+	// Downloading is the right answer instead.
+	if strings.Contains(out, "/does/not/exist/claude-extension:/claude-extension:ro") {
+		t.Errorf("a path that resolves nowhere must not be mounted:\n%s", out)
+	}
+	if !strings.Contains(out, "CLAUDE_EXTENSION_PATH=/claude-extension-cache/extension") {
+		t.Errorf("the download path should take over:\n%s", out)
 	}
 }
 
