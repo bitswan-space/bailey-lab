@@ -9,7 +9,7 @@ from app.services import git_server
 from app.services import workspace_git_remote as remote_cfg
 from app.services.bp_git import ff_main_to_ref, refresh_main_bp_checkout
 from app.services.git_server import bp_bare_repo_path, list_bp_repos, validate_bp_name
-from app.services.workspace_readme import workspace_readme
+from app.services.workspace_readme import is_generated_readme, workspace_readme
 from app.task_queue import TaskStatus, current_requester, task_queue
 from app.utils import bp_state_dir, bp_state_path
 
@@ -204,12 +204,22 @@ async def _ls_tree(treeish: str) -> list[tuple[str, str, str, str]]:
 Entry = tuple[str, str | None]
 
 
-async def _readme_blob() -> str:
-    text = workspace_readme(
+def _readme_text() -> str:
+    return workspace_readme(
         os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace"),
         os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
     )
-    return await _mgit_ok("hash-object", "-w", "--stdin", stdin=text.encode())
+
+
+async def _readme_blob() -> str:
+    return await _mgit_ok("hash-object", "-w", "--stdin", stdin=_readme_text().encode())
+
+
+async def _readme_needs_refresh(blob: str) -> bool:
+    current, _, rc = await _mgit("cat-file", "-p", blob)
+    if rc != 0:
+        return False
+    return is_generated_readme(current) and current != _readme_text()
 
 
 async def build_composite_commit(
@@ -238,6 +248,8 @@ async def build_composite_commit(
                 continue
             if kind == "tree" and await _rev(f"{mirrored_ns}{name}/heads/main"):
                 removed.append(name)
+                continue
+            if with_readme and name == README and await _readme_needs_refresh(sha):
                 continue
             lines.append(f"{mode} {kind} {sha}\t{name}")
             if kind != "tree":

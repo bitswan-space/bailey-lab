@@ -559,3 +559,33 @@ def test_copy_branches_are_read_only_mirrors_overwritten_and_removed(ws):
     status = ws.run()
     assert status["branches"]["copies/alice"]["result"] == "up_to_date"
     assert "copies/exp-1" not in status["branches"]
+
+
+def test_generated_readme_is_refreshed_but_a_taken_over_readme_is_kept(ws, monkeypatch):
+    from app.services import workspace_readme
+
+    ws.configure()
+    ws.run()
+    assert ws.remote_out("show", "main:README.md").startswith(
+        workspace_readme.GENERATED_MARKER
+    )
+
+    original = workspace_readme.workspace_readme
+    monkeypatch.setattr(
+        workspace_readme,
+        "workspace_readme",
+        lambda w, d="": original(w, d) + "\nNew paragraph.\n",
+    )
+    monkeypatch.setattr(mirror, "workspace_readme", workspace_readme.workspace_readme)
+    status = ws.run()
+    assert status["branches"]["main"]["result"] == "pushed"
+    assert ws.remote_out("show", "main:README.md").endswith("New paragraph.")
+
+    clone = ws.remote_clone()
+    _commit(clone, "README.md", "# Ours now\n", "take over the readme")
+    _git("push", "-q", "origin", "main", cwd=clone)
+    ws.run()
+    ws.advance_bp("bpa", "a1\n")
+    status = ws.run()
+    assert status["branches"]["main"]["result"] == "pushed"
+    assert ws.remote_out("show", "main:README.md") == "# Ours now"
