@@ -3,7 +3,8 @@ GITHUB_STEPS = [
     "Settings → Deploy keys → Add deploy key: paste the workspace's public key and tick "
     '"Allow write access".',
     "Settings → Rules → Rulesets → New branch ruleset targeting `main`: enable "
-    '"Block force pushes" and "Restrict deletions". Do not require pull requests — '
+    '"Block force pushes" and "Restrict deletions", and leave the bypass list empty so '
+    "the rule binds everyone, administrators included. Do not require pull requests — "
     "Bailey pushes to `main` directly.",
     "Use the SSH URL, `git@github.com:<org>/<repo>.git`, as the remote.",
     "If the repository already had another default branch, switch it to `main` under "
@@ -15,8 +16,10 @@ GITLAB_STEPS = [
     "Create a blank project (an initial README is kept).",
     "Settings → Repository → Deploy keys → Add new key: paste the workspace's public key "
     'and tick "Grant write permissions to this key".',
-    'Settings → Repository → Protected branches → protect `main`: under "Allowed to push '
-    'and merge" select the deploy key, and leave "Allowed to force push" off.',
+    'Settings → Repository → Protected branches → protect `main` with "Allowed to force '
+    'push" switched off. That switch binds everyone — maintainers and owners too — so '
+    'nobody can rewrite `main`. Under "Allowed to push and merge" add the deploy key, '
+    "otherwise the protection rejects Bailey's own fast-forward pushes.",
     "Use the SSH URL, `git@gitlab.com:<group>/<project>.git`, as the remote.",
     "If the project already had another default branch, switch it to `main` under "
     "Settings → Repository → Branch defaults.",
