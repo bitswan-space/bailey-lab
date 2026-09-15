@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/services"
@@ -47,5 +50,39 @@ func TestEveryMountedSubpathIsCreated(t *testing.T) {
 	}
 	if !strings.Contains(compose, "claude-configs") {
 		t.Errorf("expected the agent chat's config volume in:\n%s", compose)
+	}
+}
+
+// The daemon runs as root, but every container mounting these subpaths runs as
+// uid 1000. Workspace *creation* chowns the whole bitswan config dir afterwards
+// and so masked a root-owned subdir; workspace *update* does not, so any subdir
+// a release adds to workspaceVolumeSubdirs reached updated workspaces owned by
+// root. That is how `claude-configs` shipped unwritable: the dashboard's sidebar
+// drops to uid 1000 and got EACCES creating its per-user Claude config dir, and
+// only updated workspaces had a broken coding agent.
+func TestEnsureWorkspaceVolumeDirsAreOwnedByUser1000(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chown to uid 1000 requires root")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	ensureWorkspaceVolumeDirs("finance")
+
+	base := filepath.Join(home, ".config", "bitswan", "workspaces", "finance")
+	for _, sub := range workspaceVolumeSubdirs {
+		info, err := os.Stat(filepath.Join(base, sub))
+		if err != nil {
+			t.Errorf("%s: not created: %v", sub, err)
+			continue
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("%s: no stat_t", sub)
+		}
+		if st.Uid != 1000 || st.Gid != 1000 {
+			t.Errorf("%s: owned by %d:%d, want 1000:1000 — containers mounting this subpath run as 1000 and will EACCES", sub, st.Uid, st.Gid)
+		}
 	}
 }

@@ -1,10 +1,5 @@
 package daemon
 
-import (
-	"os"
-	"path/filepath"
-)
-
 // workspaceVolumeSubdirs are the per-workspace directories that workspace
 // containers mount as subpaths of the `bitswan` volume. Volume subpath mounts
 // are strict — Docker fails to start a container if the subpath doesn't exist
@@ -36,10 +31,18 @@ var workspaceVolumeSubdirs = []string{
 }
 
 // ensureWorkspaceVolumeDirs creates any missing standard subdirectories for a
-// workspace so the volume-subpath mounts resolve. Existing dirs are left as-is.
+// workspace so the volume-subpath mounts resolve. Existing dirs are left as-is;
+// each one it creates is chowned to uid 1000, because the daemon runs as root
+// while every container mounting these subpaths runs as 1000 — a root-owned
+// subdir EACCESes them.
+//
+// The create path (workspace_init.go) masked that with a recursive chown of the
+// whole bitswan config dir afterwards, but the update path (workspace_update.go)
+// has no chown at all. So a subdir introduced by a new release landed root-owned
+// on every *updated* workspace: `claude-configs` left the dashboard's sidebar —
+// which drops to uid 1000 — unable to mkdir its per-user Claude config dir, and
+// the coding agent came up broken on exactly the workspaces that had been
+// updated rather than created fresh.
 func ensureWorkspaceVolumeDirs(workspaceName string) {
-	base := filepath.Join(os.Getenv("HOME"), ".config", "bitswan", "workspaces", workspaceName)
-	for _, d := range workspaceVolumeSubdirs {
-		_ = os.MkdirAll(filepath.Join(base, d), 0o755)
-	}
+	_ = ensureWorkspaceVolumeDirsReporting(workspaceName)
 }
