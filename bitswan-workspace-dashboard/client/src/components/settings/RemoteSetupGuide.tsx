@@ -25,7 +25,7 @@ const GUIDES: Record<Provider, { label: string; url: string; steps: { title: str
       },
       {
         title: 'Make main fast-forward only',
-        body: 'Repository → Settings → Rules → Rulesets → New branch ruleset. Target the default branch (main), enable “Block force pushes” and “Restrict deletions”, and save it as active. Do not enable “Require a pull request before merging”: Bailey pushes to main directly. If you ever need Bailey to force push to repair, disable the ruleset for the moment of the repair.',
+        body: 'Repository → Settings → Rules → Rulesets → New branch ruleset. Target the default branch (main), enable “Block force pushes” and “Restrict deletions”, leave the bypass list empty so the rule binds everyone — administrators included — and save it as active. Do not enable “Require a pull request before merging”: Bailey pushes to main directly. If you ever need Bailey to force push to repair, disable the ruleset for the moment of the repair.',
       },
       {
         title: 'Set the remote here',
@@ -51,7 +51,7 @@ const GUIDES: Record<Provider, { label: string; url: string; steps: { title: str
       },
       {
         title: 'Make main fast-forward only',
-        body: 'Project → Settings → Repository → Protected branches → protect main. Under “Allowed to push and merge” select the deploy key you just added (deploy keys are listed there), leave “Allowed to force push” off, and keep merge requests optional. If you ever need Bailey to force push to repair, allow force push for the moment of the repair.',
+        body: 'Project → Settings → Repository → Protected branches → protect main with “Allowed to force push” switched off. That switch binds everyone — maintainers and owners too — so nobody can rewrite main. Under “Allowed to push and merge” add the deploy key you just added (deploy keys are listed there), otherwise the protection rejects Bailey’s own fast-forward pushes. Keep merge requests optional. If you ever need Bailey to force push to repair, allow force push for the moment of the repair.',
       },
       {
         title: 'Set the remote here',
