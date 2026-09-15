@@ -133,6 +133,11 @@ class Container:
     image: str
     created: int = 0
     labels: dict = field(default_factory=dict)
+    # Times Docker's restart policy has brought this container back up. None
+    # means "not read" — the container vanished under the inspect, or its line
+    # was unreadable — and must stay distinct from 0, which is a container that
+    # has never died. `or 0` would erase exactly that difference.
+    restart_count: int | None = None
 
     @classmethod
     def from_json(cls, d: dict) -> "Container":
@@ -144,6 +149,7 @@ class Container:
             image=d.get("image", ""),
             created=d.get("created", 0) or 0,
             labels=d.get("labels") or {},
+            restart_count=d.get("restart_count"),
         )
 
     def to_docker_dict(self) -> dict:
@@ -158,6 +164,7 @@ class Container:
             "Created": self.created,
             "Image": self.image,
             "Labels": self.labels,
+            "RestartCount": self.restart_count,
         }
 
 
@@ -402,9 +409,22 @@ class InfraDriverClient:
     # ---- container primitives ----------------------------------------------
 
     async def container_list(
-        self, ctx: WorkspaceContext, labels: Optional[dict] = None
+        self,
+        ctx: WorkspaceContext,
+        labels: Optional[dict] = None,
+        with_restart_counts: bool = False,
     ) -> list[Container]:
-        body = {"ctx": ctx.to_json(), "filter": {"labels": labels or {}}}
+        """`with_restart_counts` costs a `docker inspect` of the listed
+        containers on the driver side, so only the automations listing — the one
+        that shows the number — asks for it. Every other caller ("is this
+        container up?" before a backup, a restore, a SQL query) leaves it off."""
+        body = {
+            "ctx": ctx.to_json(),
+            "filter": {
+                "labels": labels or {},
+                "with_restart_counts": with_restart_counts,
+            },
+        }
         out = await self._post_json(PATH_CONTAINERS_LIST, body)
         return [Container.from_json(c) for c in (out.get("containers") or [])]
 

@@ -191,10 +191,18 @@ type Image struct {
 	Size    int64  `json:"size"`    // bytes
 }
 
-// ContainerFilter narrows ContainerList. Empty fields are ignored; Labels are
-// matched as exact key=value pairs (e.g. gitops.deployment.id, gitops.stage).
+// ContainerFilter narrows ContainerList — and carries the one option the call
+// has. Empty fields are ignored; Labels are matched as exact key=value pairs
+// (e.g. gitops.deployment.id, gitops.stage).
 type ContainerFilter struct {
 	Labels map[string]string `json:"labels,omitempty"`
+	// Read each container's restart count too. OFF by default, and deliberately
+	// opt-in: the count needs a `docker inspect` on top of the `docker ps`, and
+	// ContainerList is the shared primitive behind everything — "is this one
+	// container up?" checks before every backup, restore and SQL-explorer
+	// query, and a re-broadcast on every docker start/die event. Only the
+	// automations listing, which actually shows the number, asks for it.
+	WithRestartCounts bool `json:"with_restart_counts,omitempty"`
 }
 
 // Container is one realized container.
@@ -206,6 +214,17 @@ type Container struct {
 	Image   string            `json:"image"`
 	Created int64             `json:"created"` // unix seconds (gitops overlays created_at from this)
 	Labels  map[string]string `json:"labels,omitempty"`
+	// How many times Docker's restart policy has brought this container back
+	// up after it died. NIL means "not read", never zero: the inspect that
+	// reads it can lose the race against a container that is, by definition,
+	// restarting, and a line that comes back unreadable costs that container
+	// its count. Callers must render nil as unknown, because "restarted 0
+	// times" is a different (and stronger) claim than silence.
+	//
+	// Only policy-driven restarts count: an operator's `docker restart` leaves
+	// it at 0 (measured), so a non-zero value always means the container died
+	// on its own.
+	RestartCount *int `json:"restart_count,omitempty"`
 }
 
 // ContainerStat is one container's live memory usage (from `docker stats`). Only

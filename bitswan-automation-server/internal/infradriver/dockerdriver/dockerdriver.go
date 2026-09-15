@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -81,7 +82,24 @@ type dockerInspect struct {
 
 // ContainerList returns the workspace's containers, optionally filtered by
 // labels. Health is "" when the container declares no healthcheck.
-func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
+func (d *DockerDriver) ContainerList(ctx context.Context, wctx infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
+	containers, err := d.listContainers(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if filter.WithRestartCounts {
+		fillRestartCounts(ctx, containers)
+	}
+	return containers, nil
+}
+
+// listContainers is the `docker ps` half on its own, WITHOUT the restart-count
+// inspect. ContainerStats needs the ids and labels but carries no count, and
+// gitops calls both list and stats on every automations poll — so sharing
+// ContainerList would have run the batched inspect of every container twice per
+// poll and thrown one of them away, on the path the comment below calls the
+// first-time-to-live-dev hot path.
+func (d *DockerDriver) listContainers(ctx context.Context, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
 	// A single `docker ps` with a LEAN field-separated --format returns
 	// everything the Container type needs (name, state, health-from-status,
 	// image, created, labels) WITHOUT a per-container `docker inspect`. Two
@@ -111,12 +129,104 @@ func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.Workspac
 	return parsePS(out)
 }
 
+// restartFormat is the lean inspect format for fillRestartCounts: id + count.
+const restartFormat = "{{.Id}}" + psSep + "{{.RestartCount}}"
+
+// fillRestartCounts stamps RestartCount onto every listed container.
+//
+// It takes a second command because `docker ps` has no field for the restart
+// count; only `docker inspect` carries it. That is the very call ContainerList
+// deliberately stopped making (see above) — but what made that slow was
+// exec-PER-CONTAINER, not inspect. Measured twice on a live sandbox daemon:
+// 20 separate inspects cost 0.60s, while ONE batched inspect of all 111 (and
+// again of all 83) containers cost 0.06-0.10s — less than the `docker ps` it
+// follows. One exec, whatever the count.
+//
+// An earlier version inspected only the containers `docker ps` caught in state
+// `restarting`, to keep the healthy case at zero extra commands. That made the
+// number useless for the case it exists to serve: a container that crashes
+// every few minutes is `running` at most poll instants, so the count — the
+// durable evidence a status dot cannot carry — flickered in and out between
+// polls and vanished once the container settled or died for good.
+//
+// A count that cannot be read stays nil, never 0, and NEVER fails the listing.
+// The count is supplementary; the list of containers is the answer the caller
+// asked for. `docker inspect` prints the containers it found and exits non-zero
+// when an id has been removed meanwhile — a normal race against a container
+// that is, by definition, restarting — and if the only restarting id is the one
+// that vanished there is no output at all. Failing here would delete the whole
+// container list over exactly the race this comment calls normal. So the ids
+// that came back get their counts, and the rest keep nil, which the callers
+// render as nothing rather than as zero.
+func fillRestartCounts(ctx context.Context, containers []infradriver.Container) {
+	ids := allIDs(containers)
+	if len(ids) == 0 {
+		return
+	}
+	args := append([]string{"inspect", "--format", restartFormat}, ids...)
+	out, err := exec.CommandContext(ctx, "docker", args...).Output()
+	if len(out) == 0 {
+		if err != nil && ctx.Err() == nil {
+			// Not the vanished-container race — that one still prints the
+			// containers it found. This is the inspect failing outright (a
+			// daemon that does not expose the field, an exec that could not
+			// run), and its only other symptom is a chip that never appears,
+			// which looks exactly like a healthy fleet. Say it once per call.
+			log.Printf("infra-driver: restart counts unavailable: %v", err)
+		}
+		return
+	}
+	counts := parseRestartCounts(out)
+	for i := range containers {
+		if n, ok := counts[containers[i].ID]; ok {
+			containers[i].RestartCount = &n
+		}
+	}
+}
+
+// allIDs is what fillRestartCounts inspects: every listed container, in one
+// exec. Restricting it to the ones currently restarting made the count blink —
+// see fillRestartCounts.
+func allIDs(containers []infradriver.Container) []string {
+	ids := make([]string, 0, len(containers))
+	for _, c := range containers {
+		ids = append(ids, c.ID)
+	}
+	return ids
+}
+
+// parseRestartCounts maps the lean restartFormat output to counts by container
+// id. A line it cannot read costs THAT container its count and nothing more:
+// the container this feature exists for — the one crashlooping — must not lose
+// its number because some other line came back malformed. Nothing is ever
+// guessed at; a container with no readable count simply has none.
+func parseRestartCounts(raw []byte) map[string]int {
+	counts := map[string]int{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		id, count, ok := strings.Cut(line, psSep)
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(count))
+		if err != nil {
+			continue
+		}
+		counts[id] = n
+	}
+	return counts
+}
+
 // ContainerStats returns live memory usage for the workspace's RUNNING
 // containers. `docker stats` has no label filter, so we scope by listing the
 // workspace's containers first (ContainerList forces the workspace label) and
 // sampling only those IDs; name/labels come from the listing, memory from stats.
 func (d *DockerDriver) ContainerStats(ctx context.Context, wctx infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.ContainerStat, error) {
-	containers, err := d.ContainerList(ctx, wctx, filter)
+	// The lean listing: a stat has no restart count, so this must not pay for
+	// the inspect that reads one.
+	containers, err := d.listContainers(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
