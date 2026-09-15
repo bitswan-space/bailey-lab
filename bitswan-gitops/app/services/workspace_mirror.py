@@ -574,6 +574,7 @@ async def push_refs(
     force: bool,
     forced_branches: list[str] | None = None,
     deletions: list[str] | None = None,
+    with_tags: bool = True,
 ) -> dict:
     result = {
         "branches": {},
@@ -586,7 +587,7 @@ async def push_refs(
     refspecs += [f"+refs/heads/{b}:refs/heads/{b}" for b in forced_branches or []]
     refspecs += [f":refs/heads/{b}" for b in deletions or []]
     branches = list(branches) + list(forced_branches or []) + list(deletions or [])
-    local_tags = await _local_deploy_tags()
+    local_tags = await _local_deploy_tags() if with_tags else {}
     stale = [ref for ref, sha in local_tags.items() if remote_tags.get(ref) != sha]
     result["tags"]["up_to_date"] = len(local_tags) - len(stale)
     if stale:
@@ -801,6 +802,12 @@ async def run_mirror_sync(
             )
 
         status["tags"] = await mirror_deploy_tags(bps)
+        first_pushes: dict = {"branches": {}, "tags": {}, "error": None}
+        if not remote["_tags"] and MAIN_BRANCH in to_push:
+            first_pushes = await push_refs(
+                url, env, [MAIN_BRANCH], {}, force=force, with_tags=False
+            )
+            to_push.remove(MAIN_BRANCH)
         pushed = await push_refs(
             url,
             env,
@@ -811,7 +818,8 @@ async def run_mirror_sync(
             deletions=deletions,
         )
         status["tags"].update(pushed["tags"])
-        status["error"] = pushed["error"]
+        status["error"] = first_pushes["error"] or pushed["error"]
+        pushed["branches"] = {**first_pushes["branches"], **pushed["branches"]}
         for name, (state, detail) in pushed["branches"].items():
             row = status["branches"].get(name)
             if row is None:

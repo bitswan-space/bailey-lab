@@ -31,6 +31,10 @@ const GUIDES: Record<Provider, { label: string; url: string; steps: { title: str
         title: 'Set the remote here',
         body: 'Copy the SSH clone URL — it looks like git@github.com:<org>/<repo>.git — paste it above and Save. The first push follows immediately.',
       },
+      {
+        title: 'Check the default branch',
+        body: 'Into an empty repository Bailey pushes main first and alone, so GitHub makes it the default branch. If the repository already had another default, switch it to main under Settings → General → Default branch.',
+      },
     ],
   },
   gitlab: {
@@ -53,6 +57,10 @@ const GUIDES: Record<Provider, { label: string; url: string; steps: { title: str
         title: 'Set the remote here',
         body: 'Copy the SSH clone URL — it looks like git@gitlab.com:<group>/<project>.git — paste it above and Save.',
       },
+      {
+        title: 'Check the default branch',
+        body: 'Into an empty project Bailey pushes main first and alone, so GitLab makes it the default branch. If the project already had another default, switch it to main under Settings → Repository → Branch defaults.',
+      },
     ],
   },
   other: {
@@ -74,6 +82,10 @@ const GUIDES: Record<Provider, { label: string; url: string; steps: { title: str
       {
         title: 'Set the remote here',
         body: 'Use the SSH URL (git@host:path/repo.git or ssh://git@host:port/path/repo.git). HTTPS remotes are not accepted.',
+      },
+      {
+        title: 'Check the default branch',
+        body: 'Bailey pushes main first and alone into an empty repository, which most hosts take as the default branch. A bare repository of your own needs `git symbolic-ref HEAD refs/heads/main`; hosted repositories have a default-branch setting.',
       },
     ],
   },

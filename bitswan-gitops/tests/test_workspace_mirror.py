@@ -589,3 +589,29 @@ def test_generated_readme_is_refreshed_but_a_taken_over_readme_is_kept(ws, monke
     status = ws.run()
     assert status["branches"]["main"]["result"] == "pushed"
     assert ws.remote_out("show", "main:README.md") == "# Ours now"
+
+
+def test_main_is_pushed_alone_first_to_an_empty_remote_so_hosts_make_it_default(
+    ws, monkeypatch
+):
+    ws.push_copy_branch("bpa", "alice", "alice\n")
+    ws.configure()
+    real_push = mirror.push_refs
+    pushes: list[list[str]] = []
+
+    async def recording_push(url, env, branches, remote_tags, **kwargs):
+        pushes.append(list(branches) + list(kwargs.get("forced_branches") or []))
+        return await real_push(url, env, branches, remote_tags, **kwargs)
+
+    monkeypatch.setattr(mirror, "push_refs", recording_push)
+    status = ws.run()
+    assert status["result"] == "ok"
+    assert pushes[0] == ["main"]
+    assert sorted(pushes[1]) == ["copies/alice", "gitops"]
+    assert status["branches"]["main"]["result"] == "pushed"
+    assert status["branches"]["gitops"]["result"] == "pushed"
+
+    pushes.clear()
+    ws.advance_bp("bpa", "a1\n")
+    ws.run()
+    assert len(pushes) == 1

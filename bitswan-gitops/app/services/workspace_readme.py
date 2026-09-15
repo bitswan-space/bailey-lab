@@ -6,6 +6,9 @@ GITHUB_STEPS = [
     '"Block force pushes" and "Restrict deletions". Do not require pull requests — '
     "Bailey pushes to `main` directly.",
     "Use the SSH URL, `git@github.com:<org>/<repo>.git`, as the remote.",
+    "If the repository already had another default branch, switch it to `main` under "
+    "Settings → General → Default branch. Bailey pushes `main` first into an empty "
+    "repository so it becomes the default on its own.",
 ]
 
 GITLAB_STEPS = [
@@ -15,6 +18,8 @@ GITLAB_STEPS = [
     'Settings → Repository → Protected branches → protect `main`: under "Allowed to push '
     'and merge" select the deploy key, and leave "Allowed to force push" off.',
     "Use the SSH URL, `git@gitlab.com:<group>/<project>.git`, as the remote.",
+    "If the project already had another default branch, switch it to `main` under "
+    "Settings → Repository → Branch defaults.",
 ]
 
 
