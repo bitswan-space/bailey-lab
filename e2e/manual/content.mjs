@@ -46,6 +46,7 @@ export const MANUAL = {
     { title: 'Rehearse the disaster before it happens', body: 'Restore any production backup into an isolated DR slot, verify it by hand, mark it recovery-tested, then swap it live with a single ingress cutover. No data move. No downtime.' },
     { title: 'Know what’s inside before it runs', body: 'Every image is scanned for CVEs before deploy. Waivers live in your source tree, not buried in config. Auditors get a clean, signed story.' },
     { title: 'Trust the device, not just the password', body: 'The first operator claims the server; every device after is explicitly approved. Bailey practises defence in depth — your processes stay protected even if a password leaks or your identity provider is compromised.' },
+    { title: 'Ship the app, not a hosting ticket', body: 'A business process’s frontend and backend run inside Bailey from the moment you create it — a real, TLS-secured hostname on day one, no web host, DNS or certificate to arrange yourself. Point your own domain at it later if you want to; you never have to.' },
   ],
 
   chapters: [
@@ -167,6 +168,7 @@ export const MANUAL = {
       ],
       sell: [
         'Meridian’s accounts-payable lives in one business process: <strong>invoice-processing</strong>. The <strong>New business process</strong> modal takes a name (lowercase, hyphenated) and scaffolds its automations — a backend and a frontend — so there’s something real to describe, build and deploy.',
+        'That frontend is not a mock-up you’ll later have to host somewhere else — it <strong>is</strong> the process’s production web app. The moment it runs, Bailey gives it a real, routable hostname with TLS already in place, on your Bailey server’s own domain; there’s no separate hosting account, DNS zone or certificate for Marek to set up. (Bring your own domain later if you want one — it’s optional, never required.) The backend stays off the public internet entirely, reachable only from the frontend over the workspace’s private network.',
         'The process is the boundary for everything that follows: its description, its code, its CVE checks, its stages, its secrets, its backups and its firewall are all scoped to it.',
       ],
       steps: ['Open the <b>business-process switcher</b> (top-left).', 'Click <b>New business process</b>.', 'Name it in the modal; press <b>Create</b>.', 'The process is scaffolded and selected.'],
