@@ -196,6 +196,7 @@ export function WorkspaceView({
           <SyncDeployTab
             bp={bp}
             wt={wt}
+            role={role}
             divergence={divergence}
             divergenceError={divergenceError}
             divergenceStale={divergenceStale}

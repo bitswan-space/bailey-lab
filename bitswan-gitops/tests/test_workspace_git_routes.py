@@ -154,3 +154,141 @@ def test_push_requires_a_remote_then_returns_a_task(client):
         client.post("/workspace/git-remote/push", headers=_headers(MEMBER)).status_code
         == 403
     )
+
+
+def test_pull_is_open_to_any_verified_user_and_reports_unconfigured(client):
+    r = client.post("/workspace/git-remote/pull", headers=_headers(MEMBER))
+    assert r.status_code == 200
+    assert r.json()["configured"] is False
+    assert r.json()["result"] == "unconfigured"
+    assert (
+        client.post("/workspace/git-remote/pull", headers=_headers()).status_code == 401
+    )
+
+
+def test_pull_runs_the_mirror_inline_when_configured(client, tmp_path, monkeypatch):
+    calls = []
+
+    async def fake_inline(trigger, requester, *, force=False):
+        calls.append((trigger, requester, force))
+        return {
+            "result": "inbound",
+            "inbound": ["bpa"],
+            "conflicts": [],
+            "error": None,
+            "branches": {},
+        }
+
+    monkeypatch.setattr(mirror, "run_inline", fake_inline)
+    client.put(
+        "/workspace/git-remote",
+        json={"url": "git@github.com:acme/ws.git"},
+        headers=_headers(ADMIN),
+    )
+    r = client.post("/workspace/git-remote/pull", headers=_headers(MEMBER))
+    assert r.status_code == 200
+    assert r.json()["inbound"] == ["bpa"]
+    assert calls == [("deploy-check", MEMBER, False)]
+
+
+def test_pause_stops_pulls_and_pushes_until_resumed(client, monkeypatch):
+    calls = []
+
+    async def fake_inline(trigger, requester, *, force=False):
+        calls.append(trigger)
+        return {
+            "result": "ok",
+            "inbound": [],
+            "conflicts": [],
+            "error": None,
+            "branches": {},
+        }
+
+    monkeypatch.setattr(mirror, "run_inline", fake_inline)
+    client.put(
+        "/workspace/git-remote",
+        json={"url": "git@github.com:acme/ws.git"},
+        headers=_headers(ADMIN),
+    )
+    assert (
+        client.post("/workspace/git-remote/pause", headers=_headers(MEMBER)).status_code
+        == 403
+    )
+    r = client.post("/workspace/git-remote/pause", headers=_headers(ADMIN))
+    assert r.status_code == 200 and r.json()["paused"] is True
+    assert (
+        client.post("/workspace/git-remote/pull", headers=_headers(MEMBER)).json()[
+            "result"
+        ]
+        == "paused"
+    )
+    assert (
+        client.post("/workspace/git-remote/push", headers=_headers(ADMIN)).status_code
+        == 409
+    )
+    assert calls == []
+    r = client.post("/workspace/git-remote/resume", headers=_headers(ADMIN))
+    assert r.status_code == 200 and r.json()["paused"] is False and r.json()["task_id"]
+
+
+def test_force_push_is_admin_only_and_runs_inline_with_force(client, monkeypatch):
+    calls = []
+
+    async def fake_inline(trigger, requester, *, force=False):
+        calls.append((trigger, force))
+        return {
+            "result": "ok",
+            "inbound": [],
+            "conflicts": [],
+            "error": None,
+            "branches": {},
+        }
+
+    monkeypatch.setattr(mirror, "run_inline", fake_inline)
+    assert (
+        client.post(
+            "/workspace/git-remote/force-push", headers=_headers(ADMIN)
+        ).status_code
+        == 400
+    )
+    client.put(
+        "/workspace/git-remote",
+        json={"url": "git@github.com:acme/ws.git"},
+        headers=_headers(ADMIN),
+    )
+    assert (
+        client.post(
+            "/workspace/git-remote/force-push", headers=_headers(MEMBER)
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            "/workspace/git-remote/force-push", headers=_headers(ADMIN)
+        ).status_code
+        == 200
+    )
+    assert calls == [("repair", True)]
+
+
+def test_rotate_key_is_admin_only_and_returns_the_new_public_key(client):
+    before = client.get("/workspace/git-remote", headers=_headers(ADMIN)).json()[
+        "public_key"
+    ]
+    assert (
+        client.post(
+            "/workspace/git-remote/rotate-key", headers=_headers(MEMBER)
+        ).status_code
+        == 403
+    )
+    r = client.post("/workspace/git-remote/rotate-key", headers=_headers(ADMIN))
+    assert r.status_code == 200
+    assert r.json()["public_key"] != before
+    assert r.json()["public_key"].startswith("ssh-ed25519 ")
+    assert r.json()["status"]["key_rotated_by"] == ADMIN
+    assert (
+        client.get("/workspace/git-remote", headers=_headers(ADMIN)).json()[
+            "public_key"
+        ]
+        == r.json()["public_key"]
+    )

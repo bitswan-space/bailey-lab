@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { GitBranch, KeyRound, Loader2, Upload } from 'lucide-react';
+import { GitBranch, KeyRound, Loader2, PauseCircle, PlayCircle, Upload } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -19,6 +19,7 @@ import { EmptyState } from '@/components/shared/EmptyState';
 import { RelativeTime } from '@/components/shared/RelativeTime';
 import { SectionHeader } from '@/components/shared/SectionHeader';
 import { api, errorMessage, type GitRemote, type GitRemoteBranch } from '@/lib/api';
+import { RemoteSetupGuide } from '@/components/settings/RemoteSetupGuide';
 import { toast } from '@/lib/notify';
 import { cn } from '@/lib/utils';
 
@@ -29,7 +30,7 @@ type CardState =
 
 const ACTIVE_POLL_MS = 3000;
 const IDLE_POLL_MS = 30000;
-const FIXED_BRANCH_ORDER = ['dev', 'staging', 'production', 'gitops'];
+const FIXED_BRANCH_ORDER = ['main', 'gitops'];
 
 const RESULT_META: Record<
   GitRemoteBranch['result'],
@@ -37,10 +38,13 @@ const RESULT_META: Record<
 > = {
   pushed: { label: 'Pushed', variant: 'default' },
   up_to_date: { label: 'Up to date', variant: 'secondary' },
-  deleted: { label: 'Deleted', variant: 'secondary' },
-  pending: { label: 'Pending', variant: 'outline' },
   diverged: {
     label: 'Diverged',
+    variant: 'outline',
+    className: 'border-amber-500/60 text-amber-700 dark:text-amber-400',
+  },
+  conflict: {
+    label: 'Conflict',
     variant: 'outline',
     className: 'border-amber-500/60 text-amber-700 dark:text-amber-400',
   },
@@ -68,7 +72,11 @@ export function GitRemoteCard() {
   const [saving, setSaving] = useState(false);
   const [pushing, setPushing] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [toggling, setToggling] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmRotate, setConfirmRotate] = useState(false);
+  const [rotating, setRotating] = useState(false);
   const [inlineError, setInlineError] = useState('');
   const aliveRef = useRef(true);
 
@@ -165,6 +173,47 @@ export function GitRemoteCard() {
     }
   };
 
+  const togglePause = async () => {
+    if (!ready) return;
+    setToggling(true);
+    try {
+      const data = ready.paused ? await api.gitRemote.resume() : await api.gitRemote.pause();
+      apply(data);
+      toast.success(data.paused ? 'Git remote paused' : 'Git remote resumed — push queued');
+    } catch (err) {
+      toast.error(`Couldn't change the remote: ${errorMessage(err)}`);
+    } finally {
+      if (aliveRef.current) setToggling(false);
+    }
+  };
+
+  const repair = async () => {
+    setRepairing(true);
+    try {
+      const data = await api.gitRemote.forcePush();
+      apply(data);
+      toast.success("The remote's main and gitops now match this workspace");
+    } catch (err) {
+      toast.error(`Couldn't repair the remote: ${errorMessage(err)}`);
+    } finally {
+      if (aliveRef.current) setRepairing(false);
+    }
+  };
+
+  const rotateKey = async () => {
+    setRotating(true);
+    try {
+      const data = await api.gitRemote.rotateKey();
+      apply(data);
+      toast.success('New deploy key generated — add it to your git host and remove the old one');
+    } catch (err) {
+      toast.error(`Couldn't generate a new key: ${errorMessage(err)}`);
+    } finally {
+      if (aliveRef.current) setRotating(false);
+      setConfirmRotate(false);
+    }
+  };
+
   if (state.kind === 'loading') {
     return (
       <EmptyState
@@ -216,11 +265,13 @@ export function GitRemoteCard() {
           Git remote
         </CardTitle>
         <CardDescription className="max-w-2xl leading-relaxed">
-          Bailey mirrors this whole workspace into one repository with one folder per business
-          process. Branches <code>dev</code>, <code>staging</code> and <code>production</code> hold
-          each process&apos;s code as deployed to that stage, <code>gitops</code> holds the
-          deployment manifests, and <code>copies/&lt;name&gt;</code> holds each person&apos;s copy
-          as last published. Pushes run after every deploy or promote, and again every few minutes.
+          Bailey mirrors this workspace into one repository. <code>main</code> holds one folder per
+          business process with its code exactly as it stands on the process&apos;s own main;{' '}
+          <code>gitops</code> holds each process&apos;s deployment manifest, where the dev, staging
+          and production stages are recorded. Pushes run after every deploy or promote and every few
+          minutes. Commits added on top of the remote&apos;s <code>main</code> are pulled back into the
+          workspace before anyone deploys, and copies behind them must sync first. Bailey never
+          force-pushes on its own: a rewritten remote <code>main</code> is reported here instead.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-8">
@@ -230,20 +281,34 @@ export function GitRemoteCard() {
             title="This workspace's SSH public key"
             helper="Add it as a read-write deploy key on GitHub, GitLab or Forgejo. Each workspace has its own key."
             right={
-              <CopyButton
-                text={data.public_key}
-                label="Copy public key"
-                successToast="Public key copied"
-              />
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <CopyButton
+                  text={data.public_key}
+                  label="Copy public key"
+                  successToast="Public key copied"
+                />
+                <Button size="sm" variant="outline" disabled={rotating} onClick={() => setConfirmRotate(true)}>
+                  <KeyRound className="size-3.5" aria-hidden />
+                  Retire key and generate a new one
+                </Button>
+              </div>
             }
           />
           <pre className="select-all whitespace-pre-wrap break-all rounded-md border border-border bg-muted/40 p-3 font-mono text-[12px] leading-relaxed">
             {data.public_key}
           </pre>
           {data.fingerprint && (
-            <div className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
-              <KeyRound className="size-3" aria-hidden />
-              {data.fingerprint}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <KeyRound className="size-3" aria-hidden />
+                {data.fingerprint}
+              </span>
+              {status.key_rotated_at && (
+                <span className="font-sans">
+                  {`Rotated by ${status.key_rotated_by ?? 'an admin'} `}
+                  <RelativeTime value={status.key_rotated_at} />
+                </span>
+              )}
             </div>
           )}
         </section>
@@ -286,7 +351,7 @@ export function GitRemoteCard() {
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={pushing || inProgress}
+                    disabled={pushing || inProgress || data.paused}
                     onClick={() => void pushNow()}
                   >
                     {inProgress || pushing ? (
@@ -295,6 +360,14 @@ export function GitRemoteCard() {
                       <Upload className="size-3.5" aria-hidden />
                     )}
                     {inProgress ? 'Pushing…' : 'Push now'}
+                  </Button>
+                  <Button size="sm" variant="outline" disabled={toggling} onClick={() => void togglePause()}>
+                    {data.paused ? (
+                      <PlayCircle className="size-3.5" aria-hidden />
+                    ) : (
+                      <PauseCircle className="size-3.5" aria-hidden />
+                    )}
+                    {data.paused ? 'Resume' : 'Pause'}
                   </Button>
                   <Button
                     size="sm"
@@ -311,9 +384,11 @@ export function GitRemoteCard() {
           {data.url && data.updated_by && (
             <p className="text-[12px] text-muted-foreground">
               {`Set by ${data.updated_by} `}
-              <RelativeTime value={data.updated_at} />.
+              <RelativeTime value={data.updated_at} />
+              {data.paused ? ' · paused: nothing is pushed or pulled until you resume.' : '.'}
             </p>
           )}
+          <RemoteSetupGuide provider={data.provider ?? undefined} />
         </section>
 
         <section className="space-y-3">
@@ -348,12 +423,43 @@ export function GitRemoteCard() {
                   {`Last push failed: ${status.error}`}
                 </div>
               )}
+              {(status.result === 'diverged' || status.result === 'conflict') && (
+                <div className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[12px]">
+                  <div className="font-semibold text-amber-800 dark:text-amber-300">
+                    {status.result === 'conflict'
+                      ? `Remote changes to ${(status.conflicts ?? []).join(', ')} conflict with work in this workspace`
+                      : "The remote's main is no longer a fast-forward of what this workspace pushed"}
+                  </div>
+                  <p className="text-muted-foreground">
+                    Bailey never force-pushes on its own, so main is not being mirrored. Force push to
+                    replace the remote&apos;s main and gitops with this workspace&apos;s, or pause the
+                    remote until it is sorted out by hand.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="destructive" disabled={repairing} onClick={() => void repair()}>
+                      {repairing ? <Loader2 className="size-3.5 animate-spin" aria-hidden /> : <Upload className="size-3.5" aria-hidden />}
+                      Force push to repair
+                    </Button>
+                    {!data.paused && (
+                      <Button size="sm" variant="outline" disabled={toggling} onClick={() => void togglePause()}>
+                        <PauseCircle className="size-3.5" aria-hidden />
+                        Pause the remote
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+              {status.inbound && status.inbound.length > 0 && (
+                <p className="text-[12px] text-muted-foreground">
+                  {`Last run pulled remote changes into main for ${status.inbound.join(', ')}.`}
+                </p>
+              )}
               {branches.length === 0 && !inProgress && !status.error ? (
                 <EmptyState message="Nothing pushed yet — the first push runs after you save, or press Push now." />
               ) : (
                 <ul className="divide-y divide-border rounded-md border border-border">
                   {branches.map(([name, row]) => {
-                    const meta = RESULT_META[row.result] ?? RESULT_META.pending;
+                    const meta = RESULT_META[row.result] ?? RESULT_META.error;
                     return (
                       <li key={name} className="flex flex-col gap-1 px-3 py-2 text-[13px]">
                         <div className="flex flex-wrap items-center gap-2">
@@ -365,12 +471,7 @@ export function GitRemoteCard() {
                             {`${shortSha(row.local)} → ${shortSha(row.remote)}`}
                           </span>
                         </div>
-                        {row.result === 'diverged' && (
-                          <p className="text-[12px] text-muted-foreground">
-                            {`The remote's ${name} has commits Bailey didn't push. Bailey never force-pushes — reset or delete that branch on the remote, then Push now.`}
-                          </p>
-                        )}
-                        {row.detail && row.result !== 'diverged' && (
+                        {row.detail && (
                           <p className="text-[12px] text-muted-foreground">{row.detail}</p>
                         )}
                       </li>
@@ -389,6 +490,26 @@ export function GitRemoteCard() {
           )}
         </section>
       </CardContent>
+
+      <AlertDialog open={confirmRotate} onOpenChange={setConfirmRotate}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Retire this deploy key?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Bailey generates a new SSH key for this workspace and stops using the current one. Pushes
+              and pulls will fail until you add the new public key to your git host as a read-write
+              deploy key; remove the old key there once you have. The retired key is kept on the server
+              but never used again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={rotating}>Keep the current key</AlertDialogCancel>
+            <AlertDialogAction disabled={rotating} onClick={() => void rotateKey()}>
+              Retire and generate a new key
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={confirmClear} onOpenChange={setConfirmClear}>
         <AlertDialogContent>

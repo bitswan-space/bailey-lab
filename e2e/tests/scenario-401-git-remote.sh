@@ -8,9 +8,11 @@ usage: $0 [<workspace-gitops-container> [<bp-slug>]]
 Exercises issue #401 (workspace git remote) end to end against a running
 workspace: starts a throwaway SSH git server on bitswan_network, registers the
 workspace's deploy key on it, points the workspace at it through the gitops API,
-pushes, and verifies the remote holds one folder per business process on the
-dev and gitops branches. Then it commits directly on the remote's dev branch and
-checks the next push reports "diverged" instead of overwriting it.
+pushes, and verifies the remote's main holds one folder per business process
+plus a README, and gitops holds the manifests. Then it commits on the remote's
+main and checks the pull brings that commit into the process's own main, and
+finally rewrites the remote's main and checks the push is refused as diverged
+until an admin force-pushes to repair.
 
 Run it after a business process has been deployed to dev (the walkthrough's
 deploy chapter). Exit 0 = every check passed, 1 = a check failed, 2 = setup.
@@ -83,6 +85,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 docker exec "$GITSRV" pgrep sshd >/dev/null 2>&1 || { docker logs "$GITSRV" >&2; echo "sshd never came up" >&2; exit 2; }
+rgit() { docker exec "$GITSRV" git --git-dir="$REPO" "$@"; }
 
 echo "=== deploy key ==="
 PUBKEY="$(api localhost:8079/workspace/git-remote | json public_key)"
@@ -117,8 +120,7 @@ wait_for_push() {
 }
 
 echo "=== first push ==="
-api -X POST localhost:8079/workspace/git-remote/push >/dev/null
-status="$(wait_for_push)" || fail "the push did not finish within 3 minutes"
+status="$(wait_for_push)" || fail "the first push did not finish within 3 minutes"
 result="$(printf '%s' "$status" | json status.result)"
 echo "push result: $result"
 if [ "$result" != "ok" ]; then
@@ -126,53 +128,69 @@ if [ "$result" != "ok" ]; then
   fail "first push result is '$result' (error: $(printf '%s' "$status" | json status.error))"
 fi
 
-refs="$(docker exec "$GITSRV" git --git-dir="$REPO" for-each-ref --format='%(refname)')"
-echo "$refs" | grep -qx 'refs/heads/dev' || fail "remote has no dev branch"
+refs="$(rgit for-each-ref --format='%(refname)')"
+echo "$refs" | grep -qx 'refs/heads/main' || fail "remote has no main branch"
 echo "$refs" | grep -qx 'refs/heads/gitops' || fail "remote has no gitops branch"
-echo "$refs" | grep -q '^refs/heads/copies/' || fail "remote has no copies/* branch"
-echo "$refs" | grep -q '^refs/heads/staging$' && echo "staging present" || echo "staging absent (nothing promoted yet)"
+echo "$refs" | grep -q '^refs/heads/\(dev\|staging\|production\|copies/\)' && fail "remote grew stage or copy branches: $refs"
+rgit ls-tree --name-only main | grep -qx "$BP" || fail "main has no $BP/ folder"
+rgit ls-tree --name-only main | grep -qx "README.md" || fail "main has no README.md"
+rgit show main:README.md | grep -q "fast-forward" || fail "README.md does not explain that main is fast-forward only"
+rgit show main:README.md | grep -q "support@bitswan.ai" || fail "README.md has no support address"
+rgit ls-tree --name-only gitops | grep -qx "$BP" || fail "gitops branch has no $BP/ folder"
+rgit cat-file -e "gitops:$BP/bitswan.yaml" || fail "gitops branch has no $BP/bitswan.yaml"
+bp_main_before="$(docker exec "$GITOPS" git --git-dir="/git/$BP.git" rev-parse main)"
+[ "$(rgit rev-parse "main:$BP")" = "$(docker exec "$GITOPS" git --git-dir="/git/$BP.git" rev-parse 'main^{tree}')" ] \
+  || fail "the $BP/ folder on the remote does not match the process's main tree"
 
-docker exec "$GITSRV" git --git-dir="$REPO" ls-tree --name-only dev | grep -qx "$BP" \
-  || fail "dev branch has no $BP/ folder"
-docker exec "$GITSRV" git --git-dir="$REPO" ls-tree --name-only gitops | grep -qx "$BP" \
-  || fail "gitops branch has no $BP/ folder"
-docker exec "$GITSRV" git --git-dir="$REPO" cat-file -e "gitops:$BP/bitswan.yaml" \
-  || fail "gitops branch has no $BP/bitswan.yaml"
-
-remote_dev="$(docker exec "$GITSRV" git --git-dir="$REPO" rev-parse refs/heads/dev)"
-reported="$(printf '%s' "$status" | json status.branches.dev.remote)"
-[ "$remote_dev" = "$reported" ] || fail "status reports dev at '$reported' but the remote is at $remote_dev"
-
-echo "=== divergence is reported, never overwritten ==="
+echo "=== a commit added on the remote is pulled into the process's main ==="
 docker exec "$GITSRV" sh -c "
-  rm -rf /tmp/dev && git clone -q --branch dev $REPO /tmp/dev &&
-  cd /tmp/dev && echo edited > $BP/EDITED-ON-REMOTE &&
+  rm -rf /tmp/work && git clone -q --branch main $REPO /tmp/work &&
+  cd /tmp/work && echo 'edited on the remote' > $BP/EDITED-ON-REMOTE.md &&
+  git -c user.email=reviewer@example.com -c user.name=reviewer add -A &&
+  git -c user.email=reviewer@example.com -c user.name=reviewer commit -qm 'Add a note from the remote' &&
+  git push -q origin main" || fail "could not commit on the remote's main"
+remote_tip="$(rgit rev-parse main)"
+
+pull="$(api -X POST localhost:8079/workspace/git-remote/pull)"
+echo "pull result: $(printf '%s' "$pull" | json result)"
+[ "$(printf '%s' "$pull" | json result)" = "inbound" ] || { echo "$pull" >&2; fail "the pull did not report inbound changes"; }
+printf '%s' "$pull" | python3 -c "import json,sys; sys.exit(0 if '$BP' in json.load(sys.stdin).get('inbound', []) else 1)" \
+  || fail "the pull did not list $BP as pulled"
+bp_main_after="$(docker exec "$GITOPS" git --git-dir="/git/$BP.git" rev-parse main)"
+[ "$bp_main_after" != "$bp_main_before" ] || fail "the process's main did not move after the pull"
+[ "$(docker exec "$GITOPS" git --git-dir="/git/$BP.git" rev-parse 'main^')" = "$bp_main_before" ] \
+  || fail "the pulled commit is not a fast-forward of the previous main"
+[ "$(docker exec "$GITOPS" git --git-dir="/git/$BP.git" show "main:EDITED-ON-REMOTE.md")" = "edited on the remote" ] \
+  || fail "the remote's edit did not reach the process's main"
+[ "$(rgit rev-parse main)" = "$remote_tip" ] || fail "the pull rewrote the remote's main"
+
+echo "=== a rewritten remote main is diverged until an admin repairs it ==="
+docker exec "$GITSRV" sh -c "
+  cd /tmp/work && git checkout -q --orphan rewrite && echo x > unrelated.txt &&
   git -c user.email=x@y -c user.name=x add -A &&
-  git -c user.email=x@y -c user.name=x commit -qm 'foreign edit' &&
-  git push -q origin dev" || fail "could not create a foreign commit on the remote"
-foreign="$(docker exec "$GITSRV" git --git-dir="$REPO" rev-parse refs/heads/dev)"
+  git -c user.email=x@y -c user.name=x commit -qm 'history rewritten' &&
+  git push -q --force origin rewrite:main" || fail "could not rewrite the remote's main"
+rewritten="$(rgit rev-parse main)"
+pull="$(api -X POST localhost:8079/workspace/git-remote/pull)"
+[ "$(printf '%s' "$pull" | json result)" = "diverged" ] || { echo "$pull" >&2; fail "a rewritten remote main was not reported as diverged"; }
+[ "$(rgit rev-parse main)" = "$rewritten" ] || fail "a diverged remote main was overwritten without a repair"
 
-api -X POST localhost:8079/workspace/git-remote/push >/dev/null
-status="$(wait_for_push)" || fail "the second push did not finish"
-[ "$(printf '%s' "$status" | json status.branches.dev.result)" = "diverged" ] \
-  || fail "dev was not reported as diverged: $(printf '%s' "$status" | json status.branches.dev.result)"
-[ "$(docker exec "$GITSRV" git --git-dir="$REPO" rev-parse refs/heads/dev)" = "$foreign" ] \
-  || fail "the remote's dev branch was overwritten"
+repaired="$(api -X POST localhost:8079/workspace/git-remote/force-push)"
+[ "$(printf '%s' "$repaired" | json status.result)" = "ok" ] || { echo "$repaired" >&2; fail "force push to repair did not succeed"; }
+rgit ls-tree --name-only main | grep -qx "$BP" || fail "after the repair main has no $BP/ folder"
+[ "$(rgit rev-parse main)" != "$rewritten" ] || fail "the repair did not replace the rewritten main"
 
-docker exec "$GITSRV" git --git-dir="$REPO" update-ref refs/heads/dev "$remote_dev"
-api -X POST localhost:8079/workspace/git-remote/push >/dev/null
-status="$(wait_for_push)" || fail "the third push did not finish"
-case "$(printf '%s' "$status" | json status.branches.dev.result)" in
-  pushed | up_to_date) ;;
-  *) fail "dev did not recover after resetting the remote: $(printf '%s' "$status" | json status.branches.dev.result)" ;;
-esac
-
-echo "=== clear ==="
+echo "=== pause, resume, clear ==="
+paused="$(api -X POST localhost:8079/workspace/git-remote/pause)"
+[ "$(printf '%s' "$paused" | json paused)" = "True" ] || fail "pause did not set the paused flag"
+[ "$(api -X POST localhost:8079/workspace/git-remote/pull | json result)" = "paused" ] || fail "a paused remote still pulls"
+resumed="$(api -X POST localhost:8079/workspace/git-remote/resume)"
+[ "$(printf '%s' "$resumed" | json paused)" = "False" ] || fail "resume did not clear the paused flag"
 resp="$(api -X DELETE localhost:8079/workspace/git-remote)"
 [ -z "$(printf '%s' "$resp" | json url)" ] || fail "DELETE left the url set"
 
 if [ "$FAILED" = "0" ]; then
-  echo "PASS: workspace mirrored to $URL with $BP/ on dev and gitops, divergence reported, remote cleared"
+  echo "PASS: $BP mirrored to $URL on main and gitops, remote commits pulled into main, rewritten main repaired, remote cleared"
   exit 0
 fi
 exit 1

@@ -1908,6 +1908,26 @@ export class GitopsClient {
     return this.requestJson('POST', '/workspace/git-remote/push');
   }
 
+  gitRemotePull() {
+    return this.requestJson('POST', '/workspace/git-remote/pull');
+  }
+
+  gitRemoteForcePush() {
+    return this.requestJson('POST', '/workspace/git-remote/force-push');
+  }
+
+  gitRemotePause() {
+    return this.requestJson('POST', '/workspace/git-remote/pause');
+  }
+
+  gitRemoteResume() {
+    return this.requestJson('POST', '/workspace/git-remote/resume');
+  }
+
+  gitRemoteRotateKey() {
+    return this.requestJson('POST', '/workspace/git-remote/rotate-key');
+  }
+
   /** Subscribe to upstream events. Returns an unsubscribe function. */
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);

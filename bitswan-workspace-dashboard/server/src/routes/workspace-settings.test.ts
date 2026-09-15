@@ -36,6 +36,26 @@ function buildApp(
       calls.push({ method: 'push' });
       return upstream;
     },
+    async gitRemotePull() {
+      calls.push({ method: 'pull' });
+      return upstream;
+    },
+    async gitRemoteForcePush() {
+      calls.push({ method: 'force-push' });
+      return upstream;
+    },
+    async gitRemotePause() {
+      calls.push({ method: 'pause' });
+      return upstream;
+    },
+    async gitRemoteResume() {
+      calls.push({ method: 'resume' });
+      return upstream;
+    },
+    async gitRemoteRotateKey() {
+      calls.push({ method: 'rotate-key' });
+      return upstream;
+    },
     // eslint-disable-next-line no-restricted-syntax -- minimal test double for the wide GitopsClient class
   } as unknown as GitopsClient;
   const app = Fastify({ logger: false });
@@ -121,5 +141,38 @@ test('clearing and pushing each call gitops once, admin only', async () => {
     403,
   );
   assert.equal(calls.length, 2);
+  await app.close();
+});
+
+test('any signed-in user may pull before deploying, but not anonymously', async () => {
+  const { app, calls } = buildApp(ROLES);
+  assert.equal(
+    (await app.inject({ method: 'POST', url: `${URL}/pull`, headers: MEMBER })).statusCode,
+    200,
+  );
+  assert.deepEqual(calls, [{ method: 'pull' }]);
+  assert.equal((await app.inject({ method: 'POST', url: `${URL}/pull` })).statusCode, 401);
+  assert.equal(calls.length, 1);
+  await app.close();
+});
+
+test('repairing, pausing and resuming are admin only', async () => {
+  const { app, calls } = buildApp(ROLES);
+  for (const path of ['force-push', 'pause', 'resume', 'rotate-key']) {
+    assert.equal(
+      (await app.inject({ method: 'POST', url: `${URL}/${path}`, headers: MEMBER })).statusCode,
+      403,
+    );
+    assert.equal(
+      (await app.inject({ method: 'POST', url: `${URL}/${path}`, headers: ADMIN })).statusCode,
+      200,
+    );
+  }
+  assert.deepEqual(calls, [
+    { method: 'force-push' },
+    { method: 'pause' },
+    { method: 'resume' },
+    { method: 'rotate-key' },
+  ]);
   await app.close();
 });

@@ -12,11 +12,12 @@ export function registerWorkspaceSettingsRoutes(
   app: FastifyInstance,
   { gitops }: WorkspaceSettingsRoutesOptions,
 ): void {
-  const asAdmin = async (
+  const forward = async (
     req: FastifyRequest,
     reply: FastifyReply,
     call: (client: GitopsClient) => Promise<UpstreamResult>,
     failureLog: string,
+    adminOnly: boolean,
   ) => {
     reply.header('Cache-Control', 'no-store');
     if (!gitops) {
@@ -26,9 +27,11 @@ export function registerWorkspaceSettingsRoutes(
     if (!email) {
       return reply.code(401).send({ error: 'not authenticated' });
     }
-    const role = await fwRoleFromRequest(req, gitops, app.log);
-    if (role !== 'admin') {
-      return reply.code(403).send({ error: 'admin only' });
+    if (adminOnly) {
+      const role = await fwRoleFromRequest(req, gitops, app.log);
+      if (role !== 'admin') {
+        return reply.code(403).send({ error: 'admin only' });
+      }
     }
     try {
       const r = await call(gitops);
@@ -43,6 +46,13 @@ export function registerWorkspaceSettingsRoutes(
       return reply.code(502).send({ error: 'gitops unreachable' });
     }
   };
+
+  const asAdmin = (
+    req: FastifyRequest,
+    reply: FastifyReply,
+    call: (client: GitopsClient) => Promise<UpstreamResult>,
+    failureLog: string,
+  ) => forward(req, reply, call, failureLog, true);
 
   app.get('/api/workspace/git-remote', async (req, reply) =>
     asAdmin(req, reply, (client) => client.gitRemote(), 'workspace git remote read failed'),
@@ -68,5 +78,41 @@ export function registerWorkspaceSettingsRoutes(
 
   app.post('/api/workspace/git-remote/push', async (req, reply) =>
     asAdmin(req, reply, (client) => client.gitRemotePush(), 'workspace git remote push failed'),
+  );
+
+  app.post('/api/workspace/git-remote/pull', async (req, reply) =>
+    forward(
+      req,
+      reply,
+      (client) => client.gitRemotePull(),
+      'workspace git remote pull failed',
+      false,
+    ),
+  );
+
+  app.post('/api/workspace/git-remote/force-push', async (req, reply) =>
+    asAdmin(
+      req,
+      reply,
+      (client) => client.gitRemoteForcePush(),
+      'workspace git remote force push failed',
+    ),
+  );
+
+  app.post('/api/workspace/git-remote/pause', async (req, reply) =>
+    asAdmin(req, reply, (client) => client.gitRemotePause(), 'workspace git remote pause failed'),
+  );
+
+  app.post('/api/workspace/git-remote/resume', async (req, reply) =>
+    asAdmin(req, reply, (client) => client.gitRemoteResume(), 'workspace git remote resume failed'),
+  );
+
+  app.post('/api/workspace/git-remote/rotate-key', async (req, reply) =>
+    asAdmin(
+      req,
+      reply,
+      (client) => client.gitRemoteRotateKey(),
+      'workspace git remote key rotation failed',
+    ),
   );
 }

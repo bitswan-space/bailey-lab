@@ -1075,10 +1075,9 @@ export type GitRemoteBranchResult =
   | 'pushed'
   | 'up_to_date'
   | 'diverged'
+  | 'conflict'
   | 'rejected'
-  | 'deleted'
-  | 'error'
-  | 'pending';
+  | 'error';
 
 export interface GitRemoteBranch {
   result: GitRemoteBranchResult;
@@ -1088,16 +1087,33 @@ export interface GitRemoteBranch {
   remote?: string | null;
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable text
   detail?: string | null;
+  inbound?: string[];
+  conflicts?: string[];
 }
 
+export type GitRemoteResult =
+  | 'ok'
+  | 'inbound'
+  | 'partial'
+  | 'diverged'
+  | 'conflict'
+  | 'error'
+  | 'paused'
+  | 'unconfigured';
+
 export interface GitRemoteStatus {
-  result: 'ok' | 'partial' | 'diverged' | 'error' | 'unconfigured';
+  result: GitRemoteResult;
+  paused?: boolean;
+  inbound?: string[];
+  conflicts?: string[];
   trigger?: string;
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable timestamp
   last_attempt_at: string | null;
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable timestamp
   last_success_at: string | null;
   in_progress?: boolean;
+  key_rotated_at?: string;
+  key_rotated_by?: string;
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable text
   error: string | null;
   duration_s?: number;
@@ -1106,9 +1122,23 @@ export interface GitRemoteStatus {
   warnings?: string[];
 }
 
+export interface GitRemotePull {
+  configured: boolean;
+  paused: boolean;
+  result: GitRemoteResult;
+  inbound: string[];
+  conflicts: string[];
+  // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable text
+  error: string | null;
+  branches: Record<string, GitRemoteBranch>;
+}
+
 export interface GitRemote {
   // eslint-disable-next-line no-restricted-syntax -- null = no remote configured
   url: string | null;
+  paused: boolean;
+  // eslint-disable-next-line no-restricted-syntax -- null = no remote configured
+  provider?: 'github' | 'gitlab' | 'other' | null;
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable timestamp
   updated_at?: string | null;
   // eslint-disable-next-line no-restricted-syntax -- wire-mirror nullable email
@@ -1817,6 +1847,11 @@ export const api = {
     set: (url: string) => putJson<GitRemote>('/api/workspace/git-remote', { url }),
     clear: () => delJson<GitRemote>('/api/workspace/git-remote', {}),
     push: () => postJson<GitRemote>('/api/workspace/git-remote/push', {}),
+    pull: () => postJson<GitRemotePull>('/api/workspace/git-remote/pull', {}),
+    forcePush: () => postJson<GitRemote>('/api/workspace/git-remote/force-push', {}),
+    pause: () => postJson<GitRemote>('/api/workspace/git-remote/pause', {}),
+    resume: () => postJson<GitRemote>('/api/workspace/git-remote/resume', {}),
+    rotateKey: () => postJson<GitRemote>('/api/workspace/git-remote/rotate-key', {}),
   },
 
   /** Read-only data explorer (Object Storage / SQL panels). List endpoints

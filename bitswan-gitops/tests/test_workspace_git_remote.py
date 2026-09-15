@@ -109,3 +109,22 @@ def test_ssh_env_pins_the_dedicated_key_and_known_hosts(tmp_path):
     assert remote.known_hosts_path(secrets) in command
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert _mode(remote.known_hosts_path(secrets)) == 0o600
+
+
+def test_rotating_the_keypair_retires_the_old_one_and_generates_a_new_one(tmp_path):
+    secrets = str(tmp_path / "secrets")
+    old_public = asyncio.run(remote.ensure_keypair(secrets))
+    with open(remote.private_key_path(secrets)) as f:
+        old_private = f.read()
+    new_public = asyncio.run(remote.rotate_keypair(secrets))
+    assert new_public != old_public
+    assert new_public.startswith("ssh-ed25519 ")
+    with open(remote.private_key_path(secrets)) as f:
+        assert f.read() != old_private
+    retired_dir = os.path.join(remote.remote_dir(secrets), "retired")
+    retired = os.listdir(retired_dir)
+    assert len(retired) == 1
+    with open(os.path.join(retired_dir, retired[0], remote.PUBLIC_KEY)) as f:
+        assert f.read().strip() == old_public
+    assert _mode(os.path.join(retired_dir, retired[0], remote.PRIVATE_KEY)) == 0o600
+    assert asyncio.run(remote.ensure_keypair(secrets)) == new_public

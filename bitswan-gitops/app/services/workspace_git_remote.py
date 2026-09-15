@@ -74,15 +74,33 @@ def load_config(secrets_dir: str) -> dict:
     cfg = _read_json(os.path.join(secrets_dir, REMOTE_SUBDIR, CONFIG_FILE)) or {}
     return {
         "url": cfg.get("url") or None,
+        "paused": bool(cfg.get("paused")),
         "updated_at": cfg.get("updated_at"),
         "updated_by": cfg.get("updated_by"),
     }
 
 
-def save_config(secrets_dir: str, url: str | None, by: str | None) -> dict:
-    cfg = {"url": url or None, "updated_at": _now_iso(), "updated_by": by or None}
+def save_config(
+    secrets_dir: str, url: str | None, by: str | None, *, paused: bool = False
+) -> dict:
+    cfg = {
+        "url": url or None,
+        "paused": bool(paused) if url else False,
+        "updated_at": _now_iso(),
+        "updated_by": by or None,
+    }
     _write_private_json(os.path.join(remote_dir(secrets_dir), CONFIG_FILE), cfg)
     return cfg
+
+
+def set_paused(secrets_dir: str, paused: bool, by: str | None) -> dict:
+    current = load_config(secrets_dir)
+    return save_config(secrets_dir, current["url"], by, paused=paused)
+
+
+def is_active(secrets_dir: str) -> bool:
+    cfg = load_config(secrets_dir)
+    return bool(cfg["url"]) and not cfg["paused"]
 
 
 def load_status(secrets_dir: str) -> dict:
@@ -120,6 +138,15 @@ def validate_remote_url(url: str) -> str:
             "Local path remotes are disabled on this server. " + SSH_ONLY_MESSAGE
         )
     raise RemoteUrlError(SSH_ONLY_MESSAGE)
+
+
+def remote_provider(url: str) -> str:
+    host = remote_host(url).lower()
+    if host == "github.com" or host.endswith(".github.com"):
+        return "github"
+    if "gitlab" in host:
+        return "gitlab"
+    return "other"
 
 
 def remote_host(url: str) -> str:
@@ -186,6 +213,19 @@ async def ensure_keypair(secrets_dir: str) -> str:
     return _read_public_key(secrets_dir)
 
 
+async def rotate_keypair(secrets_dir: str) -> str:
+    base = remote_dir(secrets_dir)
+    retired = os.path.join(
+        base, "retired", datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    )
+    os.makedirs(retired, mode=0o700, exist_ok=True)
+    for name in (PRIVATE_KEY, PUBLIC_KEY):
+        src = os.path.join(base, name)
+        if os.path.exists(src):
+            os.replace(src, os.path.join(retired, name))
+    return await ensure_keypair(secrets_dir)
+
+
 async def key_fingerprint(secrets_dir: str) -> str:
     out, _, rc = await _run("ssh-keygen", "-lf", public_key_path(secrets_dir))
     if rc != 0:
@@ -227,6 +267,7 @@ async def public_view(secrets_dir: str) -> dict:
     cfg = load_config(secrets_dir)
     return {
         "url": cfg["url"],
+        "paused": cfg["paused"],
         "updated_at": cfg["updated_at"],
         "updated_by": cfg["updated_by"],
         "public_key": public_key,

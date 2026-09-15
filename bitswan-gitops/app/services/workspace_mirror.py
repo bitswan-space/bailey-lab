@@ -1,31 +1,33 @@
 import asyncio
 import logging
 import os
-import re
 import time
 from datetime import datetime, timezone
-from typing import Callable
 
 from app.services import git_server
 from app.services import workspace_git_remote as remote_cfg
+from app.services.bp_git import ff_main_to_ref, refresh_main_bp_checkout
 from app.services.git_server import bp_bare_repo_path, list_bp_repos, validate_bp_name
+from app.services.workspace_readme import workspace_readme
 from app.task_queue import TaskStatus, current_requester, task_queue
-from app.utils import bp_state_dir, bp_state_path, read_bitswan_yaml
+from app.utils import bp_state_dir, bp_state_path
 
 logger = logging.getLogger(__name__)
 
 MIRROR_DIRNAME = ".workspace-mirror"
-STAGES = ("dev", "staging", "production")
+MAIN_BRANCH = "main"
 GITOPS_BRANCH = "gitops"
-COPIES_PREFIX = "copies/"
+BRANCHES = (MAIN_BRANCH, GITOPS_BRANCH)
+REMOTE_NS = "refs/remotes/mirror/"
+README = "README.md"
 DEBOUNCE_S = 5.0
 FETCH_TIMEOUT_S = 300
 LS_REMOTE_TIMEOUT_S = 60
 PUSH_TIMEOUT_S = int(os.environ.get("BITSWAN_GIT_REMOTE_PUSH_TIMEOUT", "600"))
 TASK_KIND = "mirror push"
+INBOUND_TMP_REF = "refs/sync-tmp/remote-main"
 
 _BAILEY_IDENT = ("Bailey", "bailey@bitswan")
-_COPY_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
 _ZERO_SHA = "0" * 40
 
 
@@ -116,7 +118,7 @@ async def import_bp_repo(bp: str) -> list[str]:
         "--prune",
         "--no-tags",
         bp_bare_repo_path(bp),
-        f"+refs/heads/*:refs/bp/{bp}/heads/*",
+        f"+refs/heads/main:refs/bp/{bp}/heads/main",
         f"+refs/tags/deploy/*:refs/bp/{bp}/tags/deploy/*",
         timeout=FETCH_TIMEOUT_S,
     )
@@ -144,12 +146,11 @@ def list_state_bps(gitops_dir: str) -> list[str]:
 async def import_state_repo(gitops_dir: str, bp: str) -> list[str]:
     if not await _ref_is_valid(f"refs/state/{bp}/main"):
         return [f"{bp}: name cannot be used as a git ref; manifests not mirrored"]
-    path = bp_state_path(gitops_dir, bp)
     _, err, rc = await _mgit(
         "fetch",
         "--quiet",
         "--no-tags",
-        path,
+        bp_state_path(gitops_dir, bp),
         f"+refs/heads/main:refs/state/{bp}/main",
         timeout=FETCH_TIMEOUT_S,
     )
@@ -183,65 +184,29 @@ async def _tree_of(commitish: str) -> str | None:
     return tree
 
 
-Entry = tuple[str, str | None]
-
-
-async def resolve_stage_entries(
-    bps: list[str],
-    stage: str,
-    stage_commit: Callable[[str, str], str | None],
-    prev_tip: str | None,
-) -> tuple[dict[str, Entry], list[str]]:
-    entries: dict[str, Entry] = {}
-    warnings: list[str] = []
-    for bp in bps:
-        sha = stage_commit(bp, stage)
-        if not sha and stage == "dev":
-            sha = await _rev(f"refs/bp/{bp}/heads/main")
-        if not sha:
-            continue
-        if not await _commit_exists(sha):
-            prev_tree = await _rev(f"{prev_tip}:{bp}") if prev_tip else None
-            if prev_tree:
-                entries[bp] = (prev_tree, None)
-                warnings.append(
-                    f"{bp}/{stage}: commit {sha[:12]} not found in {bp}.git; kept previous tree"
-                )
-            else:
-                warnings.append(
-                    f"{bp}/{stage}: commit {sha[:12]} not found in {bp}.git; skipped"
-                )
-            continue
-        tree = await _tree_of(sha)
-        if tree:
-            entries[bp] = (tree, sha)
-    return entries, warnings
-
-
-async def resolve_copy_entries(bps: list[str]) -> dict[str, dict[str, Entry]]:
-    out, _, rc = await _mgit(
-        "for-each-ref", "--format=%(refname) %(objectname)", "refs/bp/"
-    )
-    copies: dict[str, dict[str, Entry]] = {}
+async def _ls_tree(treeish: str) -> list[tuple[str, str, str, str]]:
+    out, _, rc = await _mgit("ls-tree", treeish)
+    rows: list[tuple[str, str, str, str]] = []
     if rc != 0:
-        return copies
-    wanted = set(bps)
+        return rows
     for line in out.splitlines():
         if not line.strip():
             continue
-        refname, sha = line.split(" ", 1)
-        parts = refname.split("/")
-        if len(parts) < 5 or parts[3] != "heads":
-            continue
-        bp = parts[2]
-        copy = "/".join(parts[4:])
-        if bp not in wanted or copy == "main" or not _COPY_NAME_RE.match(copy):
-            continue
-        tree = await _tree_of(sha)
-        if not tree:
-            continue
-        copies.setdefault(copy, {})[bp] = (tree, sha)
-    return copies
+        meta, name = line.split("\t", 1)
+        mode, kind, sha = meta.split(" ")
+        rows.append((mode, kind, sha, name))
+    return rows
+
+
+Entry = tuple[str, str | None]
+
+
+async def _readme_blob() -> str:
+    text = workspace_readme(
+        os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace"),
+        os.environ.get("BITSWAN_GITOPS_DOMAIN", ""),
+    )
+    return await _mgit_ok("hash-object", "-w", "--stdin", stdin=text.encode())
 
 
 async def build_composite_commit(
@@ -251,15 +216,32 @@ async def build_composite_commit(
     ident_env: dict,
     trigger: str,
     requester: str | None,
+    with_readme: bool = False,
+    mirrored_ns: str = "refs/bp/",
 ) -> str | None:
     if not entries:
         return None
     ref = f"refs/heads/{branch}"
     prev = await _rev(ref)
-    listing = "".join(
-        f"040000 tree {tree}\t{bp}\n" for bp, (tree, _) in sorted(entries.items())
-    )
-    root_tree = await _mgit_ok("mktree", stdin=listing.encode())
+    lines = [f"040000 tree {tree}\t{bp}" for bp, (tree, _) in sorted(entries.items())]
+    kept_root_files: list[str] = []
+    removed: list[str] = []
+    if prev:
+        for mode, kind, sha, name in await _ls_tree(prev):
+            if name in entries:
+                continue
+            if kind == "tree" and await _rev(f"{mirrored_ns}{name}/main"):
+                removed.append(name)
+                continue
+            if kind == "tree" and await _rev(f"{mirrored_ns}{name}/heads/main"):
+                removed.append(name)
+                continue
+            lines.append(f"{mode} {kind} {sha}\t{name}")
+            if kind != "tree":
+                kept_root_files.append(name)
+    if with_readme and README not in kept_root_files and README not in entries:
+        lines.append(f"100644 blob {await _readme_blob()}\t{README}")
+    root_tree = await _mgit_ok("mktree", stdin=("\n".join(lines) + "\n").encode())
     if prev and await _rev(f"{prev}^{{tree}}") == root_tree:
         return None
 
@@ -272,14 +254,11 @@ async def build_composite_commit(
         if sha and sha not in parents and not (prev and await _is_ancestor(sha, prev)):
             parents.append(sha)
 
-    removed: list[str] = []
-    if prev:
-        names, _, _ = await _mgit("ls-tree", "--name-only", prev)
-        removed = [n for n in names.split() if n not in entries]
-
     summary_parts = list(changed)
     if removed:
         summary_parts.append("removed " + ", ".join(sorted(removed)))
+    if not summary_parts:
+        summary_parts.append(README)
     unchanged = len(entries) - len(changed)
     subject = f"Mirror {branch}: " + ", ".join(summary_parts)
     if unchanged:
@@ -306,13 +285,11 @@ async def mirror_deploy_tags(bps: list[str]) -> dict:
     if rc != 0:
         return counts
     wanted = set(bps)
+    marker = "/tags/deploy/"
     for line in out.splitlines():
-        if not line.strip():
+        if not line.strip() or marker not in line:
             continue
         refname, obj = line.split(" ", 1)
-        marker = "/tags/deploy/"
-        if marker not in refname:
-            continue
         bp = refname.split("/")[2]
         if bp not in wanted:
             continue
@@ -326,70 +303,6 @@ async def mirror_deploy_tags(bps: list[str]) -> dict:
     return counts
 
 
-async def _local_copy_branches() -> list[str]:
-    out, _, rc = await _mgit(
-        "for-each-ref", "--format=%(refname:strip=2)", f"refs/heads/{COPIES_PREFIX}"
-    )
-    if rc != 0:
-        return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
-
-
-async def sync_mirror(
-    *,
-    gitops_dir: str,
-    stage_commit: Callable[[str, str], str | None],
-    requester: str | None,
-    trigger: str,
-) -> dict:
-    await ensure_mirror_repo()
-    warnings: list[str] = []
-    bps = list_bp_repos()
-    for bp in bps:
-        warnings += await import_bp_repo(bp)
-    state_bps = list_state_bps(gitops_dir)
-    for bp in state_bps:
-        warnings += await import_state_repo(gitops_dir, bp)
-
-    ident = _ident_env(requester)
-    build_kwargs = {"ident_env": ident, "trigger": trigger, "requester": requester}
-    heads: dict[str, str | None] = {}
-
-    for stage in STAGES:
-        prev = await _rev(f"refs/heads/{stage}")
-        entries, stage_warnings = await resolve_stage_entries(
-            bps, stage, stage_commit, prev
-        )
-        warnings += stage_warnings
-        await build_composite_commit(stage, entries, **build_kwargs)
-        heads[stage] = await _rev(f"refs/heads/{stage}")
-
-    manifest_entries: dict[str, Entry] = {}
-    for bp in state_bps:
-        sha = await _rev(f"refs/state/{bp}/main")
-        tree = await _tree_of(sha) if sha else None
-        if sha and tree:
-            manifest_entries[bp] = (tree, sha)
-    await build_composite_commit(GITOPS_BRANCH, manifest_entries, **build_kwargs)
-    heads[GITOPS_BRANCH] = await _rev(f"refs/heads/{GITOPS_BRANCH}")
-
-    copy_entries = await resolve_copy_entries(bps)
-    previously = set(await _local_copy_branches())
-    for copy, entries in sorted(copy_entries.items()):
-        branch = f"{COPIES_PREFIX}{copy}"
-        await build_composite_commit(branch, entries, **build_kwargs)
-        heads[branch] = await _rev(f"refs/heads/{branch}")
-    deletions: list[str] = []
-    for branch in sorted(previously):
-        if branch[len(COPIES_PREFIX) :] in copy_entries:
-            continue
-        await _mgit("update-ref", "-d", f"refs/heads/{branch}")
-        deletions.append(branch)
-
-    tags = await mirror_deploy_tags(bps)
-    return {"heads": heads, "deletions": deletions, "tags": tags, "warnings": warnings}
-
-
 def _parse_ls_remote(out: str) -> dict[str, str]:
     refs: dict[str, str] = {}
     for line in out.splitlines():
@@ -400,6 +313,154 @@ def _parse_ls_remote(out: str) -> dict[str, str]:
             continue
         refs[ref.strip()] = sha.strip()
     return refs
+
+
+async def fetch_remote(url: str, env: dict) -> dict[str, str | None]:
+    out, err, rc = await _mgit(
+        "ls-remote", "--heads", "--tags", url, env=env, timeout=LS_REMOTE_TIMEOUT_S
+    )
+    if rc != 0:
+        raise MirrorError(f"cannot reach remote: {_tail(err, 800)}")
+    remote = _parse_ls_remote(out)
+    refspecs = []
+    heads: dict[str, str | None] = {}
+    for branch in BRANCHES:
+        sha = remote.get(f"refs/heads/{branch}")
+        heads[branch] = sha
+        if sha:
+            refspecs.append(f"+refs/heads/{branch}:{REMOTE_NS}{branch}")
+        else:
+            await _mgit("update-ref", "-d", f"{REMOTE_NS}{branch}")
+    if refspecs:
+        _, err, rc = await _mgit(
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            url,
+            *refspecs,
+            env=env,
+            timeout=FETCH_TIMEOUT_S,
+        )
+        if rc != 0:
+            raise MirrorError(f"cannot fetch remote branches: {_tail(err, 800)}")
+    heads["_tags"] = remote
+    return heads
+
+
+async def classify(local: str | None, remote: str | None) -> str:
+    if remote is None:
+        return "absent"
+    if local is None:
+        return "ahead"
+    if local == remote:
+        return "equal"
+    if await _is_ancestor(local, remote):
+        return "ahead"
+    if await _is_ancestor(remote, local):
+        return "behind"
+    return "diverged"
+
+
+async def _remote_author_env(remote: str, prev: str | None, folder: str) -> dict:
+    span = f"{prev}..{remote}" if prev else remote
+    out, _, rc = await _mgit(
+        "log", "-1", "--format=%an%x00%ae%x00%aI", span, "--", folder
+    )
+    env = _ident_env(None)
+    if rc == 0 and out.strip():
+        name, email, date = (out.strip().split("\x00") + ["", "", ""])[:3]
+        if name:
+            env["GIT_AUTHOR_NAME"] = name
+        if email:
+            env["GIT_AUTHOR_EMAIL"] = email
+        if date:
+            env["GIT_AUTHOR_DATE"] = date
+    return env
+
+
+async def _remote_subjects(remote: str, prev: str | None, folder: str) -> list[str]:
+    span = f"{prev}..{remote}" if prev else remote
+    out, _, rc = await _mgit("log", "-5", "--format=%s", span, "--", folder)
+    if rc != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+async def _merged_tree(base_tree: str, local_tree: str, remote_tree: str) -> str | None:
+    env = _ident_env(None)
+    base = await _mgit_ok("commit-tree", base_tree, "-m", "base", env=env)
+    ours = await _mgit_ok("commit-tree", local_tree, "-p", base, "-m", "ours", env=env)
+    theirs = await _mgit_ok(
+        "commit-tree", remote_tree, "-p", base, "-m", "theirs", env=env
+    )
+    out, _, rc = await _mgit("merge-tree", "--write-tree", ours, theirs)
+    if rc != 0:
+        return None
+    return out.splitlines()[0].strip() if out.strip() else None
+
+
+async def import_inbound(
+    prev: str | None, remote: str, bps: list[str], url: str
+) -> tuple[list[str], list[str], list[str]]:
+    imported: list[str] = []
+    conflicts: list[str] = []
+    warnings: list[str] = []
+    host = remote_cfg.remote_host(url)
+    known = set(bps)
+    for _, kind, remote_tree, name in await _ls_tree(remote):
+        if kind != "tree":
+            continue
+        if name not in known:
+            warnings.append(
+                f"{name}/ on the remote is not a business process here; left untouched"
+            )
+            continue
+        local_main = await _rev(f"refs/bp/{name}/heads/main")
+        if not local_main:
+            warnings.append(f"{name}: no main in {name}.git; remote folder skipped")
+            continue
+        local_tree = await _rev(f"{local_main}^{{tree}}")
+        if remote_tree == local_tree:
+            continue
+        prev_tree = await _rev(f"{prev}:{name}") if prev else None
+        if prev_tree == remote_tree:
+            continue
+        tree = remote_tree
+        if prev_tree and prev_tree != local_tree:
+            tree = await _merged_tree(prev_tree, local_tree, remote_tree)
+            if not tree:
+                conflicts.append(name)
+                continue
+        subjects = await _remote_subjects(remote, prev, name)
+        message = f"Pulled from {host}: " + (
+            "; ".join(subjects) if subjects else f"changes to {name}/"
+        )
+        env = await _remote_author_env(remote, prev, name)
+        new = await _mgit_ok(
+            "commit-tree", tree, "-p", local_main, "-m", message, env=env
+        )
+        bare = bp_bare_repo_path(name)
+        _, err, rc = await _mgit("push", "--quiet", bare, f"{new}:{INBOUND_TMP_REF}")
+        if rc != 0:
+            warnings.append(
+                f"{name}: could not transfer the pulled commit: {_tail(err, 200)}"
+            )
+            conflicts.append(name)
+            continue
+        try:
+            await ff_main_to_ref(name, new)
+            await refresh_main_bp_checkout(name)
+        except Exception as e:
+            warnings.append(
+                f"{name}: pulled commit not applied to main: {_tail(str(e), 200)}"
+            )
+            conflicts.append(name)
+            continue
+        finally:
+            await _git("-C", bare, "update-ref", "-d", INBOUND_TMP_REF)
+        await import_bp_repo(name)
+        imported.append(name)
+    return imported, conflicts, warnings
 
 
 def _parse_porcelain(out: str) -> list[tuple[str, str, str]]:
@@ -418,9 +479,9 @@ async def _local_deploy_tags() -> dict[str, str]:
     out, _, rc = await _mgit(
         "for-each-ref", "--format=%(refname) %(objectname)", "refs/tags/deploy/"
     )
-    if rc != 0:
-        return {}
     tags: dict[str, str] = {}
+    if rc != 0:
+        return tags
     for line in out.splitlines():
         if line.strip():
             ref, sha = line.split(" ", 1)
@@ -428,119 +489,62 @@ async def _local_deploy_tags() -> dict[str, str]:
     return tags
 
 
-async def push_mirror(
-    url: str, env: dict, heads: dict[str, str | None], deletions: list[str]
+async def push_refs(
+    url: str,
+    env: dict,
+    branches: list[str],
+    remote_tags: dict[str, str],
+    *,
+    force: bool,
 ) -> dict:
-    result: dict = {
-        "result": "ok",
-        "error": None,
+    result = {
         "branches": {},
         "tags": {"pushed": 0, "up_to_date": 0, "rejected": 0},
+        "error": None,
     }
-    out, err, rc = await _mgit(
-        "ls-remote", "--heads", "--tags", url, env=env, timeout=LS_REMOTE_TIMEOUT_S
-    )
-    if rc != 0:
-        result["result"] = "error"
-        result["error"] = f"cannot reach remote: {_tail(err, 800)}"
-        return result
-    remote = _parse_ls_remote(out)
-
-    refspecs: list[str] = []
-    for branch, local in heads.items():
-        if not local:
-            continue
-        ref = f"refs/heads/{branch}"
-        remote_sha = remote.get(ref)
-        row = {
-            "local": local,
-            "remote": remote_sha,
-            "result": "pending",
-            "detail": None,
-        }
-        if remote_sha == local:
-            row["result"] = "up_to_date"
-        elif remote_sha is None or (
-            await _commit_exists(remote_sha) and await _is_ancestor(remote_sha, local)
-        ):
-            refspecs.append(f"{ref}:{ref}")
-        else:
-            row["result"] = "diverged"
-            row["detail"] = (
-                f"remote {branch} is at {remote_sha[:12]}, which this workspace did not "
-                "push; left untouched (never force-pushed)"
-            )
-        result["branches"][branch] = row
-
-    for branch in deletions:
-        ref = f"refs/heads/{branch}"
-        if ref not in remote:
-            continue
-        refspecs.append(f":{ref}")
-        result["branches"][branch] = {
-            "local": None,
-            "remote": remote[ref],
-            "result": "pending",
-            "detail": "copy no longer exists; deleting on the remote",
-        }
-
+    refspecs = [
+        f"{'+' if force else ''}refs/heads/{b}:refs/heads/{b}" for b in branches
+    ]
     local_tags = await _local_deploy_tags()
-    stale_tags = [ref for ref, sha in local_tags.items() if remote.get(ref) != sha]
-    result["tags"]["up_to_date"] = len(local_tags) - len(stale_tags)
-    if stale_tags:
+    stale = [ref for ref, sha in local_tags.items() if remote_tags.get(ref) != sha]
+    result["tags"]["up_to_date"] = len(local_tags) - len(stale)
+    if stale:
         refspecs.append("refs/tags/deploy/*:refs/tags/deploy/*")
-
-    if refspecs:
-        out, err, rc = await _mgit(
-            "push",
-            "--porcelain",
-            "--no-follow-tags",
-            url,
-            *refspecs,
-            env=env,
-            timeout=PUSH_TIMEOUT_S,
+    if not refspecs:
+        return result
+    out, err, rc = await _mgit(
+        "push",
+        "--porcelain",
+        "--no-follow-tags",
+        url,
+        *refspecs,
+        env=env,
+        timeout=PUSH_TIMEOUT_S,
+    )
+    rows = _parse_porcelain(out)
+    if rc != 0 and not rows:
+        result["error"] = f"push failed: {_tail(err, 800)}"
+        for b in branches:
+            result["branches"][b] = ("error", result["error"])
+        return result
+    for flag, dst, summary in rows:
+        if dst.startswith("refs/tags/"):
+            key = (
+                "rejected" if flag == "!" else "up_to_date" if flag == "=" else "pushed"
+            )
+            result["tags"][key] += 1
+            continue
+        name = dst[len("refs/heads/") :] if dst.startswith("refs/heads/") else dst
+        if flag == "!":
+            result["branches"][name] = ("rejected", summary or "rejected by the remote")
+        elif flag == "=":
+            result["branches"][name] = ("up_to_date", None)
+        else:
+            result["branches"][name] = ("pushed", None)
+    for b in branches:
+        result["branches"].setdefault(
+            b, ("error", _tail(err, 300) or "no result from git push")
         )
-        rows = _parse_porcelain(out)
-        if rc != 0 and not rows:
-            result["result"] = "error"
-            result["error"] = f"push failed: {_tail(err, 800)}"
-            return result
-        for flag, dst, summary in rows:
-            if dst.startswith("refs/tags/"):
-                if flag == "!":
-                    result["tags"]["rejected"] += 1
-                elif flag == "=":
-                    result["tags"]["up_to_date"] += 1
-                else:
-                    result["tags"]["pushed"] += 1
-                continue
-            branch = dst[len("refs/heads/") :] if dst.startswith("refs/heads/") else dst
-            row = result["branches"].get(branch)
-            if row is None:
-                continue
-            if flag == "!":
-                row["result"] = "rejected"
-                row["detail"] = summary or "rejected by the remote"
-            elif flag == "=":
-                row["result"] = "up_to_date"
-            elif flag == "-":
-                row["result"] = "deleted"
-            else:
-                row["result"] = "pushed"
-                row["remote"] = row["local"]
-        for row in result["branches"].values():
-            if row["result"] == "pending":
-                row["result"] = "error"
-                row["detail"] = _tail(err, 300) or "no result reported by git push"
-
-    rows = result["branches"].values()
-    if any(r["result"] == "error" for r in rows):
-        result["result"] = "error"
-        result["error"] = result["error"] or "some branches could not be pushed"
-    elif any(r["result"] == "diverged" for r in rows):
-        result["result"] = "diverged"
-    elif any(r["result"] == "rejected" for r in rows) or result["tags"]["rejected"]:
-        result["result"] = "partial"
     return result
 
 
@@ -550,30 +554,29 @@ def _service():
     return get_automation_service()
 
 
-def stage_commit_lookup(gitops_dir: str) -> Callable[[str, str], str | None]:
-    processes = (read_bitswan_yaml(gitops_dir) or {}).get("business_processes") or {}
-
-    def lookup(bp: str, stage: str) -> str | None:
-        stage_key = "production" if stage in ("", "production") else stage
-        node = ((processes.get(bp) or {}).get(stage_key)) or {}
-        return node.get("git_commit") or None
-
-    return lookup
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-async def run_mirror_push(trigger: str, requester: str | None) -> dict:
+def _row(local, remote, state, detail=None, **extra) -> dict:
+    row = {"local": local, "remote": remote, "result": state, "detail": detail}
+    row.update(extra)
+    return row
+
+
+async def run_mirror_sync(
+    trigger: str, requester: str | None, *, force: bool = False
+) -> dict:
     svc = _service()
     secrets_dir = svc.secrets_dir
     previous = remote_cfg.load_status(secrets_dir)
     started = time.monotonic()
+    cfg = remote_cfg.load_config(secrets_dir)
     status: dict = {
         "result": "unconfigured",
         "trigger": trigger,
         "requester": requester,
+        "paused": cfg["paused"],
         "last_attempt_at": _now_iso(),
         "last_success_at": previous.get("last_success_at"),
         "duration_s": 0.0,
@@ -581,45 +584,167 @@ async def run_mirror_push(trigger: str, requester: str | None) -> dict:
         "branches": {},
         "tags": {},
         "warnings": [],
+        "inbound": [],
+        "conflicts": [],
     }
-    cfg = remote_cfg.load_config(secrets_dir)
     if not cfg["url"]:
         remote_cfg.save_status(secrets_dir, status)
         return status
+    if cfg["paused"] and not force:
+        status["result"] = "paused"
+        status["branches"] = previous.get("branches") or {}
+        remote_cfg.save_status(secrets_dir, status)
+        return status
+    url = cfg["url"]
     try:
         await remote_cfg.ensure_keypair(secrets_dir)
-        synced = await sync_mirror(
-            gitops_dir=svc.gitops_dir,
-            stage_commit=stage_commit_lookup(svc.gitops_dir),
-            requester=requester,
-            trigger=trigger,
+        env = remote_cfg.ssh_env(secrets_dir)
+        await ensure_mirror_repo()
+        bps = list_bp_repos()
+        for bp in bps:
+            status["warnings"] += await import_bp_repo(bp)
+        state_bps = list_state_bps(svc.gitops_dir)
+        for bp in state_bps:
+            status["warnings"] += await import_state_repo(svc.gitops_dir, bp)
+
+        remote = await fetch_remote(url, env)
+        ident = _ident_env(requester)
+        build = {"ident_env": ident, "trigger": trigger, "requester": requester}
+        to_push: list[str] = []
+
+        local_main = await _rev(f"refs/heads/{MAIN_BRANCH}")
+        remote_main = remote[MAIN_BRANCH]
+        main_state = await classify(local_main, remote_main)
+        if force and main_state in ("diverged", "ahead"):
+            main_state = "force"
+        if main_state == "ahead":
+            imported, conflicts, warnings = await import_inbound(
+                local_main, remote_main, bps, url
+            )
+            status["inbound"] = imported
+            status["conflicts"] = conflicts
+            status["warnings"] += warnings
+            if conflicts:
+                main_state = "conflict"
+            else:
+                await _mgit_ok(
+                    "update-ref",
+                    f"refs/heads/{MAIN_BRANCH}",
+                    remote_main,
+                    local_main or _ZERO_SHA,
+                )
+                for bp in imported:
+                    status["warnings"] += await import_bp_repo(bp)
+        if main_state in ("absent", "equal", "behind", "ahead", "force"):
+            entries: dict[str, Entry] = {}
+            for bp in bps:
+                sha = await _rev(f"refs/bp/{bp}/heads/main")
+                tree = await _tree_of(sha) if sha else None
+                if sha and tree:
+                    entries[bp] = (tree, sha)
+            await build_composite_commit(
+                MAIN_BRANCH, entries, with_readme=True, **build
+            )
+            local_main = await _rev(f"refs/heads/{MAIN_BRANCH}")
+            if local_main and local_main != remote_main:
+                to_push.append(MAIN_BRANCH)
+            status["branches"][MAIN_BRANCH] = _row(
+                local_main, remote_main, "up_to_date", inbound=status["inbound"]
+            )
+        elif main_state == "conflict":
+            status["branches"][MAIN_BRANCH] = _row(
+                local_main,
+                remote_main,
+                "conflict",
+                "remote changes to "
+                + ", ".join(status["conflicts"])
+                + " conflict with work in this workspace; main was not pushed",
+                inbound=status["inbound"],
+                conflicts=status["conflicts"],
+            )
+        else:
+            status["branches"][MAIN_BRANCH] = _row(
+                local_main,
+                remote_main,
+                "diverged",
+                f"remote main is at {remote_main[:12]}, which is not a fast-forward of "
+                "what this workspace pushed; main was not pushed (never force-pushed)",
+            )
+
+        manifest_entries: dict[str, Entry] = {}
+        for bp in state_bps:
+            sha = await _rev(f"refs/state/{bp}/main")
+            tree = await _tree_of(sha) if sha else None
+            if sha and tree:
+                manifest_entries[bp] = (tree, sha)
+        await build_composite_commit(
+            GITOPS_BRANCH, manifest_entries, mirrored_ns="refs/state/", **build
         )
-        pushed = await push_mirror(
-            cfg["url"],
-            remote_cfg.ssh_env(secrets_dir),
-            synced["heads"],
-            synced["deletions"],
-        )
+        local_gitops = await _rev(f"refs/heads/{GITOPS_BRANCH}")
+        remote_gitops = remote[GITOPS_BRANCH]
+        gitops_state = await classify(local_gitops, remote_gitops)
+        if local_gitops and (gitops_state in ("absent", "behind") or force):
+            to_push.append(GITOPS_BRANCH)
+            status["branches"][GITOPS_BRANCH] = _row(
+                local_gitops, remote_gitops, "up_to_date"
+            )
+        elif local_gitops and gitops_state == "equal":
+            status["branches"][GITOPS_BRANCH] = _row(
+                local_gitops, remote_gitops, "up_to_date"
+            )
+        elif local_gitops:
+            status["branches"][GITOPS_BRANCH] = _row(
+                local_gitops,
+                remote_gitops,
+                "diverged",
+                f"remote gitops is at {remote_gitops[:12]}, which this workspace did not push; "
+                "left untouched",
+            )
+
+        status["tags"] = await mirror_deploy_tags(bps)
+        pushed = await push_refs(url, env, to_push, remote["_tags"], force=force)
+        status["tags"].update(pushed["tags"])
+        status["error"] = pushed["error"]
+        for name, (state, detail) in pushed["branches"].items():
+            row = status["branches"].get(name)
+            if row is None:
+                continue
+            row["result"] = state
+            row["detail"] = detail or row.get("detail")
+            if state == "pushed":
+                row["remote"] = row["local"]
     except Exception as e:
         status["result"] = "error"
         status["error"] = _tail(str(e), 2000)
         status["duration_s"] = round(time.monotonic() - started, 1)
         remote_cfg.save_status(secrets_dir, status)
         raise
-    status.update(
-        result=pushed["result"],
-        error=pushed["error"],
-        branches=pushed["branches"],
-        tags={**synced["tags"], **pushed["tags"]},
-        warnings=synced["warnings"],
-        duration_s=round(time.monotonic() - started, 1),
-    )
-    if pushed["result"] != "error":
+
+    states = [r["result"] for r in status["branches"].values()]
+    if status["error"] or "error" in states:
+        status["result"] = "error"
+        status["error"] = status["error"] or "some branches could not be pushed"
+    elif "conflict" in states:
+        status["result"] = "conflict"
+    elif "diverged" in states:
+        status["result"] = "diverged"
+    elif "rejected" in states or status["tags"].get("rejected"):
+        status["result"] = "partial"
+    elif status["inbound"]:
+        status["result"] = "inbound"
+    else:
+        status["result"] = "ok"
+    status["duration_s"] = round(time.monotonic() - started, 1)
+    if status["result"] != "error":
         status["last_success_at"] = status["last_attempt_at"]
     remote_cfg.save_status(secrets_dir, status)
-    if pushed["result"] == "error":
-        raise MirrorError(pushed["error"] or "mirror push failed")
+    if status["result"] == "error":
+        raise MirrorError(status["error"])
     return status
+
+
+async def run_mirror_push(trigger: str, requester: str | None) -> dict:
+    return await run_mirror_sync(trigger, requester)
 
 
 _queued_task_id: str | None = None
@@ -673,11 +798,11 @@ def _fire_debounced() -> None:
     pending, _pending = _pending, None
     if pending is None or _still_queued(_queued_task_id):
         return
-    url = remote_cfg.load_config(_service().secrets_dir)["url"]
-    if not url:
+    cfg = remote_cfg.load_config(_service().secrets_dir)
+    if not cfg["url"] or cfg["paused"]:
         return
     try:
-        _submit(pending[0], pending[1], url)
+        _submit(pending[0], pending[1], cfg["url"])
     except Exception:
         logger.warning("debounced mirror push could not be queued", exc_info=True)
 
@@ -687,8 +812,8 @@ def request_push(
 ) -> str | None:
     global _debounce_handle, _pending
     requester = (requester or "").strip() or current_requester.get()
-    url = remote_cfg.load_config(_service().secrets_dir)["url"]
-    if not url:
+    cfg = remote_cfg.load_config(_service().secrets_dir)
+    if not cfg["url"] or cfg["paused"]:
         return None
     if _still_queued(_queued_task_id):
         return _queued_task_id
@@ -697,7 +822,7 @@ def request_push(
             _debounce_handle.cancel()
             _debounce_handle = None
             _pending = None
-        return _submit(trigger, requester, url)
+        return _submit(trigger, requester, cfg["url"])
     _pending = (trigger, requester)
     if _debounce_handle is None:
         loop = asyncio.get_running_loop()
@@ -711,3 +836,15 @@ def cancel_pending() -> None:
         _debounce_handle.cancel()
     _debounce_handle = None
     _pending = None
+
+
+async def run_inline(
+    trigger: str, requester: str | None, *, force: bool = False
+) -> dict:
+    task_id = await task_queue.acquire(
+        TASK_KIND, requester_email=requester, label=trigger
+    )
+    try:
+        return await run_mirror_sync(trigger, requester, force=force)
+    finally:
+        task_queue.release(task_id)
