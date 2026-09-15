@@ -1077,6 +1077,7 @@ export type GitRemoteBranchResult =
   | 'diverged'
   | 'conflict'
   | 'rejected'
+  | 'deleted'
   | 'error';
 
 export interface GitRemoteBranch {

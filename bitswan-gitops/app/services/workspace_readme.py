@@ -46,6 +46,11 @@ to `main` as described below. {dashboard_line}
 - `gitops` — one folder per business process holding its `bitswan.yaml`, the
   deployment manifest. The dev, staging and production stages are recorded
   there (which commit each stage runs), not as branches.
+- `copies/<name>` — each person's copy (and each experiment), one folder per
+  business process it holds, as last published inside the workspace. These are
+  **read-only mirrors**: Bailey overwrites them on every push and removes them
+  when the copy is deleted, so anything committed to them here is lost. Work in
+  a copy through the workspace dashboard instead.
 - `deploy/<process>/<timestamp>` tags mark each deploy of a process.
 
 ## `main` is fast-forward only
@@ -53,7 +58,7 @@ to `main` as described below. {dashboard_line}
 Inside the workspace every process's `main` only ever moves forward: a deploy
 fast-forwards it to the deployed copy, and history is never rewritten. The
 mirror keeps the same rule. Bailey pushes `main` here as a fast-forward and
-never force-pushes on its own.
+never force-pushes `main` or `gitops` on its own.
 
 You may push commits **on top of** `main` here (edit a file in a process
 folder, merge a pull request). Before a copy is deployed — and on a regular

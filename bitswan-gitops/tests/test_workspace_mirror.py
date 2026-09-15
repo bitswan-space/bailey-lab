@@ -95,6 +95,16 @@ class Workspace:
         _git("commit", "-qm", f"deploy {bp}", cwd=state)
         return _out("rev-parse", "HEAD", cwd=state)
 
+    def push_copy_branch(self, bp, copy, text):
+        bare = git_server.bp_bare_repo_path(bp)
+        work = str(self.tmp_path / f"copy-{copy}-{bp}")
+        if not os.path.isdir(work):
+            _git("clone", "-q", bare, work)
+            _git("checkout", "-qb", copy, cwd=work)
+        sha = _commit(work, "main.py", text, f"{copy} work on {bp}")
+        _git("push", "-q", bare, f"HEAD:refs/heads/{copy}", cwd=work)
+        return sha
+
     def tag_deploy(self, bp, ts, subject):
         bare = git_server.bp_bare_repo_path(bp)
         _git(
@@ -501,3 +511,51 @@ def test_run_inline_holds_the_queue_turn_and_returns_the_status(ws, monkeypatch)
     status, kinds = asyncio.run(go())
     assert status["result"] == "ok"
     assert kinds == [(mirror.TASK_KIND, "completed")]
+
+
+def test_copy_branches_are_read_only_mirrors_overwritten_and_removed(ws):
+    ws.configure()
+    ws.push_copy_branch("bpa", "alice", "alice-a\n")
+    ws.push_copy_branch("bpb", "alice", "alice-b\n")
+    ws.push_copy_branch("bpa", "exp-1", "experiment\n")
+    status = ws.run()
+    assert status["result"] == "ok"
+    assert status["branches"]["copies/alice"]["result"] == "pushed"
+    assert status["branches"]["copies/exp-1"]["result"] == "pushed"
+    assert ws.remote_out("ls-tree", "--name-only", "copies/alice").split() == [
+        "bpa",
+        "bpb",
+    ]
+    assert ws.remote_out("ls-tree", "--name-only", "copies/exp-1").split() == ["bpa"]
+    assert ws.remote_out("show", "copies/alice:bpa/main.py") == "alice-a"
+    assert ws.remote_out("ls-tree", "--name-only", "main").split() == [
+        "README.md",
+        "bpa",
+        "bpb",
+    ]
+
+    clone = ws.remote_clone(branch="copies/alice", name="alice-remote")
+    _commit(clone, "bpa/stray.txt", "committed on the remote\n", "stray commit")
+    _git("push", "-q", "origin", "HEAD:copies/alice", cwd=clone)
+    ws.push_copy_branch("bpa", "alice", "alice-a2\n")
+    status = ws.run()
+    assert status["result"] == "ok"
+    assert status["branches"]["copies/alice"]["result"] == "pushed"
+    assert ws.remote_out("show", "copies/alice:bpa/main.py") == "alice-a2"
+    assert (
+        _git(
+            "-C", ws.remote, "cat-file", "-e", "copies/alice:bpa/stray.txt", check=False
+        ).returncode
+        != 0
+    )
+    assert ws.remote_out("rev-parse", "main") == ws.mirror_out("rev-parse", "main")
+
+    asyncio.run(git_server.delete_copy_branch("bpa", "exp-1"))
+    status = ws.run()
+    assert status["branches"]["copies/exp-1"]["result"] == "deleted"
+    heads = ws.remote_out("for-each-ref", "--format=%(refname)", "refs/heads").split()
+    assert "refs/heads/copies/exp-1" not in heads
+    assert "refs/heads/copies/alice" in heads
+    status = ws.run()
+    assert status["branches"]["copies/alice"]["result"] == "up_to_date"
+    assert "copies/exp-1" not in status["branches"]

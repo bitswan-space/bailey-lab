@@ -131,7 +131,8 @@ fi
 refs="$(rgit for-each-ref --format='%(refname)')"
 echo "$refs" | grep -qx 'refs/heads/main' || fail "remote has no main branch"
 echo "$refs" | grep -qx 'refs/heads/gitops' || fail "remote has no gitops branch"
-echo "$refs" | grep -q '^refs/heads/\(dev\|staging\|production\|copies/\)' && fail "remote grew stage or copy branches: $refs"
+echo "$refs" | grep -q '^refs/heads/\(dev\|staging\|production\)$' && fail "remote grew stage branches: $refs"
+echo "$refs" | grep -q '^refs/heads/copies/' || fail "remote has no read-only copies/* branch"
 rgit ls-tree --name-only main | grep -qx "$BP" || fail "main has no $BP/ folder"
 rgit ls-tree --name-only main | grep -qx "README.md" || fail "main has no README.md"
 rgit show main:README.md | grep -q "fast-forward" || fail "README.md does not explain that main is fast-forward only"
@@ -190,7 +191,7 @@ resp="$(api -X DELETE localhost:8079/workspace/git-remote)"
 [ -z "$(printf '%s' "$resp" | json url)" ] || fail "DELETE left the url set"
 
 if [ "$FAILED" = "0" ]; then
-  echo "PASS: $BP mirrored to $URL on main and gitops, remote commits pulled into main, rewritten main repaired, remote cleared"
+  echo "PASS: $BP mirrored to $URL on main, gitops and copies/*, remote commits pulled into main, rewritten main repaired, remote cleared"
   exit 0
 fi
 exit 1

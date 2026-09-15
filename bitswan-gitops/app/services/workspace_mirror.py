@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -18,6 +19,7 @@ MIRROR_DIRNAME = ".workspace-mirror"
 MAIN_BRANCH = "main"
 GITOPS_BRANCH = "gitops"
 BRANCHES = (MAIN_BRANCH, GITOPS_BRANCH)
+COPIES_PREFIX = "copies/"
 REMOTE_NS = "refs/remotes/mirror/"
 README = "README.md"
 DEBOUNCE_S = 5.0
@@ -28,6 +30,7 @@ TASK_KIND = "mirror push"
 INBOUND_TMP_REF = "refs/sync-tmp/remote-main"
 
 _BAILEY_IDENT = ("Bailey", "bailey@bitswan")
+_COPY_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-]*$")
 _ZERO_SHA = "0" * 40
 
 
@@ -118,7 +121,7 @@ async def import_bp_repo(bp: str) -> list[str]:
         "--prune",
         "--no-tags",
         bp_bare_repo_path(bp),
-        f"+refs/heads/main:refs/bp/{bp}/heads/main",
+        f"+refs/heads/*:refs/bp/{bp}/heads/*",
         f"+refs/tags/deploy/*:refs/bp/{bp}/tags/deploy/*",
         timeout=FETCH_TIMEOUT_S,
     )
@@ -277,6 +280,62 @@ async def build_composite_commit(
     return new
 
 
+async def resolve_copy_entries(bps: list[str]) -> dict[str, dict[str, Entry]]:
+    out, _, rc = await _mgit(
+        "for-each-ref", "--format=%(refname) %(objectname)", "refs/bp/"
+    )
+    copies: dict[str, dict[str, Entry]] = {}
+    if rc != 0:
+        return copies
+    wanted = set(bps)
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        refname, sha = line.split(" ", 1)
+        parts = refname.split("/")
+        if len(parts) < 5 or parts[3] != "heads":
+            continue
+        bp = parts[2]
+        copy = "/".join(parts[4:])
+        if bp not in wanted or copy == "main" or not _COPY_NAME_RE.match(copy):
+            continue
+        tree = await _tree_of(sha)
+        if not tree:
+            continue
+        copies.setdefault(copy, {})[bp] = (tree, sha)
+    return copies
+
+
+async def _local_copy_branches() -> list[str]:
+    out, _, rc = await _mgit(
+        "for-each-ref", "--format=%(refname:strip=2)", f"refs/heads/{COPIES_PREFIX}"
+    )
+    if rc != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+async def mirror_copy_branches(
+    bps: list[str], build: dict
+) -> tuple[dict[str, str], list[str]]:
+    heads: dict[str, str] = {}
+    copy_entries = await resolve_copy_entries(bps)
+    previously = set(await _local_copy_branches())
+    for copy, entries in sorted(copy_entries.items()):
+        branch = f"{COPIES_PREFIX}{copy}"
+        await build_composite_commit(branch, entries, **build)
+        sha = await _rev(f"refs/heads/{branch}")
+        if sha:
+            heads[branch] = sha
+    deletions: list[str] = []
+    for branch in sorted(previously):
+        if branch[len(COPIES_PREFIX) :] in copy_entries:
+            continue
+        await _mgit("update-ref", "-d", f"refs/heads/{branch}")
+        deletions.append(branch)
+    return heads, deletions
+
+
 async def mirror_deploy_tags(bps: list[str]) -> dict:
     counts = {"created": 0, "existing": 0}
     out, _, rc = await _mgit(
@@ -344,6 +403,11 @@ async def fetch_remote(url: str, env: dict) -> dict[str, str | None]:
         if rc != 0:
             raise MirrorError(f"cannot fetch remote branches: {_tail(err, 800)}")
     heads["_tags"] = remote
+    heads["_copies"] = {
+        ref[len("refs/heads/") :]: sha
+        for ref, sha in remote.items()
+        if ref.startswith(f"refs/heads/{COPIES_PREFIX}")
+    }
     return heads
 
 
@@ -496,6 +560,8 @@ async def push_refs(
     remote_tags: dict[str, str],
     *,
     force: bool,
+    forced_branches: list[str] | None = None,
+    deletions: list[str] | None = None,
 ) -> dict:
     result = {
         "branches": {},
@@ -505,6 +571,9 @@ async def push_refs(
     refspecs = [
         f"{'+' if force else ''}refs/heads/{b}:refs/heads/{b}" for b in branches
     ]
+    refspecs += [f"+refs/heads/{b}:refs/heads/{b}" for b in forced_branches or []]
+    refspecs += [f":refs/heads/{b}" for b in deletions or []]
+    branches = list(branches) + list(forced_branches or []) + list(deletions or [])
     local_tags = await _local_deploy_tags()
     stale = [ref for ref, sha in local_tags.items() if remote_tags.get(ref) != sha]
     result["tags"]["up_to_date"] = len(local_tags) - len(stale)
@@ -539,6 +608,8 @@ async def push_refs(
             result["branches"][name] = ("rejected", summary or "rejected by the remote")
         elif flag == "=":
             result["branches"][name] = ("up_to_date", None)
+        elif flag == "-":
+            result["branches"][name] = ("deleted", None)
         else:
             result["branches"][name] = ("pushed", None)
     for b in branches:
@@ -701,8 +772,32 @@ async def run_mirror_sync(
                 "left untouched",
             )
 
+        copy_heads, copy_deletions = await mirror_copy_branches(bps, build)
+        forced_copies: list[str] = []
+        for branch, sha in copy_heads.items():
+            remote_sha = remote["_copies"].get(branch)
+            if remote_sha != sha:
+                forced_copies.append(branch)
+            status["branches"][branch] = _row(sha, remote_sha, "up_to_date")
+        deletions = [b for b in copy_deletions if b in remote["_copies"]]
+        for branch in deletions:
+            status["branches"][branch] = _row(
+                None,
+                remote["_copies"][branch],
+                "up_to_date",
+                "copy no longer exists; removed from the remote",
+            )
+
         status["tags"] = await mirror_deploy_tags(bps)
-        pushed = await push_refs(url, env, to_push, remote["_tags"], force=force)
+        pushed = await push_refs(
+            url,
+            env,
+            to_push,
+            remote["_tags"],
+            force=force,
+            forced_branches=forced_copies,
+            deletions=deletions,
+        )
         status["tags"].update(pushed["tags"])
         status["error"] = pushed["error"]
         for name, (state, detail) in pushed["branches"].items():

@@ -31,6 +31,7 @@ type CardState =
 const ACTIVE_POLL_MS = 3000;
 const IDLE_POLL_MS = 30000;
 const FIXED_BRANCH_ORDER = ['main', 'gitops'];
+const RESULT_FALLBACK = 'error';
 
 const RESULT_META: Record<
   GitRemoteBranch['result'],
@@ -48,6 +49,7 @@ const RESULT_META: Record<
     variant: 'outline',
     className: 'border-amber-500/60 text-amber-700 dark:text-amber-400',
   },
+  deleted: { label: 'Removed', variant: 'secondary' },
   rejected: { label: 'Rejected', variant: 'destructive' },
   error: { label: 'Error', variant: 'destructive' },
 };
@@ -268,8 +270,9 @@ export function GitRemoteCard() {
           Bailey mirrors this workspace into one repository. <code>main</code> holds one folder per
           business process with its code exactly as it stands on the process&apos;s own main;{' '}
           <code>gitops</code> holds each process&apos;s deployment manifest, where the dev, staging
-          and production stages are recorded. Pushes run after every deploy or promote and every few
-          minutes. Commits added on top of the remote&apos;s <code>main</code> are pulled back into the
+          and production stages are recorded; <code>copies/&lt;name&gt;</code> mirrors each
+          person&apos;s copy read-only (overwritten on every push, removed with the copy). Pushes run
+          after every deploy or promote and every few minutes. Commits added on top of the remote&apos;s <code>main</code> are pulled back into the
           workspace before anyone deploys, and copies behind them must sync first. Bailey never
           force-pushes on its own: a rewritten remote <code>main</code> is reported here instead.
         </CardDescription>
@@ -459,7 +462,7 @@ export function GitRemoteCard() {
               ) : (
                 <ul className="divide-y divide-border rounded-md border border-border">
                   {branches.map(([name, row]) => {
-                    const meta = RESULT_META[row.result] ?? RESULT_META.error;
+                    const meta = RESULT_META[row.result] ?? RESULT_META[RESULT_FALLBACK];
                     return (
                       <li key={name} className="flex flex-col gap-1 px-3 py-2 text-[13px]">
                         <div className="flex flex-wrap items-center gap-2">
