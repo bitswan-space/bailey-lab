@@ -16,6 +16,7 @@ from .snapshot_manager import snapshot_manager
 from .event_broadcaster import event_broadcaster
 from .services.process_service import process_service
 from .routes.copies import refresh_copies, refresh_one_copy
+from .services import workspace_mirror
 
 logger = logging.getLogger(__name__)
 
@@ -742,7 +743,25 @@ async def lifespan(app: FastAPI):
         name="live_dev_cap_sweep",
     )
 
+    async def _scheduled_mirror_push():
+        try:
+            workspace_mirror.request_push("schedule", immediate=True)
+        except Exception as e:
+            logger.warning("scheduled workspace mirror push failed: %s", e)
+
+    scheduler.add_job(
+        _scheduled_mirror_push,
+        trigger="interval",
+        minutes=int(os.environ.get("BITSWAN_GIT_REMOTE_SYNC_MINUTES", "30")),
+        name="workspace_git_mirror",
+    )
+
     scheduler.start()
+
+    try:
+        workspace_mirror.request_push("startup", immediate=True)
+    except Exception as e:
+        logger.warning("startup workspace mirror push failed: %s", e)
 
     # Warm the history cache in the background so first requests are fast
     _cache_task = asyncio.create_task(get_automation_service().warm_history_cache())

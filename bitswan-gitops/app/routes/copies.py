@@ -82,6 +82,7 @@ from pydantic import BaseModel
 from app.deploy_runner import spawn_set_deploy
 from app.services.automation_service import scan_workspace_sources
 from app.services.bp_databases import copy_bp_resource_names
+from app.services.workspace_mirror_trigger import request_workspace_mirror_push
 from app.services.bp_git import (
     copies_dir as _copies_dir,
 )
@@ -1240,6 +1241,7 @@ async def _tag_deploy(bp: str, deployer: str | None) -> None:
     await call_git_command_with_output(
         "git", "-C", bare, "tag", "-a", "-f", tag, "-m", subject, "refs/heads/main"
     )
+    request_workspace_mirror_push("publish", deployer)
 
 
 async def _sync_one_bp(
@@ -1308,6 +1310,7 @@ async def _sync_one_bp(
             detail=f"Failed to push '{bp}' branch '{name}': "
             f"{(p_err or p_out).strip()}",
         )
+    request_workspace_mirror_push("copy", deployer)
 
     try:
         await ff_main_to_ref(bp, f"refs/heads/{name}")

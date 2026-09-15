@@ -17,6 +17,7 @@ import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
 import { cn } from '@/lib/utils';
 import type { BusinessProcess, Copy } from '@/types';
 import { Button } from '@/components/ui/button';
+import { RemoteCheckBanner } from '@/components/settings/RemoteCheckBanner';
 import { api, errorMessage, type BpDivergence } from '@/lib/api';
 import { deployReadiness } from '@/lib/deployReadiness';
 import { deployBpWithToast, watchDeployTask } from '@/lib/deployBp';
@@ -27,6 +28,7 @@ import { DeployFailureNotice } from '@/components/workspace/DeployFailureNotice'
 interface SyncDeployTabProps {
   bp: BusinessProcess;
   wt: Copy;
+  role: 'admin' | 'auditor' | 'member';
   /** The shell's ONE divergence reading for (copy, business process). The Sync
    *  step's existence is derived from the SAME object, so the two screens
    *  cannot contradict each other — they used to, because Sync came off a
@@ -85,6 +87,7 @@ const SUBTAB_LABELS = {
 export function SyncDeployTab({
   bp,
   wt,
+  role,
   divergence,
   divergenceError,
   divergenceStale,
@@ -300,6 +303,7 @@ export function SyncDeployTab({
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden bg-background">
+      <RemoteCheckBanner bp={bp.name} role={role} />
       {/* Explainer header + the one primary action. */}
       <div className="flex items-start gap-4 border-b border-border bg-background px-7 py-6">
         <div className="flex size-11 shrink-0 items-center justify-center rounded-[10px] bg-primary/10">
