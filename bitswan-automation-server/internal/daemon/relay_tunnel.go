@@ -122,11 +122,19 @@ type verifyResult struct {
 	Issuer  string `json:"issuer,omitempty"`
 	Pending bool   `json:"pending,omitempty"`
 	Error   string `json:"error,omitempty"`
-	// Trust says which root store accepted the served certificate: "public" (the
-	// system CA roots — what a browser does) or "private" (nothing public trusts
-	// it, but it is byte-for-byte the certificate our own Traefik holds). A
-	// manual-mode server with an internal CA can only ever reach "private", and
-	// treating that as a failure would make registration impossible for it.
+	// Trust says what was actually established about the certificate served at
+	// the public hostname:
+	//
+	//   "public"     — it validates against the system CA roots (what a browser
+	//                  does) AND it is byte-for-byte our own. Nothing is between
+	//                  us and the world.
+	//   "private"    — nothing public trusts it, but it is byte-for-byte our own.
+	//                  A manual-mode server on an internal CA can only ever reach
+	//                  this, and treating it as a failure would make registration
+	//                  impossible for it.
+	//   "terminated" — a proxy the operator declared holds the certificate, so
+	//                  identity is NOT ours to prove and was not checked. Only
+	//                  reachability was established. See tls_termination.go.
 	Trust string `json:"trust,omitempty"`
 }
 
@@ -147,6 +155,12 @@ type verifyResult struct {
 // check falls back to (1) and (3) alone and reports trust: "private". (3) is the
 // property that actually detects interception, and it is unaffected.
 //
+// And when the operator has declared that a proxy they run terminates TLS in
+// front of this server, (3) cannot hold either: the certificate the world is
+// served is that proxy's, by design and on every boot. There only (1) is
+// verifiable, and the result says so rather than reporting a permanent
+// interception — see tls_termination.go.
+//
 // register polls this so it only prints the URL once it's genuinely usable.
 func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
 	publicHost := "bailey." + domain
@@ -154,8 +168,15 @@ func (s *Server) verifyPublicEndpoint(domain string) verifyResult {
 
 	localLeaf, err := fetchServedLeaf(relayLocalTarget(), publicHost)
 	if err != nil {
-		// Local Traefik still coming up — expected right after bring-up.
+		// Local Traefik still coming up — expected right after bring-up. Checked
+		// before the termination branch below because "our own ingress has not
+		// started" is the answer the operator needs either way, and it is one we
+		// can still establish when the public leaf is somebody else's.
 		return verifyResult{Pending: true, Error: "waiting for local ingress to start"}
+	}
+
+	if externalTLSTermination() {
+		return verifyExternallyTerminatedEndpoint(dialAddr, publicHost)
 	}
 
 	// Full verification against the system CA roots — this is the check a
@@ -213,6 +234,34 @@ func verifyPrivatelyTrustedEndpoint(dialAddr, publicHost string, localLeaf []byt
 		issuer = served.Issuer.CommonName
 	}
 	return verifyResult{OK: true, Issuer: issuer, Trust: "private"}
+}
+
+// verifyExternallyTerminatedEndpoint is the check for a server whose TLS is
+// terminated by a proxy the operator runs and we do not.
+//
+// It verifies the one property that is still ours to verify: the public hostname
+// resolves from here and something completes a TLS handshake on it. That catches
+// the failures this topology actually produces — a DNS record pointing at the
+// wrong place, a proxy that was never configured for this backend, a proxy that
+// stopped — while claiming nothing about a certificate we do not hold and cannot
+// recognise.
+//
+// The issuer is still reported, because it is the cheapest way for an operator to
+// confirm which proxy answered, and a surprising issuer here is worth their
+// attention even though it is not a failure we can define.
+func verifyExternallyTerminatedEndpoint(dialAddr, publicHost string) verifyResult {
+	servedRaw, err := fetchServedLeaf(dialAddr, publicHost)
+	if err != nil {
+		// Pending, not a failure: during registration the operator's proxy may
+		// legitimately not be pointed at this server yet.
+		return verifyResult{Pending: true,
+			Error: "waiting for " + publicHost + " to answer through your TLS-terminating proxy"}
+	}
+	issuer := ""
+	if served, err := x509.ParseCertificate(servedRaw); err == nil {
+		issuer = served.Issuer.CommonName
+	}
+	return verifyResult{OK: true, Issuer: issuer, Trust: "terminated"}
 }
 
 // handleRelayVerify runs verifyPublicEndpoint once and returns the result.
@@ -336,18 +385,15 @@ func (s *Server) verifyEndpointTLS(domain string, window time.Duration) error {
 	var lastErr error
 	deadline := time.Now().Add(window)
 	for attempt := 1; ; attempt++ {
-		localLeaf, err := fetchServedLeaf(relayLocalTarget(), publicHost)
-		if err != nil {
-			lastErr = fmt.Errorf("read local leaf from %s: %w", relayLocalTarget(), err)
-		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			err = relay.VerifyEndToEndTLS(ctx, publicHost, dialAddr, localLeaf)
-			cancel()
-			if err == nil {
+		lastErr = checkEndpointTLSOnce(publicHost, dialAddr)
+		if lastErr == nil {
+			if externalTLSTermination() {
+				fmt.Printf("tls-selfcheck: ✅ %s answers through the TLS-terminating proxy you declared "+
+					"(certificate identity not checked — it is not ours to check)\n", publicHost)
+			} else {
 				fmt.Printf("tls-selfcheck: ✅ %s serves our own certificate end-to-end (no interception)\n", publicHost)
-				return nil
 			}
-			lastErr = err
+			return nil
 		}
 		if !time.Now().Before(deadline) {
 			return lastErr
@@ -360,6 +406,32 @@ func (s *Server) verifyEndpointTLS(domain string, window time.Duration) error {
 	}
 }
 
+// checkEndpointTLSOnce is one attempt at the self-check, in whichever form this
+// server's topology allows.
+//
+// Normally that is the full identity comparison: the certificate served at the
+// public hostname must be byte-for-byte the one our own Traefik holds. Where the
+// operator has declared a TLS-terminating proxy in front, the comparison is
+// against a certificate we do not hold, so it is narrowed to reachability — the
+// hostname resolves from here and something answers TLS on it.
+func checkEndpointTLSOnce(publicHost, dialAddr string) error {
+	if externalTLSTermination() {
+		if _, err := fetchServedLeaf(dialAddr, publicHost); err != nil {
+			return fmt.Errorf("self-check: %s did not answer through your TLS-terminating proxy: %w",
+				publicHost, err)
+		}
+		return nil
+	}
+
+	localLeaf, err := fetchServedLeaf(relayLocalTarget(), publicHost)
+	if err != nil {
+		return fmt.Errorf("read local leaf from %s: %w", relayLocalTarget(), err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return relay.VerifyEndToEndTLS(ctx, publicHost, dialAddr, localLeaf)
+}
+
 // reportTLSSelfCheckFailure surfaces a failed identity check loudly and as a
 // SIEM security event. We log rather than tear down: a transient mismatch during
 // a cert rollover shouldn't take a healthy server offline, but a real
@@ -370,7 +442,17 @@ func (s *Server) reportTLSSelfCheckFailure(domain string, proxied bool, err erro
 		path = "via reverse-proxy relay"
 	}
 	fmt.Printf("tls-selfcheck: ⚠️  end-to-end TLS self-check FAILED for bailey.%s (%s): %v\n", domain, path, err)
-	fmt.Printf("tls-selfcheck: ⚠️  the public URL is NOT serving our certificate — TLS may be intercepted/terminated in transit\n")
+	// Name the finding this server can actually have. Where TLS is terminated by
+	// a declared proxy, the check never claimed the certificate was ours, so a
+	// failure means the endpoint did not answer at all — and repeating the
+	// interception warning there would be the false alarm this whole declaration
+	// exists to stop.
+	if externalTLSTermination() {
+		fmt.Printf("tls-selfcheck: ⚠️  the public URL did not answer through your TLS-terminating proxy — " +
+			"it is unreachable, or the proxy is no longer pointed at this server\n")
+	} else {
+		fmt.Printf("tls-selfcheck: ⚠️  the public URL is NOT serving our certificate — TLS may be intercepted/terminated in transit\n")
+	}
 	// Record as a security event so it lands in the audit log AND is forwarded
 	// to any configured SIEM. Best-effort — never let telemetry failure hide the
 	// finding (it's already on stdout above).

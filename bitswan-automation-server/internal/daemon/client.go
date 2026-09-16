@@ -996,6 +996,24 @@ func (c *Client) SetIngressTLSMode(mode string) (*IngressTLSStatus, error) {
 	return c.ingressTLSCall(req)
 }
 
+// SetIngressExternalTLSTermination declares (or withdraws) that a proxy the
+// operator runs terminates TLS in front of this server, which narrows the
+// daemon's end-to-end identity self-check to reachability. Nothing is
+// reconfigured by it — see daemon/tls_termination.go.
+func (c *Client) SetIngressExternalTLSTermination(enabled bool) (*IngressTLSStatus, error) {
+	bodyBytes, err := json.Marshal(IngressTLSExternalTerminationRequest{Enabled: enabled})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequest("POST", "http://unix/ingress/tls/external-termination",
+		strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.ingressTLSCall(req)
+}
+
 func (c *Client) ingressTLSCall(req *http.Request) (*IngressTLSStatus, error) {
 	resp, err := c.doLongRunningRequest(req)
 	if err != nil {

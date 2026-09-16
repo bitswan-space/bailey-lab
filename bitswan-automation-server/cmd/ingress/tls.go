@@ -59,7 +59,61 @@ func newTLSCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newTLSInstallCertCmd())
 	cmd.AddCommand(newTLSRemoveCertCmd())
+	cmd.AddCommand(newTLSExternalTerminationCmd())
 
+	return cmd
+}
+
+// newTLSExternalTerminationCmd declares who terminates TLS — which is a separate
+// question from where certificates come from, and the only one the daemon cannot
+// answer by looking at itself.
+func newTLSExternalTerminationCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "external-termination <on|off>",
+		Short: "Declare that a proxy you run terminates TLS in front of this server",
+		Long: "Declare that a reverse proxy, ZTNA gateway or load balancer YOU run holds the " +
+			"certificate for this server's hostnames and terminates TLS there, re-encrypting (or " +
+			"not) on the hop to this server's ingress.\n\n" +
+			"This changes nothing about how the ingress runs. What it changes is what the daemon's " +
+			"end-to-end TLS self-check is able to assert. That check normally requires the " +
+			"certificate served at your public hostname to be byte-for-byte the one this server's " +
+			"Traefik holds — the property that detects interception. A terminating proxy in front " +
+			"makes that false by design and on every boot, so without this declaration " +
+			"registration fails after an eight-minute wait on a server that works, and the " +
+			"periodic check records a tls_selfcheck_failed security event every six hours for a " +
+			"topology you chose.\n\n" +
+			"Declared, the check is NARROWED, not switched off: the public hostname must still " +
+			"resolve from this server and still answer TLS. What is given up is real — nothing " +
+			"here detects interception between your proxy and the world any more; that becomes " +
+			"your proxy's job.\n\n" +
+			"Turn it off with 'off' if TLS termination moves back onto this server.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var enabled bool
+			switch strings.ToLower(strings.TrimSpace(args[0])) {
+			case "on", "true", "yes":
+				enabled = true
+			case "off", "false", "no":
+				enabled = false
+			default:
+				return fmt.Errorf("expected 'on' or 'off', got %q", args[0])
+			}
+
+			client, err := daemon.NewClient()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintln(os.Stderr, "Run 'bitswan automation-server-daemon init' to start it.")
+				os.Exit(1)
+			}
+			status, err := client.SetIngressExternalTLSTermination(enabled)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			printTLSStatus(status)
+			return nil
+		},
+	}
 	return cmd
 }
 
@@ -166,6 +220,10 @@ func printTLSStatus(status *daemon.IngressTLSStatus) {
 			managed = "NOT managed by the AOC — its DNS-01 challenges cannot be written here"
 		}
 		fmt.Printf("Domain:   %s (DNS %s)\n", status.Domain, managed)
+	}
+	if status.ExternalTLSTermination {
+		fmt.Println("TLS terminated by: a proxy you run, in front of this server " +
+			"(end-to-end identity self-check narrowed to reachability)")
 	}
 	if len(status.Certificates) > 0 {
 		fmt.Println("Installed certificates:")

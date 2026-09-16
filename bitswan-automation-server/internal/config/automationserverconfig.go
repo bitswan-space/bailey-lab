@@ -41,6 +41,27 @@ type Config struct {
 	// which every server registered before this option existed relies on.
 	TLSMode string `toml:"tls_mode,omitempty"`
 
+	// ExternalTLSTermination records that a proxy this server does not control
+	// terminates TLS in front of it: the operator's own reverse proxy or ZTNA
+	// gateway holds the certificate for the server's hostnames, and re-encrypts
+	// (or does not) on the hop to our Traefik.
+	//
+	// It changes nothing about how the ingress runs — it is not a mode, and no
+	// Traefik configuration depends on it. What it changes is what the daemon's
+	// end-to-end TLS self-check is allowed to ASSERT. That check exists to catch
+	// interception, and it does so by requiring the certificate served at the
+	// public hostname to be byte-for-byte our own. A declared terminating proxy
+	// makes that property false BY DESIGN, permanently, on every boot — so
+	// without this the one deployment shape it describes fails registration and
+	// then reports tls_selfcheck_failed into the audit log every six hours, for a
+	// condition the operator configured on purpose.
+	//
+	// Declared, never inferred. It is tempting to derive it from "manual mode on
+	// a private server", but that is a different fact — a VPN deployment holding
+	// its own certificates is exactly the case where the identity check still
+	// works and is still worth having (see docs/tls_modes.md).
+	ExternalTLSTermination bool `toml:"external_tls_termination,omitempty"`
+
 	AutomationOperationsCenter AutomationOperationsCenterSettings `toml:"aoc"`
 	LocalServer                LocalServerSettings                `toml:"local_server"`
 }
@@ -343,6 +364,32 @@ func (m *AutomationServerConfig) SetTLSMode(mode string) error {
 	}
 
 	config.TLSMode = mode
+	return m.SaveConfig(config)
+}
+
+// GetExternalTLSTermination reports whether the operator has declared that a
+// proxy they run terminates TLS in front of this server. A missing config file
+// is not an error, for the same reason as GetIngressBindAddress: the answer for
+// a server that has never declared it is "no".
+func (m *AutomationServerConfig) GetExternalTLSTermination() bool {
+	config, err := m.LoadConfig()
+	if err != nil {
+		return false
+	}
+	return config.ExternalTLSTermination
+}
+
+// SetExternalTLSTermination records (or withdraws) the declaration. Nothing is
+// reconfigured by it — see the field's own documentation for why it is a fact
+// about the path in front of the server rather than a setting of the ingress.
+func (m *AutomationServerConfig) SetExternalTLSTermination(enabled bool) error {
+	config, err := m.LoadConfig()
+	if err != nil {
+		// If no config exists, create a new one
+		config = &Config{}
+	}
+
+	config.ExternalTLSTermination = enabled
 	return m.SaveConfig(config)
 }
 
