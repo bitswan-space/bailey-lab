@@ -115,7 +115,6 @@ async def test_automations_list_reports_a_slept_deployment_as_inactive(
             }
         )
     )
-    # The cache still holds the entry as it was when it was built: active.
     from app.models import DeployedAutomation
 
     stale = DeployedAutomation(
@@ -140,10 +139,6 @@ async def test_automations_list_reports_a_slept_deployment_as_inactive(
         async def container_stats(self, ctx, **kwargs):
             return []
 
-    # Patch the DRIVER, not a method that does not exist: the previous version
-    # patched `_container_mem_usage` with raising=False, which silently added an
-    # attribute nothing calls and left the test making a real HTTP request to
-    # the infra-driver on every run.
     monkeypatch.setattr(svc, "get_containers", _no_containers)
     svc._infra_driver = _FakeDriver()  # the backing field the property reads
 
@@ -161,18 +156,9 @@ def test_worse_state_lets_no_replica_hide_another(tmp_path):
     assert svc._worse_state("running", "restarting") == "restarting"
     assert svc._worse_state("restarting", "running") == "restarting"
     assert svc._worse_state("running", "exited") == "exited"
-    # `dead` and `exited` are the same thing to every consumer (the dashboard
-    # maps both to "stopped"), so which literal survives is not a claim about
-    # anything — the bucket is.
     assert svc._worse_state("exited", "dead") in ("exited", "dead")
-    # `paused` is NOT up, whatever its name suggests, and the dashboard ranks it
-    # with the stopped ones — above a restart loop. The two layers collapse the
-    # same replicas, so they must not disagree about which is worse.
     assert svc._worse_state("restarting", "paused") == "paused"
     assert svc._worse_state("paused", "restarting") == "paused"
-    # An unrecognised state sits at the bottom: it never outranks something we
-    # could actually read — see the dedicated test below for why — and it never
-    # hides a fault either.
     assert svc._worse_state("running", "weird-new-state") == "running"
     assert svc._worse_state("weird-new-state", "exited") == "exited"
 
@@ -384,7 +370,6 @@ def test_active_is_read_the_same_way_everywhere(tmp_path):
     assert svc._is_active({"active": True}) is True
     assert svc._is_active({"active": False}) is False
     assert svc._is_active(None) is True
-    # And the deploy path agrees with it, on the same yaml.
     (tmp_path / "bitswan.yaml").write_text(
         yaml.safe_dump(
             {
@@ -410,8 +395,6 @@ def test_a_replica_that_never_started_is_not_erased_by_a_running_one(tmp_path):
     svc = _svc(tmp_path)
     assert svc._worse_state("running", "created") == "created"
     assert svc._worse_state("created", "running") == "created"
-    # Still below every fault, and still beaten by a state we cannot read at all
-    # only in the sense that the unreadable one loses:
     assert svc._worse_state("created", "exited") == "exited"
     assert svc._worse_state("created", "restarting") == "restarting"
     assert svc._worse_state("created", "removing") == "created"

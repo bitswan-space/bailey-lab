@@ -25,8 +25,6 @@ export function formatTimestamp(v: string | number | undefined | null): string |
   return d.toLocaleString();
 }
 
-// 1024-based, and now labelled as such: this formats container memory limits,
-// which the rest of the system budgets and flags in MiB (see lib/memory.ts).
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)} KiB`;

@@ -64,10 +64,6 @@ export const STATUS_META: Record<DisplayStatus, StatusMeta> = {
     badge: 'border-transparent bg-red-100 text-red-700',
     labelColor: 'text-red-600',
   },
-  // Deliberately not running: the on-demand memory sweep evicted it, or an
-  // operator put it to sleep. It has a deployment record and no container, and
-  // gitops marks it `active: false` — so it is neither a failure nor an absence
-  // of information, and must not be shown as either.
   asleep: {
     label: 'Asleep',
     dot: 'bg-sky-500',
@@ -91,16 +87,9 @@ export const STATUS_META: Record<DisplayStatus, StatusMeta> = {
 /** Map an automation's raw Docker container state to a display status. */
 export function stateToDisplay(state: AutomationState | null | undefined): DisplayStatus {
   switch (state) {
-    // `starting` is Docker reporting that the entrypoint is coming up — that
-    // one really is on its way to running.
     case 'running':
     case 'starting':
       return 'running';
-    // `created` is NOT. The container exists and has never executed anything —
-    // a compose up that created it and could not start it leaves it here — and
-    // calling that "Running" was the same intent-over-observation this module
-    // exists to remove, in the one mapping every view routes through. It is no
-    // claim either way: not running, not a fault we can name.
     case 'created':
       return 'unknown';
     case 'restarting':
@@ -114,13 +103,6 @@ export function stateToDisplay(state: AutomationState | null | undefined): Displ
   }
 }
 
-/**
- * True when a container carrying this status is meant to be up right now.
- *
- * `restarting` belongs here — a crashlooping container is not asleep, it is
- * trying — which is exactly why "up" and "healthy" are two different
- * questions, and why nothing may answer the second one with this.
- */
 export function isUpStatus(status: DisplayStatus): boolean {
   return (
     status === 'running' ||
@@ -130,22 +112,10 @@ export function isUpStatus(status: DisplayStatus): boolean {
   );
 }
 
-/**
- * How alarming each status is. Ordering exists for one reason: when several
- * records collapse onto one row (replicas, the blue/green slots of a
- * production member), the row must show the WORST state observed, never the
- * best. Preferring the best is what let a business process whose production
- * slots were both restarting report itself as running (bailey-lab #463).
- *
- * `unknown` and `not-deployed` sit at the bottom because they are the absence
- * of an observation: they must never outrank something actually seen.
- */
 const STATUS_SEVERITY: Record<DisplayStatus, number> = {
   failed: 7,
   stopped: 6,
   restarting: 5,
-  // Asleep outranks a healthy reading — a row that merges a sleeping container
-  // with a running one is not simply "running" — but never outranks a fault.
   asleep: 4,
   building: 3,
   running: 2,
@@ -154,7 +124,6 @@ const STATUS_SEVERITY: Record<DisplayStatus, number> = {
   'not-deployed': 0,
 };
 
-/** The least healthy of the given statuses — see STATUS_SEVERITY. */
 export function worstStatus(...statuses: DisplayStatus[]): DisplayStatus {
   return statuses.reduce(
     (worst, s) => (STATUS_SEVERITY[s] > STATUS_SEVERITY[worst] ? s : worst),
@@ -162,36 +131,8 @@ export function worstStatus(...statuses: DisplayStatus[]): DisplayStatus {
   );
 }
 
-/**
- * What one automation record says its container is doing — the single reading
- * every view should use, because there are three different "not running"s and
- * they are not interchangeable:
- *
- *   - no deployment at all            → 'not-deployed'
- *   - deployed but SLEPT              → 'asleep'   (gitops sets active: false
- *     and sends no container state; reading only the state made this 'unknown',
- *     i.e. no observation, which summaries then counted as fine)
- *   - deployed and running/failed/…   → whatever Docker says
- */
 export function displayFor(a?: DeployedAutomation): DisplayStatus {
   if (!a?.deployment_id) return 'not-deployed';
-  // TWO independent signs of sleep, because either can arrive without the
-  // other: gitops marks the deployment inactive, and it records WHY it was put
-  // to sleep. Measured on a live workspace: an evicted deployment came back
-  // over the wire as `active: true` with `asleep_reason: "manual"`, because
-  // `active` is baked into the automations cache when it is built and sleeping
-  // only rewrites bitswan.yaml. The reason was the only thing that gave it
-  // away. (That staleness is fixed in gitops too — this reads both so a
-  // dashboard in front of an older gitops still tells the truth.)
-  // Asleep means the deployment is INACTIVE and its container is gone.
-  //
-  // ONE signal, deliberately: `active`, which gitops re-reads from the yaml on
-  // every automations call. The sleep marker (`asleep_reason`) is NOT enough on
-  // its own — gitops only clears it for a deployment that has a container, so
-  // one that was woken and then failed to come back up keeps it, and reading
-  // that as sleep put "Asleep — it wakes on access" on something broken that
-  // will not wake. The marker still earns its place: it says WHY, once we know
-  // that it is asleep.
   const gone = !a.container_id && !a.state;
   if (gone && a.active === false) return 'asleep';
   return stateToDisplay(a.state);

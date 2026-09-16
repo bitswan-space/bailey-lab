@@ -93,10 +93,6 @@ func TestParsePS(t *testing.T) {
 }
 
 func TestEveryListedContainerIsInspectedInOneExec(t *testing.T) {
-	// The count has to be readable whatever state the poll catches: a container
-	// that crashes every few minutes is `running` at most instants, so
-	// inspecting only the ones caught mid-restart made the number blink in and
-	// out. One exec covers them all — the measured cost is per-exec.
 	cs := []infradriver.Container{
 		{ID: "a", State: "running"},
 		{ID: "b", State: "restarting"},
@@ -117,8 +113,6 @@ func TestParseRestartCounts(t *testing.T) {
 	if got["abc123"] != 23032 {
 		t.Errorf("abc123 = %d, want 23032", got["abc123"])
 	}
-	// A container really can report 0 while restarting (the first crash has
-	// not been counted yet); that is a read value, not an absent one.
 	n, ok := got["def456"]
 	if !ok || n != 0 {
 		t.Errorf("def456 = %d (present=%v), want 0 present", n, ok)
@@ -129,10 +123,6 @@ func TestParseRestartCounts(t *testing.T) {
 }
 
 func TestParseRestartCountsNeverGuessesAndLosesOnlyTheBadLine(t *testing.T) {
-	// A count we cannot read must not become 0 — "restarted 0 times" is a
-	// claim, and the whole bug behind #463 was the UI making claims like it.
-	// But one unreadable line must not cost every OTHER container its count:
-	// the crashlooper this feature exists for would be the one to lose it.
 	raw := []byte(strings.Join([]string{
 		"abc123" + psSep + "not-a-number",
 		"noseparatorhere",

@@ -133,10 +133,6 @@ class Container:
     image: str
     created: int = 0
     labels: dict = field(default_factory=dict)
-    # Times Docker's restart policy has brought this container back up. None
-    # means "not read" — the container vanished under the inspect, or its line
-    # was unreadable — and must stay distinct from 0, which is a container that
-    # has never died. `or 0` would erase exactly that difference.
     restart_count: int | None = None
 
     @classmethod

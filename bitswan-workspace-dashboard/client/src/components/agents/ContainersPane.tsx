@@ -261,9 +261,6 @@ export function ContainersPane({ bp, copy, active }: Props) {
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <span className={STATUS_META[selected.status].labelColor}>
-                    {/* STATUS_META's placeholder for 'unknown' is an em-dash,
-                        which reads as a broken line here rather than as a
-                        state. Say what it means instead. */}
                     {selected.status === 'unknown'
                       ? 'No container state'
                       : STATUS_META[selected.status].label}
@@ -370,13 +367,6 @@ function StatusDot({ status }: { status: BpContainer['status'] }) {
   return <span className={cn('size-1.5 shrink-0 rounded-full', meta.dot)} title={meta.label} />;
 }
 
-/**
- * The restart count next to a container Docker's restart policy has had to
- * bring back up. Shown only for a count that was actually read AND is non-zero: a
- * colour cannot tell a container that restarted twice during a deploy from one
- * that has restarted twenty-three thousand times, and that difference is the
- * whole point (bailey-lab #463).
- */
 function RestartChip({ count }: { count?: number }) {
   if (!count) return null;
   return (

@@ -54,10 +54,6 @@ interface Props {
   copy: string;
 }
 
-// One row of the panel. Frontends and worker containers are the same shape as
-// the Containers sub-tab's list, and derived by the same function — the two
-// used to each map the automations snapshot by hand, and each got the state
-// collapse wrong the same way (bailey-lab #463).
 type Item = BpContainer;
 
 const WORKER_TYPES: { type: string; label: string }[] = [
@@ -333,9 +329,6 @@ function Row({
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const meta = STATUS_META[item.status];
-  // "Up" is not "healthy": a restarting frontend keeps its open link (it does
-  // serve, between crashes) while its dot says restarting, and the title says
-  // how often it has had to be brought back.
   const canOpen = !!item.url && isUpStatus(item.status);
   const statusTitle = item.restartCount
     ? `${meta.label} — restarted ${item.restartCount.toLocaleString()} times`
