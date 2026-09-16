@@ -39,6 +39,7 @@ func newRegisterCmd() *cobra.Command {
 	var bindAddress string
 	var tlsMode string
 	var certsDir string
+	var externalTLSTermination bool
 
 	cmd := &cobra.Command{
 		Use:          "register",
@@ -68,6 +69,15 @@ func newRegisterCmd() *cobra.Command {
 			}
 			if privateAddress != "" && !private {
 				return fmt.Errorf("--private-address requires --private")
+			}
+			// The relay is an SNI passthrough: it forwards the TLS stream without
+			// ever holding a key, so on that path the certificate the world is
+			// served IS ours and the identity check both works and matters.
+			// Accepting both would silently disarm it for no gain.
+			if externalTLSTermination && forceProxy {
+				return fmt.Errorf("--external-tls-termination and --force-proxy are mutually exclusive: " +
+					"the AOC relay passes TLS through without terminating it, so this server's own " +
+					"certificate is what the world is served")
 			}
 			if private {
 				if privateAddress == "" {
@@ -209,6 +219,23 @@ func newRegisterCmd() *cobra.Command {
 					fmt.Printf("Warning: failed to apply the ingress settings: %v\n", err)
 					fmt.Println("Re-run 'bitswan ingress init' (with --bind-address / 'bitswan ingress tls " +
 						"<mode>') before exposing this server.")
+				}
+			}
+
+			// Record who terminates TLS before the verification gate below runs:
+			// that gate is the first thing this declaration changes. Without it
+			// the gate spends eight minutes proving that the operator's own proxy
+			// is not this server's Traefik, and then fails a registration that
+			// actually succeeded.
+			if externalTLSTermination {
+				fmt.Println("\n🔁 TLS termination: a proxy you run, in front of this server.")
+				fmt.Println("   The end-to-end certificate identity check is narrowed to reachability —")
+				fmt.Println("   detecting interception beyond that proxy becomes its job, not this server's.")
+				if _, err := client.SetIngressExternalTLSTermination(true); err != nil {
+					fmt.Printf("Warning: failed to record the TLS termination declaration: %v\n", err)
+					fmt.Println("   Set it with 'bitswan ingress tls external-termination on'. Until then this")
+					fmt.Println("   server reports itself as intercepted — at the end of this command, and as a")
+					fmt.Println("   tls_selfcheck_failed security event every six hours.")
 				}
 			}
 
@@ -390,7 +417,16 @@ func newRegisterCmd() *cobra.Command {
 					res, err := client.VerifyEndpoint()
 					switch {
 					case err == nil && res.OK:
-						if res.Trust == "private" {
+						if res.Trust == "terminated" {
+							// Do not let this read as the end-to-end guarantee every
+							// other server gets. What was established is that the URL
+							// answers; who answered it is the operator's proxy to
+							// vouch for.
+							fmt.Printf("\n\n✅ %s is live — answered through your TLS-terminating proxy (certificate issued by %q).\n",
+								baileyURL, res.Issuer)
+							fmt.Println("   That certificate is your proxy's, not this server's, so this check confirms")
+							fmt.Println("   reachability only — not that the connection is un-intercepted end to end.")
+						} else if res.Trust == "private" {
 							// Say exactly what was and was not verified: nothing public
 							// trusts this certificate, so every browser needs the CA
 							// installed. Claiming it is "live" without that would be a
@@ -434,7 +470,16 @@ func newRegisterCmd() *cobra.Command {
 				}
 				if !verified {
 					hint := "The certificate may still be issuing — re-check in a minute; if it persists, the DNS/relay path needs attention"
-					if private {
+					if externalTLSTermination {
+						// Nothing here is waiting on a certificate: the check is a
+						// reachability probe, so a timeout means the path through
+						// the operator's proxy does not arrive.
+						hint = fmt.Sprintf(
+							"Nothing is waiting on a certificate here — this check only asks whether %s answers. "+
+								"Confirm your proxy is pointed at this server, that it preserves the Host header and SNI, "+
+								"and that %s resolves from this machine",
+							baileyURL, baileyURL)
+					} else if private {
 						// On a private server the usual suspect is name resolution
 						// from the server itself: this check dials the public
 						// hostname, so the box needs to resolve it to the private
@@ -472,6 +517,11 @@ func newRegisterCmd() *cobra.Command {
 		"Certificate backend to configure before the ingress starts (see 'bitswan ingress tls'). "+
 			"Set it here when the default cannot issue for your domain, so Traefik never opens an "+
 			"order that can't complete.")
+	cmd.Flags().BoolVar(&externalTLSTermination, "external-tls-termination", false,
+		"A proxy YOU run terminates TLS in front of this server and holds the certificate for its "+
+			"hostnames. Narrows the end-to-end certificate identity self-check to reachability, "+
+			"which is otherwise a permanent 'intercepted' verdict on this topology. Changes nothing "+
+			"about how the ingress runs; see 'bitswan ingress tls external-termination'.")
 	cmd.Flags().StringVar(&certsDir, "certs-dir", "",
 		"Directory holding a certificate and key to install for *.<domain>, in any file naming. "+
 			"Requires --tls-mode "+string(daemon.TLSModeManual)+".")

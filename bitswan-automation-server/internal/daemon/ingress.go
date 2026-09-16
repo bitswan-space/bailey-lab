@@ -161,6 +161,8 @@ func (s *Server) handleIngress(w http.ResponseWriter, r *http.Request) {
 		s.handleIngressTLSInstallCert(w, r)
 	case path == "tls/remove-cert":
 		s.handleIngressTLSRemoveCert(w, r)
+	case path == "tls/external-termination":
+		s.handleIngressTLSExternalTermination(w, r)
 	default:
 		writeJSONError(w, "not found", http.StatusNotFound)
 	}

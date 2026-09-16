@@ -29,6 +29,12 @@ type IngressTLSStatus struct {
 	// validate this server — no certificate is coming, and waiting will not
 	// change that. Callers use it to fail fast instead of polling.
 	CanIssueHere bool `json:"can_issue_here"`
+	// ExternalTLSTermination is the operator's declaration that a proxy they run
+	// terminates TLS in front of this server. Reported here because it is the
+	// only place it is visible, and because it silently changes what the daemon's
+	// self-check proves — a thing an operator should be able to read back rather
+	// than remember.
+	ExternalTLSTermination bool `json:"external_tls_termination"`
 	// Certificates is the detail behind InstalledCerts: what each one is and when
 	// it expires. Nothing renews these, so the expiry is the operationally
 	// important field.
@@ -42,6 +48,12 @@ type IngressTLSStatus struct {
 // IngressTLSModeRequest sets the server's certificate mode.
 type IngressTLSModeRequest struct {
 	Mode string `json:"mode"`
+}
+
+// IngressTLSExternalTerminationRequest declares (or withdraws the declaration)
+// that a proxy the operator runs terminates TLS in front of this server.
+type IngressTLSExternalTerminationRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 // handleIngressTLS handles GET /ingress/tls (status) and POST /ingress/tls (set
@@ -101,6 +113,44 @@ func (s *Server) handleIngressTLSInstallCert(w http.ResponseWriter, r *http.Requ
 				"installed certificate, so %s is now served from the file you just installed. "+
 				"Switch to mode %s, or remove it with 'bitswan ingress tls remove-cert'",
 			currentTLSMode(), info.Hostname, TLSModeManual))
+	}
+	writeJSON(w, status)
+}
+
+// handleIngressTLSExternalTermination handles POST
+// /ingress/tls/external-termination — the operator declaring, or withdrawing,
+// that a proxy they run holds the certificate for this server's hostnames.
+//
+// Deliberately not part of the mode endpoint: setting a mode rewrites Traefik's
+// static configuration and recreates the container, and this changes nothing
+// about how the ingress runs. Folding it in would make a declaration about the
+// network in front of the server cost an ingress restart for no reason.
+func (s *Server) handleIngressTLSExternalTermination(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req IngressTLSExternalTerminationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := config.NewAutomationServerConfig().SetExternalTLSTermination(req.Enabled); err != nil {
+		writeJSONError(w, "failed to persist the TLS termination declaration: "+err.Error(),
+			http.StatusInternalServerError)
+		return
+	}
+
+	status := tlsStatus()
+	if req.Enabled {
+		status.Warnings = append(status.Warnings,
+			"TLS is declared to be terminated by a proxy you run: the end-to-end certificate "+
+				"identity self-check is narrowed to reachability, so interception between that "+
+				"proxy and the world is no longer detected here")
+	} else {
+		status.Warnings = append(status.Warnings,
+			"this server is back to terminating its own TLS: the self-check again requires the "+
+				"certificate served at the public hostname to be byte-for-byte the one Traefik holds")
 	}
 	writeJSON(w, status)
 }
@@ -234,12 +284,13 @@ func validateTLSModeChoice(mode TLSMode) error {
 func tlsStatus() IngressTLSStatus {
 	mode := currentTLSMode()
 	status := IngressTLSStatus{
-		Mode:            string(mode),
-		Description:     TLSModeDescription(mode),
-		Domain:          getWildcardCertDomain(),
-		DNSManagedByAOC: aocManagesDNS(),
-		CanIssueHere:    canObtainCertificate(mode),
-		InstalledCerts:  traefikapi.InstalledCertHostnames(),
+		Mode:                   string(mode),
+		Description:            TLSModeDescription(mode),
+		Domain:                 getWildcardCertDomain(),
+		DNSManagedByAOC:        aocManagesDNS(),
+		CanIssueHere:           canObtainCertificate(mode),
+		InstalledCerts:         traefikapi.InstalledCertHostnames(),
+		ExternalTLSTermination: externalTLSTermination(),
 	}
 	if status.Domain != "" && mode.usesACME() && !aocDNSUsable(mode) {
 		status.Warnings = append(status.Warnings, fmt.Sprintf(
@@ -260,10 +311,24 @@ func tlsStatus() IngressTLSStatus {
 				cert.Hostname, cert.DaysLeft))
 		}
 	}
-	if !mode.usesACME() && len(status.InstalledCerts) == 0 {
+	if status.ExternalTLSTermination {
 		status.Warnings = append(status.Warnings,
-			"no certificates are installed, and this mode asks no CA for any: every https "+
-				"hostname on this server will fail its TLS handshake until one is installed")
+			"TLS is terminated by a proxy you run, so the certificate this server serves is seen "+
+				"only by that proxy; the end-to-end identity self-check is narrowed to reachability")
+	}
+	if !mode.usesACME() && len(status.InstalledCerts) == 0 {
+		// Traefik answers on its own generated self-signed default certificate,
+		// so this is "nothing trusts it", not "nothing answers". Saying the
+		// handshake fails sends an operator hunting a connection problem they do
+		// not have — and it is exactly the state a server is left in on purpose
+		// when an upstream proxy terminates TLS and is told not to verify.
+		warning := "no certificates are installed, and this mode asks no CA for any: every https " +
+			"hostname on this server answers with Traefik's self-signed default certificate, " +
+			"which browsers reject, until one is installed"
+		if status.ExternalTLSTermination {
+			warning += " (your TLS-terminating proxy must be configured not to verify it)"
+		}
+		status.Warnings = append(status.Warnings, warning)
 	}
 	if mode.usesACME() && len(status.InstalledCerts) > 0 {
 		status.Warnings = append(status.Warnings, fmt.Sprintf(

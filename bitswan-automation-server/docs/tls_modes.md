@@ -129,6 +129,61 @@ In this mode Traefik's static configuration contains **no** ACME resolvers at
 all, not even the HTTP-01 one, so nothing on the server can start a certificate
 order that could never complete.
 
+## When somebody else terminates TLS
+
+The modes above answer "where do certificates come from". There is a second
+question they do not answer — **who terminates** — and on most deployments it
+never comes up, because the answer is "we do". Traefik holds the certificate, and
+the daemon proves it: at registration and every six hours after, it fetches this
+server's own public URL and checks the certificate served there is byte-for-byte
+the one local Traefik holds. That is what detects interception, and it is
+deliberately universal.
+
+Some organisations will not delegate TLS at all. Every hostname they own
+terminates on THEIR reverse proxy or ZTNA gateway, which holds the certificate,
+rotates it on their schedule, and re-encrypts (or does not) on the hop to the
+backend. `*.bitswan.example.com` resolves to that proxy, the proxy dials this
+server's Traefik, and what the world is served is the proxy's certificate — not
+ours, permanently, by design.
+
+The identity check then fails forever, and in the two worst ways: `register`
+spends eight minutes rediscovering it and exits with an error on a server that is
+working, and the periodic check records `tls_selfcheck_failed` into the audit log
+and any SIEM it is forwarded to, every six hours, for a topology the operator
+chose. An alarm that is always on is an alarm nobody reads.
+
+So the operator declares it:
+
+```
+bitswan register --name … --otp … --server-id … --external-tls-termination
+bitswan ingress tls external-termination on     # or afterwards
+bitswan ingress tls external-termination off    # if termination moves back here
+```
+
+The check is **narrowed, not switched off**. The public hostname must still
+resolve from this server and still answer TLS — which is what catches a proxy
+pointed at the wrong backend, a DNS record pointing somewhere else, or a proxy
+that stopped. What is given up is real and is stated plainly by `register` and by
+`bitswan ingress tls`: nothing here detects interception between that proxy and
+the world any more. That becomes the proxy's job.
+
+Two things it is not:
+
+- **Not a mode.** It configures nothing. Traefik is rendered from the TLS mode
+  exactly as it would be otherwise, so it composes with any of them — commonly
+  `manual`, often with no certificate installed at all, where Traefik answers on
+  its self-signed default and the proxy in front is told not to verify it.
+- **Not inferred.** It is tempting to derive it from "manual mode on a private
+  server", which is very often this topology. That would be wrong in the
+  direction that costs security: a VPN-only server holding its own internal-CA
+  certificates is manual AND private AND fully self-terminating, the identity
+  check works there, and it would be disarmed for a population of servers whose
+  operators never asked and would have no way to know.
+
+It is refused together with `--force-proxy`: the AOC relay is an SNI passthrough
+that never holds a key, so on that path the certificate the world is served *is*
+ours and the check both works and matters.
+
 ## Why it is one setting and not several bypasses
 
 Before this, "how do we get a certificate" was decided in two unrelated places:
