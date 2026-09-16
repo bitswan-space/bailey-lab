@@ -18,6 +18,8 @@ from functools import lru_cache
 from typing import Any, Callable
 from app.models import DeployedAutomation
 from app.utils import (
+    _BP_KEY,
+    _WS_MERGE_KEYS,
     AutomationConfig,
     bitswan_extract_filter,
     calculate_git_tree_hash,
@@ -1578,12 +1580,22 @@ class AutomationService:
         deployed_by: str | None = None,
         message: str | None = None,
         extra_paths: list[str] | None = None,
+        owned_keys: set[str] | None = None,
     ) -> None:
         """Write + commit + push each affected business process's slice to its
         OWN deploy repo (gitops/bp/<bp>). Deploy state is one bitswan.yaml per
         BP, so a change touching N BPs produces N per-BP commits/pushes — the
         driver then applies only those BPs. `extra_paths` are repo-relative paths
         (per-BP) to stage in the same commit."""
+        if owned_keys is not None:
+            current = read_bitswan_yaml(self.gitops_dir) or {}
+            for key in _WS_MERGE_KEYS:
+                if key in owned_keys:
+                    continue
+                if key in current:
+                    bs_yaml[key] = current[key]
+                else:
+                    bs_yaml.pop(key, None)
         for bp in sorted(bps):
             write_bp_bitswan(self.gitops_dir, bp, bs_yaml)
             await update_bp_git(
@@ -1810,6 +1822,7 @@ class AutomationService:
             "deploy",
             deployed_by=deployed_by,
             message=commit_subject,
+            owned_keys={_BP_KEY},
         )
 
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
