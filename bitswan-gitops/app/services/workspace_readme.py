@@ -64,7 +64,9 @@ to `main` as described below. {dashboard_line}
   code exactly as it stands on the process's own `main` inside the workspace.
 - `gitops` — one folder per business process holding its `bitswan.yaml`, the
   deployment manifest. The dev, staging and production stages are recorded
-  there (which commit each stage runs), not as branches.
+  there (which commit each stage runs), not as branches. Like the copies below
+  it is a **read-only mirror**: Bailey overwrites it on every push, so a commit
+  made to it here is lost. Deployments are changed from the workspace dashboard.
 - `copies/<name>` — each person's copy (and each experiment), one folder per
   business process it holds, as last published inside the workspace. These are
   **read-only mirrors**: Bailey overwrites them on every push and removes them
@@ -77,7 +79,7 @@ to `main` as described below. {dashboard_line}
 Inside the workspace every process's `main` only ever moves forward: a deploy
 fast-forwards it to the deployed copy, and history is never rewritten. The
 mirror keeps the same rule. Bailey pushes `main` here as a fast-forward and
-never force-pushes `main` or `gitops` on its own.
+never force-pushes `main` on its own.
 
 You may push commits **on top of** `main` here (edit a file in a process
 folder, merge a pull request). Before a copy is deployed — and on a regular
@@ -92,7 +94,8 @@ branch) or a remote change conflicts with work inside the workspace, Bailey
 stops pushing `main` and reports the branch as diverged in the workspace
 settings. A workspace admin then chooses to **force push to repair** (this
 repository's `main` is replaced by the workspace's) or to **pause the
-remote** until it is sorted out by hand.
+remote** until it is sorted out by hand. Only `main` can diverge: `gitops`
+and `copies/*` are overwritten on every push.
 
 Protect `main` on your git host so that nobody can force-push it:
 

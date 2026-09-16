@@ -271,8 +271,8 @@ export function GitRemoteCard() {
           business process with its code exactly as it stands on the process&apos;s own main;{' '}
           <code>gitops</code> holds each process&apos;s deployment manifest, where the dev, staging
           and production stages are recorded; <code>copies/&lt;name&gt;</code> mirrors each
-          person&apos;s copy read-only (overwritten on every push, removed with the copy). Pushes run
-          after every deploy or promote and every few minutes. Commits added on top of the remote&apos;s <code>main</code> are pulled back into the
+          person&apos;s copy. Both are read-only mirrors overwritten on every push (copies are removed
+          with the copy). Pushes run after every deploy or promote and every few minutes. Commits added on top of the remote&apos;s <code>main</code> are pulled back into the
           workspace before anyone deploys, and copies behind them must sync first. Bailey never
           force-pushes on its own: a rewritten remote <code>main</code> is reported here instead.
         </CardDescription>
@@ -434,8 +434,8 @@ export function GitRemoteCard() {
                       : "The remote's main is no longer a fast-forward of what this workspace pushed"}
                   </div>
                   <p className="text-muted-foreground">
-                    Bailey never force-pushes on its own, so main is not being mirrored. Force push to
-                    replace the remote&apos;s main and gitops with this workspace&apos;s, or pause the
+                    Bailey never force-pushes main on its own, so main is not being mirrored. Force
+                    push to replace the remote&apos;s main with this workspace&apos;s, or pause the
                     remote until it is sorted out by hand.
                   </p>
                   <div className="flex flex-wrap gap-2">

@@ -764,29 +764,17 @@ async def run_mirror_sync(
         await build_composite_commit(
             GITOPS_BRANCH, manifest_entries, mirrored_ns="refs/state/", **build
         )
+        forced_copies: list[str] = []
         local_gitops = await _rev(f"refs/heads/{GITOPS_BRANCH}")
         remote_gitops = remote[GITOPS_BRANCH]
-        gitops_state = await classify(local_gitops, remote_gitops)
-        if local_gitops and (gitops_state in ("absent", "behind") or force):
-            to_push.append(GITOPS_BRANCH)
+        if local_gitops:
+            if local_gitops != remote_gitops:
+                forced_copies.append(GITOPS_BRANCH)
             status["branches"][GITOPS_BRANCH] = _row(
                 local_gitops, remote_gitops, "up_to_date"
-            )
-        elif local_gitops and gitops_state == "equal":
-            status["branches"][GITOPS_BRANCH] = _row(
-                local_gitops, remote_gitops, "up_to_date"
-            )
-        elif local_gitops:
-            status["branches"][GITOPS_BRANCH] = _row(
-                local_gitops,
-                remote_gitops,
-                "diverged",
-                f"remote gitops is at {remote_gitops[:12]}, which this workspace did not push; "
-                "left untouched",
             )
 
         copy_heads, copy_deletions = await mirror_copy_branches(bps, build)
-        forced_copies: list[str] = []
         for branch, sha in copy_heads.items():
             remote_sha = remote["_copies"].get(branch)
             if remote_sha != sha:

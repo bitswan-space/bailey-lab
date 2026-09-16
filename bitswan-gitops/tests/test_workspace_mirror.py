@@ -615,3 +615,23 @@ def test_main_is_pushed_alone_first_to_an_empty_remote_so_hosts_make_it_default(
     ws.advance_bp("bpa", "a1\n")
     ws.run()
     assert len(pushes) == 1
+
+
+def test_gitops_branch_is_a_read_only_mirror_overwritten_on_the_next_push(ws):
+    ws.configure()
+    ws.run()
+    clone = ws.remote_clone(branch="gitops", name="gitops-remote")
+    foreign = _commit(
+        clone, "bpa/bitswan.yaml", "business_processes: {}\n", "hand edit"
+    )
+    _git("push", "-q", "origin", "HEAD:gitops", cwd=clone)
+
+    status = ws.run()
+    assert status["result"] == "ok"
+    assert status["branches"]["gitops"]["result"] == "pushed"
+    assert ws.remote_out("rev-parse", "gitops") == ws.mirror_out("rev-parse", "gitops")
+    assert ws.remote_out("rev-parse", "gitops") != foreign
+    assert "business_processes:\n  bpa: {}" in ws.remote_out(
+        "show", "gitops:bpa/bitswan.yaml"
+    )
+    assert status["branches"]["main"]["result"] == "up_to_date"
