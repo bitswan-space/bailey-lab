@@ -366,6 +366,8 @@ export function TopNav({
           onEnterCopy={onEnterCopy}
           onSelectBp={onSelectBp}
           onStartExperiment={onStartExperiment}
+          role={role}
+          onOpenSettings={() => onTab('settings')}
         />
         <span
           title={roleMeta.hint}

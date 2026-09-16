@@ -87,4 +87,5 @@ export type FlowTab =
   | 'agent'
   | 'requirements'
   | 'deploy'
-  | 'deployments';
+  | 'deployments'
+  | 'settings';

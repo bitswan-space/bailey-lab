@@ -1892,6 +1892,42 @@ export class GitopsClient {
     return this.requestJson('POST', `/tasks/clear?by=${encodeURIComponent(by)}`);
   }
 
+  gitRemote() {
+    return this.requestJson('GET', '/workspace/git-remote');
+  }
+
+  gitRemoteSet(url: string) {
+    return this.requestJson('PUT', '/workspace/git-remote', { url });
+  }
+
+  gitRemoteClear() {
+    return this.requestJson('DELETE', '/workspace/git-remote');
+  }
+
+  gitRemotePush() {
+    return this.requestJson('POST', '/workspace/git-remote/push');
+  }
+
+  gitRemotePull() {
+    return this.requestJson('POST', '/workspace/git-remote/pull');
+  }
+
+  gitRemoteForcePush() {
+    return this.requestJson('POST', '/workspace/git-remote/force-push');
+  }
+
+  gitRemotePause() {
+    return this.requestJson('POST', '/workspace/git-remote/pause');
+  }
+
+  gitRemoteResume() {
+    return this.requestJson('POST', '/workspace/git-remote/resume');
+  }
+
+  gitRemoteRotateKey() {
+    return this.requestJson('POST', '/workspace/git-remote/rotate-key');
+  }
+
   /** Subscribe to upstream events. Returns an unsubscribe function. */
   subscribe(fn: Listener): () => void {
     this.listeners.add(fn);

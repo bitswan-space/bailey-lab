@@ -5,6 +5,7 @@ import {
   ChevronRight,
   FlaskConical,
   Plus,
+  Settings,
   Settings2,
 } from 'lucide-react';
 import {
@@ -42,6 +43,8 @@ export interface AdvancedMenuProps {
   /** Start an experiment on the business process in view (the shell owns the
    *  request and the lock; this menu only opens the dialog). */
   onStartExperiment: (title: string, bp: BusinessProcess) => void;
+  role: 'admin' | 'auditor' | 'member';
+  onOpenSettings: () => void;
 }
 
 /**
@@ -68,6 +71,8 @@ export function AdvancedMenu({
   onEnterCopy,
   onSelectBp,
   onStartExperiment,
+  role,
+  onOpenSettings,
 }: AdvancedMenuProps) {
   const [open, setOpen] = useState(false);
   const [newExperimentOpen, setNewExperimentOpen] = useState(false);
@@ -358,6 +363,25 @@ export function AdvancedMenu({
                     {myLegacyExperiments.map((e) => experimentRow(e, false))}
                   </>
                 )}
+              </>
+            )}
+
+            {role === 'admin' && (
+              <>
+                <div className="my-1 h-px bg-border" aria-hidden />
+                {sectionLabel('Workspace')}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    onOpenSettings();
+                  }}
+                  className={rowClass(false)}
+                >
+                  <Settings className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="min-w-0 flex-1 truncate">Settings</span>
+                  <span className="text-[10px] text-muted-foreground">admin</span>
+                </button>
               </>
             )}
           </div>

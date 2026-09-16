@@ -45,6 +45,7 @@ from app.services import firewall_service
 from app.services.bp_git import fetch_main
 from app.services.git_server import bp_bare_repo_path, validate_bp_name
 from app.task_queue import current_requester
+from app.services.workspace_mirror_trigger import request_workspace_mirror_push
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
@@ -1590,6 +1591,7 @@ class AutomationService:
                 message=message,
                 extra_paths=extra_paths,
             )
+        request_workspace_mirror_push("deploy-state", deployed_by)
 
     async def write_deployment_entries(
         self,
