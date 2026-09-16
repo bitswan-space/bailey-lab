@@ -696,6 +696,7 @@ class AutomationService:
         containers = await self.infra_driver.container_list(
             self._workspace_ctx(),
             labels={"gitops.workspace": self.workspace_name},
+            with_restart_counts=True,
         )
         return [
             c.to_docker_dict()
@@ -762,7 +763,7 @@ class AutomationService:
                     state=None,
                     status=None,
                     deployment_id=deployment_id,
-                    active=cfg.get("active", False),
+                    active=self._is_active(cfg),
                     automation_url=None,
                     relative_path=cfg.get("relative_path", None),
                     # Production is persisted as an empty-string stage in
@@ -845,6 +846,52 @@ class AutomationService:
     def forget_copy(self, copy: str) -> None:
         self._cache.pop(copy, None)
 
+    _STATE_SEVERITY = {
+        "dead": 6,  # → stopped
+        "exited": 6,  # → stopped
+        "failed": 6,  # → stopped
+        "paused": 6,  # → stopped — not up, whatever its name suggests
+        "restarting": 5,
+        "created": 3,
+        "running": 2,
+        "starting": 2,  # on its way up
+    }
+
+    @staticmethod
+    def _is_active(conf: dict | None) -> bool:
+        """Is this deployment entry live — i.e. NOT asleep?
+
+        A MISSING `active` key means nobody ever slept it. Sleeping is something
+        gitops writes (`mark_as_inactive` sets `active: False`), and write-time
+        normalisation fills the key in for everything it touches, so an entry
+        without one predates that normalisation and is live. The file said
+        nothing, and nothing is not "no".
+
+        This is the only place that decides it. There were three readings in
+        this file — two defaulting to True and one to False — so the automations
+        list called a legacy entry live while the deploy path skipped it, and
+        the operator got a member stuck at "not accounted for" that nothing was
+        ever going to start.
+        """
+        return bool((conf or {}).get("active", True))
+
+    @classmethod
+    def _worse_state(cls, current: str | None, incoming: str) -> str:
+        """The less healthy of two container states for ONE deployment.
+
+        Replicas of a deployment share its deployment_id, so several containers
+        describe one entry. A dead replica beside a live one is not "running":
+        the operator has to see the worst of them, by the same ranking the
+        dashboard uses when it collapses records onto a row.
+        """
+        if not current:
+            return incoming
+
+        def rank(state: str) -> int:
+            return cls._STATE_SEVERITY.get(state, 0)
+
+        return incoming if rank(incoming) > rank(current) else current
+
     def _apply_docker_overlay(
         self,
         entries: list[DeployedAutomation],
@@ -878,6 +925,11 @@ class AutomationService:
                 if slot and base_id in by_id:
                     a = by_id[base_id].model_copy()
                     a.deployment_id = deployment_id
+                    a.state = None
+                    a.container_id = None
+                    a.restart_count = None
+                    a.mem_usage_bytes = None
+                    a.mem_over_reservation = False
                     entries.append(a)
                     by_id[deployment_id] = a
                 else:
@@ -908,24 +960,34 @@ class AutomationService:
                 except (ValueError, TypeError):
                     pass
 
-            a.container_id = container.get("Id")
             a.endpoint_name = info.get("Name")
-            a.created_at = created_at
-            a.state = container.get("State", "unknown")
-            a.status = container.get("Status", "")
+            merged = self._worse_state(a.state, container.get("State", "unknown"))
+            won = a.container_id is None or merged != a.state
+            if won:
+                a.container_id = container.get("Id")
+                a.created_at = created_at
+                a.status = container.get("Status", "")
+                a.mem_usage_bytes = None
+                a.mem_over_reservation = False
+            elif container.get("Status") == "unhealthy" and a.status != "unhealthy":
+                a.status = "unhealthy"
+            a.state = merged
+            if won:
+                a.restart_count = container.get("RestartCount")
             a.automation_url = url
 
             # Memory overlay for the Containers tab: reservation + policy from the
             # container labels (stamped by the compiler); live usage from the
             # stats map threaded via info["_mem"] (container id → bytes).
-            try:
-                a.mem_reservation_mb = (
-                    int(labels.get("gitops.mem_reservation_mb") or 0) or None
-                )
-            except (TypeError, ValueError):
-                a.mem_reservation_mb = None
-            a.mem_policy = labels.get("gitops.mem_policy") or None
-            usage = ((info or {}).get("_mem") or {}).get(container.get("Id"))
+            if won:
+                try:
+                    a.mem_reservation_mb = (
+                        int(labels.get("gitops.mem_reservation_mb") or 0) or None
+                    )
+                except (TypeError, ValueError):
+                    a.mem_reservation_mb = None
+                a.mem_policy = labels.get("gitops.mem_policy") or None
+            usage = ((info or {}).get("_mem") or {}).get(a.container_id)
             if usage is not None:
                 a.mem_usage_bytes = int(usage)
                 if a.mem_reservation_mb:
@@ -940,13 +1002,18 @@ class AutomationService:
         # would be blank whenever the container is down and the user couldn't wake it.
         for a in entries:
             if a.expose and not a.automation_url and a.deployment_id:
-                base_id = a.deployment_id.split("@")[0]
+                base_id, _, slot = a.deployment_id.partition("@")
                 dep_conf = dep_configs.get(base_id, {})
+                host_stage = (
+                    "dr"
+                    if slot
+                    else (dep_conf.get("stage", "production") or "production")
+                )
                 a.automation_url = generate_workspace_url(
                     self.workspace_name,
                     dep_conf.get("automation_name", base_id),
                     dep_conf.get("context", ""),
-                    dep_conf.get("stage", "production") or "production",
+                    host_stage,
                     gitops_domain,
                     True,
                 )
@@ -987,9 +1054,13 @@ class AutomationService:
         # (memory-pressure | manual) so the dashboard/logs explain the absence
         # instead of a container silently vanishing. Running entries clear any
         # stale marker (self-healing).
+        live_deployments = (bs_yaml or {}).get("deployments", {}) or {}
         for a in result:
             if not a.deployment_id:
                 continue
+            conf = live_deployments.get(a.deployment_id)
+            if conf is not None:
+                a.active = self._is_active(conf)
             if a.container_id:
                 self._clear_sleep_reason(a.deployment_id)
             else:
@@ -5762,7 +5833,7 @@ class AutomationService:
         bs_yaml = read_bitswan_yaml(self.gitops_dir)
         active_deployments = {}
         for deployment_id, config in bs_yaml["deployments"].items():
-            if config.get("active", False):
+            if self._is_active(config):
                 active_deployments[deployment_id] = config
         return active_deployments
 

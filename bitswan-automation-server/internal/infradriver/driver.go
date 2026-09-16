@@ -191,10 +191,9 @@ type Image struct {
 	Size    int64  `json:"size"`    // bytes
 }
 
-// ContainerFilter narrows ContainerList. Empty fields are ignored; Labels are
-// matched as exact key=value pairs (e.g. gitops.deployment.id, gitops.stage).
 type ContainerFilter struct {
 	Labels map[string]string `json:"labels,omitempty"`
+	WithRestartCounts bool `json:"with_restart_counts,omitempty"`
 }
 
 // Container is one realized container.
@@ -206,6 +205,7 @@ type Container struct {
 	Image   string            `json:"image"`
 	Created int64             `json:"created"` // unix seconds (gitops overlays created_at from this)
 	Labels  map[string]string `json:"labels,omitempty"`
+	RestartCount *int `json:"restart_count,omitempty"`
 }
 
 // ContainerStat is one container's live memory usage (from `docker stats`). Only

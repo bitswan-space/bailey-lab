@@ -26,6 +26,7 @@ class DeployedAutomation(BaseModel):
     expose: bool = False
     # Memory governance (Containers tab): live usage vs the declared reservation,
     # the reservation policy, and whether usage exceeds the reservation.
+    restart_count: int | None = None
     mem_usage_bytes: int | None = None
     mem_reservation_mb: int | None = None
     mem_policy: str | None = None

@@ -597,8 +597,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // "the screen is moving" forever and never notice a dark stall.
     const btn = await d.getByRole('button', { name: /Working|^Deploy$|Promote|Switching|Starting/i }).first().textContent({ timeout: 1500 }).catch(() => '');
     if (btn && btn.trim()) parts.push('btn:' + btn.trim());
-    // The stage card status line + version (changes when a deploy lands).
-    const status = await d.getByText(/Healthy|services? not running|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent({ timeout: 1500 }).catch(() => '');
+    const status = await d.getByText(/Healthy|services? not running|services? restarting|services? of \d+ asleep|services? of \d+ not accounted for|Asleep|Not deployed yet|Deploying|Building|Pulling|Starting|Preparing|Promoting|Generating|Configuring|Reconciling|Provisioning|Installing|Recording|Updating|updated|never deployed/i).first().textContent({ timeout: 1500 }).catch(() => '');
     if (status && status.trim()) parts.push('status:' + status.trim());
     return parts.join(' | ');
   };
@@ -616,9 +615,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // deploy) any Healthy / Current-on on screen is the terminal.
     const healthy = stageName
       ? d.getByText(new RegExp(`Current on ${stageName}`, 'i')).first()
-      : d.getByText(/^Healthy$/i).or(d.getByText(/Current on/i)).first();
+      : d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
     const failed = d
       .getByText(/services? not running/i)
+      .or(d.getByText(/services? restarting/i))
       .or(d.getByText(/Last deploy to .* failed/i))
       .first();
     const isHealthy = () => healthy.isVisible().catch(() => false);
@@ -628,10 +628,10 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     const BACKSTOP = 30 * 60_000; // generous absolute cap; the real guard is PROGRESS
     const deadline = Date.now() + BACKSTOP;
     for (;;) {
-      if (await isHealthy()) return; // terminal: success on screen
       if (await isFailed()) {
         throw new Error(`deploy surfaced an error on screen: "${(await failed.textContent())?.trim()}"`);
       }
+      if (await isHealthy()) return; // terminal: success on screen
       if (Date.now() > deadline) throw new Error('deploy exceeded 30min backstop');
       // Wait up to PROGRESS for the on-screen progress to MOVE, racing the
       // terminal states so we resolve instantly when the deploy finishes. This
@@ -641,8 +641,8 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
         await expect
           .poll(
             async () => {
-              if (await isHealthy()) return '<<healthy>>';
               if (await isFailed()) return '<<failed>>';
+              if (await isHealthy()) return '<<healthy>>';
               return await progressSignature();
             },
             { timeout: PROGRESS, intervals: [500, 1000, 2000] },
@@ -2129,11 +2129,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
-      const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
+      const ok = d.getByText(/\bHealthy\b/i).first();
       const none = d.getByText(/Not deployed yet/i).first();
+      const bad = d
+        .getByText(/services? not running/i)
+        .or(d.getByText(/services? restarting/i))
+        .first();
       await Promise.race([
         ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
         none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+        bad.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
       ]);
       healthy = await ok.isVisible().catch(() => false);
       if (!healthy) {
@@ -2270,7 +2275,7 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
     // to main on a successful deploy) and report Healthy. (An empty BP merges
     // instantly — nothing to build — which is why this only bites a real
     // scaffolded BP.)
-    const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
+    const ok = d.getByText(/\bHealthy\b/i).first();
     const devStage = d.getByRole('button', { name: /Development/i }).first();
     // Ride the deploy the way an operator does: keep waiting AS LONG AS the screen
     // shows progress, with NO flat cap. Deploy builds the dev image
@@ -2479,11 +2484,16 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
       await pressDeploy();
       await clickTopTab(/Deployments/i);
       await selectStage(/Development/i);
-      const ok = d.getByText(/\bHealthy\b/i).or(d.getByText(/Current on/i)).first();
+      const ok = d.getByText(/\bHealthy\b/i).first();
       const none = d.getByText(/Not deployed yet/i).first();
+      const bad = d
+        .getByText(/services? not running/i)
+        .or(d.getByText(/services? restarting/i))
+        .first();
       await Promise.race([
         ok.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
         none.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
+        bad.waitFor({ state: 'visible', timeout: SLA }).catch(() => {}),
       ]);
       healthy = await ok.isVisible().catch(() => false);
       if (!healthy) {

@@ -3,7 +3,7 @@
 // standalone-label text color. Previously these were duplicated across three
 // records in different components.
 
-import type { AutomationState } from '@/types';
+import type { AutomationState, DeployedAutomation } from '@/types';
 
 export type DisplayStatus =
   | 'running'
@@ -11,6 +11,7 @@ export type DisplayStatus =
   | 'stopped'
   | 'failed'
   | 'not-deployed'
+  | 'asleep'
   | 'building'
   | 'deployed'
   | 'unknown';
@@ -63,6 +64,12 @@ export const STATUS_META: Record<DisplayStatus, StatusMeta> = {
     badge: 'border-transparent bg-red-100 text-red-700',
     labelColor: 'text-red-600',
   },
+  asleep: {
+    label: 'Asleep',
+    dot: 'bg-sky-500',
+    badge: 'border-transparent bg-sky-100 text-sky-700',
+    labelColor: 'text-sky-600',
+  },
   'not-deployed': {
     label: 'Not deployed',
     dot: 'bg-zinc-300',
@@ -82,8 +89,9 @@ export function stateToDisplay(state: AutomationState | null | undefined): Displ
   switch (state) {
     case 'running':
     case 'starting':
-    case 'created':
       return 'running';
+    case 'created':
+      return 'unknown';
     case 'restarting':
       return 'restarting';
     case 'exited':
@@ -93,4 +101,39 @@ export function stateToDisplay(state: AutomationState | null | undefined): Displ
     default:
       return 'unknown';
   }
+}
+
+export function isUpStatus(status: DisplayStatus): boolean {
+  return (
+    status === 'running' ||
+    status === 'restarting' ||
+    status === 'building' ||
+    status === 'deployed'
+  );
+}
+
+const STATUS_SEVERITY: Record<DisplayStatus, number> = {
+  failed: 7,
+  stopped: 6,
+  restarting: 5,
+  asleep: 4,
+  building: 3,
+  running: 2,
+  deployed: 2,
+  unknown: 1,
+  'not-deployed': 0,
+};
+
+export function worstStatus(...statuses: DisplayStatus[]): DisplayStatus {
+  return statuses.reduce(
+    (worst, s) => (STATUS_SEVERITY[s] > STATUS_SEVERITY[worst] ? s : worst),
+    'not-deployed',
+  );
+}
+
+export function displayFor(a?: DeployedAutomation): DisplayStatus {
+  if (!a?.deployment_id) return 'not-deployed';
+  const gone = !a.container_id && !a.state;
+  if (gone && a.active === false) return 'asleep';
+  return stateToDisplay(a.state);
 }

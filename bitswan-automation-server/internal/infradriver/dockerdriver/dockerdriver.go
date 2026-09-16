@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -81,7 +82,18 @@ type dockerInspect struct {
 
 // ContainerList returns the workspace's containers, optionally filtered by
 // labels. Health is "" when the container declares no healthcheck.
-func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
+func (d *DockerDriver) ContainerList(ctx context.Context, wctx infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
+	containers, err := d.listContainers(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if filter.WithRestartCounts {
+		fillRestartCounts(ctx, containers)
+	}
+	return containers, nil
+}
+
+func (d *DockerDriver) listContainers(ctx context.Context, filter infradriver.ContainerFilter) ([]infradriver.Container, error) {
 	// A single `docker ps` with a LEAN field-separated --format returns
 	// everything the Container type needs (name, state, health-from-status,
 	// image, created, labels) WITHOUT a per-container `docker inspect`. Two
@@ -111,12 +123,62 @@ func (d *DockerDriver) ContainerList(ctx context.Context, _ infradriver.Workspac
 	return parsePS(out)
 }
 
+const restartFormat = "{{.Id}}" + psSep + "{{.RestartCount}}"
+
+func fillRestartCounts(ctx context.Context, containers []infradriver.Container) {
+	ids := allIDs(containers)
+	if len(ids) == 0 {
+		return
+	}
+	args := append([]string{"inspect", "--format", restartFormat}, ids...)
+	out, err := exec.CommandContext(ctx, "docker", args...).Output()
+	if len(out) == 0 {
+		if err != nil && ctx.Err() == nil {
+			log.Printf("infra-driver: restart counts unavailable: %v", err)
+		}
+		return
+	}
+	counts := parseRestartCounts(out)
+	for i := range containers {
+		if n, ok := counts[containers[i].ID]; ok {
+			containers[i].RestartCount = &n
+		}
+	}
+}
+
+func allIDs(containers []infradriver.Container) []string {
+	ids := make([]string, 0, len(containers))
+	for _, c := range containers {
+		ids = append(ids, c.ID)
+	}
+	return ids
+}
+
+func parseRestartCounts(raw []byte) map[string]int {
+	counts := map[string]int{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		id, count, ok := strings.Cut(line, psSep)
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(count))
+		if err != nil {
+			continue
+		}
+		counts[id] = n
+	}
+	return counts
+}
+
 // ContainerStats returns live memory usage for the workspace's RUNNING
 // containers. `docker stats` has no label filter, so we scope by listing the
 // workspace's containers first (ContainerList forces the workspace label) and
 // sampling only those IDs; name/labels come from the listing, memory from stats.
 func (d *DockerDriver) ContainerStats(ctx context.Context, wctx infradriver.WorkspaceContext, filter infradriver.ContainerFilter) ([]infradriver.ContainerStat, error) {
-	containers, err := d.ContainerList(ctx, wctx, filter)
+	containers, err := d.listContainers(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
