@@ -634,6 +634,53 @@ def daemon_user_role(email: str) -> str:
         client.close()
 
 
+def daemon_agent_browser(
+    method: str, path: str, *, params: dict | None = None, json_body: dict | None = None
+) -> dict:
+    """Call the daemon's coding-agent browser API over the trusted local socket
+    (bailey-lab#210).
+
+    The daemon owns everything with authority here: it holds the test
+    identities, mints the session cookie, decides whether the endpoint is a
+    live-dev frontend, and signs the tokens. gitops is the relay, because the
+    coding agent's container reaches nothing but gitops.
+
+    Raises on transport failure and on any non-2xx, so a caller surfaces an
+    honest error instead of pretending a session exists.
+    """
+    client, base = _ingress_client_and_base()
+    try:
+        resp = client.request(
+            method,
+            f"{base}/bailey/agent-browser/{path}",
+            params=params or None,
+            json=json_body,
+        )
+        if resp.status_code >= 400:
+            detail = ""
+            try:
+                detail = (resp.json() or {}).get("error") or ""
+            except Exception:  # noqa: BLE001 - a non-JSON body is still a failure
+                detail = resp.text[:500]
+            raise DaemonAgentBrowserError(
+                resp.status_code, detail or resp.reason_phrase
+            )
+        return resp.json() or {}
+    finally:
+        client.close()
+
+
+class DaemonAgentBrowserError(RuntimeError):
+    """A refusal from the daemon's agent-browser API, carrying its status so a
+    route can pass the daemon's own reason through instead of flattening every
+    refusal into a 502."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
 def daemon_auditors() -> list[dict]:
     """Every user who can audit — holds the admin or auditor role — as
     [{email, role}], read from the automation-server daemon over the trusted

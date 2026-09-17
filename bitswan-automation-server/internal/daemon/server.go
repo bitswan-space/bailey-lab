@@ -175,6 +175,12 @@ var socketWorkspaceCallableRoutes = []string{
 	"/bailey/role",  // gitops resolves a user's effectiveRole (utils.py)
 	"/memory/admit", // gitops gates a promote against the reserved budget
 	"/ingress",      // gitops adds/repoints/removes routes
+	// #210: gitops relays the coding agent's browser requests. Deliberately not
+	// admin-token gated — the agent is a member's own tool, and what it can
+	// reach is bounded by canGiveAgentSession (live-dev frontends only), not by
+	// who is calling.
+	"/bailey/agent-browser/identities",
+	"/bailey/agent-browser/session",
 }
 
 // setupRoutes configures the HTTP routes
@@ -270,6 +276,8 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	// verified the user's access token) resolve a user's effectiveRole without
 	// re-deriving it from SSO groups. Read-only, keyed by email.
 	mux.HandleFunc("/bailey/role", s.authMiddleware(s.handleUserRole))
+	mux.HandleFunc("/bailey/agent-browser/identities", s.authMiddleware(s.handleAgentIdentities))
+	mux.HandleFunc("/bailey/agent-browser/session", s.authMiddleware(s.handleAgentSession))
 
 	// Bailey auditor/admin roster (authenticated; socket-trusted). Lets gitops
 	// (for the dashboard's Audits panel) list the users a normal member can ask
@@ -607,6 +615,14 @@ func (s *Server) Run() error {
 	// re-renders dynamic.yml, which Traefik picks up through the file provider's
 	// watch. It never has to reach Traefik, so it cannot lose the race they did.
 	reapplyPublicEndpoints()
+
+	// The coding agent's issuer (#210) needs its hostname routed to the gate
+	// before any worker can fetch its keys. Same reasoning as the line above:
+	// registering a route only writes state Traefik watches, so it is safe at
+	// t=0. No-op on a server with no domain yet.
+	if domain := protectedHostnameDomain(); domain != "" {
+		registerAgentIssuerRoute(domain)
+	}
 
 	// Paranoid end-to-end-TLS self-check for EVERY server with a public domain
 	// (proxied or directly-addressed): confirm the certificate the world is

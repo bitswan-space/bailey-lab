@@ -23,6 +23,7 @@ server.
 COMMANDS
   requirements  — Manage & run testable requirements (list, add, test, update)
   deployments   — Manage live-dev deployments (list, start, exec, logs)
+  browser       — Open a live-dev app in a real browser as a test user you invent
 
 Run any subcommand with --help for full usage details.
 
@@ -46,7 +47,14 @@ TYPICAL WORKFLOW
   5. Check deployments and their public URLs:
        bitswan-coding-agent deployments list
 
-  6. Write a deterministic test for each requirement and run it. Name the test
+  6. If the requirement is about something a person SEES, look at it. You have a
+     browser and can sign in as a test user with any groups you choose:
+       bitswan-coding-agent browser --help
+     Reading the code is not the same as loading the page, and an app that
+     renders one thing for a plain member and another for an admin can only be
+     checked by being both.
+
+  7. Write a deterministic test for each requirement and run it. Name the test
      after the requirement's ID with hyphens turned into underscores, so a test
      for REQ-003 matches the token REQ_003 (e.g. def test_REQ_003_...). Then:
        bitswan-coding-agent requirements test --id REQ-003
@@ -61,7 +69,7 @@ TYPICAL WORKFLOW
        automation = "backend"
        runner = "pytest -k {id} -v"
 
-  7. For anything that genuinely cannot be tested mechanically, set the status by
+  8. For anything that genuinely cannot be tested mechanically, set the status by
      hand instead:
        bitswan-coding-agent requirements update --id REQ-ID --status pass
 
@@ -73,7 +81,7 @@ TYPICAL WORKFLOW
                    harder/different test
        proposed  — AI-suggested requirement awaiting human review
 
-  8. Commit when ready:
+  9. Commit when ready:
        git add -A && git commit -m "implement feature X"
 
 DIRECTORY STRUCTURE

@@ -88,8 +88,9 @@ func stripForwardedIdentityHeaders(r *http.Request) {
 // state. They are meaningful only to the gate and the Bailey daemon; an
 // upstream app must never receive them.
 var baileyAuthCookieNames = map[string]bool{
-	deviceCookieName: true, // _bailey_device — the replayable device-trust credential
-	gateOriginCookie: true, // _bailey_origin — the gate's return-path stash
+	deviceCookieName:   true, // _bailey_device — the replayable device-trust credential
+	gateOriginCookie:   true, // _bailey_origin — the gate's return-path stash
+	agentSessionCookie: true, // _bailey_agent — the coding agent's live-dev session (#210)
 }
 
 // stripBaileyAuthCookies rewrites r's Cookie header to drop Bailey's auth
