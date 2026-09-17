@@ -11,9 +11,9 @@ import {
   ShieldCheck,
   Undo2,
   Upload,
-  X,
 } from 'lucide-react';
 import { toast } from '@/lib/notify';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { api, type FirewallAttempt, type FirewallReport, type FirewallRule, type GdprRecord } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { formatRelative, type WhenInput } from '@/lib/format-date';
@@ -403,30 +403,26 @@ function GdprModal({
     rec.stored === 'yes' ? 'Yes — stored' : rec.stored === 'transient' ? 'Transient only' : 'No';
 
   return (
-    <div
-      className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/45 p-8"
-      onClick={onClose}
-    >
-      <div
-        className="flex max-h-[90vh] w-[600px] max-w-[96vw] flex-col overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent
+        aria-describedby={undefined}
+        className="flex max-h-[90vh] w-[600px] max-w-[96vw] flex-col gap-0 overflow-hidden rounded-xl p-0"
       >
-        <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+      <form
+        className="contents"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!ro && !busy) onSave?.(rec, file);
+        }}
+      >
+        <div className="flex items-center gap-3 border-b border-border px-5 py-4 pr-12">
           <span className="flex size-8 items-center justify-center rounded-lg bg-muted">
             <ShieldCheck className="size-4 text-foreground" aria-hidden />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="text-[15px] font-bold text-foreground">{title}</div>
+            <DialogTitle className="text-[15px] font-bold text-foreground">{title}</DialogTitle>
             <div className="mt-0.5 truncate font-mono text-[12px] text-muted-foreground">{host}</div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted"
-            aria-label="Close"
-          >
-            <X className="size-4" aria-hidden />
-          </button>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto px-5 py-4">
@@ -588,9 +584,8 @@ function GdprModal({
               Cancel
             </button>
             <button
-              type="button"
+              type="submit"
               disabled={busy}
-              onClick={() => onSave?.(rec, file)}
               className="inline-flex h-8 items-center gap-1.5 rounded-md bg-emerald-600 px-3.5 text-[13px] font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
             >
               {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" aria-hidden />}
@@ -598,8 +593,9 @@ function GdprModal({
             </button>
           </div>
         )}
-      </div>
-    </div>
+      </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

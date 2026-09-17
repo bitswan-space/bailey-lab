@@ -226,19 +226,19 @@ export function NewBusinessProcessDialog({
               </p>
             )}
           </div>
+          <DialogFooter className="mt-2">
+            <Button
+              variant="ghost"
+              onClick={() => onOpenChange(false)}
+              disabled={submitting}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!canSubmit}>
+              {bundle ? 'Restore' : 'Create'}
+            </Button>
+          </DialogFooter>
         </form>
-        <DialogFooter>
-          <Button
-            variant="ghost"
-            onClick={() => onOpenChange(false)}
-            disabled={submitting}
-          >
-            Cancel
-          </Button>
-          <Button onClick={() => void handleSubmit()} disabled={!canSubmit}>
-            {bundle ? 'Restore' : 'Create'}
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

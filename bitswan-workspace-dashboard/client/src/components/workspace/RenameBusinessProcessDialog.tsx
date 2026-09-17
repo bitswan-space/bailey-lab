@@ -126,15 +126,15 @@ export function RenameBusinessProcessDialog({
           {validationError && (
             <p className="text-xs text-destructive">{validationError}</p>
           )}
+          <DialogFooter className="mt-2">
+            <Button variant="ghost" onClick={onClose} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!canSubmit}>
+              Rename
+            </Button>
+          </DialogFooter>
         </form>
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose} disabled={submitting}>
-            Cancel
-          </Button>
-          <Button onClick={() => void handleSubmit()} disabled={!canSubmit}>
-            Rename
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
