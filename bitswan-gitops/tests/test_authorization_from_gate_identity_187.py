@@ -5,6 +5,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+import app.routes.copies as copies_routes
 import app.routes.tasks as tasks_routes
 import app.services.automation_service as mod
 from app.dependencies import verify_token
@@ -111,3 +112,22 @@ def test_clearing_the_queue_ignores_a_by_query_parameter(tasks_client):
         ).status_code
         == 200
     )
+
+
+def test_opening_an_audit_checks_the_real_role_of_the_gate_identity(
+    tmp_path, monkeypatch
+):
+    svc = _svc(tmp_path, monkeypatch)
+    import app.dependencies as deps
+
+    monkeypatch.setattr(deps, "get_automation_service", lambda: svc)
+    monkeypatch.setattr(copies_routes, "_copies_dir", lambda: str(tmp_path / "copies"))
+    body = copies_routes.OpenAuditRequest(bp="invoices")
+    current_requester.set("member@x")
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(copies_routes.open_audit(body))
+    assert ei.value.status_code == 403
+    current_requester.set(None)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(copies_routes.open_audit(body))
+    assert ei.value.status_code == 403
