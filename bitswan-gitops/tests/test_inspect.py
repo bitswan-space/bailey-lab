@@ -298,12 +298,12 @@ def _inspect_stub(containers, inspect_result=None, boom=False):
         get_container=get_container,
         infra_driver=types.SimpleNamespace(container_inspect=container_inspect),
         _workspace_ctx=lambda: None,
-        _env_secret_visibility=lambda _dep, _by: ({"API_KEY"}, False),
+        _env_secret_visibility=lambda _dep: ({"API_KEY"}, False),
     )
 
 
-def _inspect(stub, deployment_id="frontend-bookmaker-live-dev", by=None):
-    return asyncio.run(AutomationService.inspect_automation(stub, deployment_id, by=by))
+def _inspect(stub, deployment_id="frontend-bookmaker-live-dev"):
+    return asyncio.run(AutomationService.inspect_automation(stub, deployment_id))
 
 
 def test_inspect_automation_returns_the_inspect_shape_not_the_list_shape():

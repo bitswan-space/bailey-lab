@@ -12,6 +12,7 @@ import asyncio
 
 import app.services.automation_service as mod
 from app.services.automation_service import AutomationService
+from app.task_queue import current_requester
 
 
 def _svc(tmp_path, monkeypatch):
@@ -27,8 +28,9 @@ def _svc(tmp_path, monkeypatch):
     return svc
 
 
-def _as_role(monkeypatch, role):
+def _as_role(monkeypatch, role, email="someone@x"):
     monkeypatch.setattr(mod, "daemon_user_role", lambda by: role)
+    current_requester.set(email)
 
 
 def test_admin_can_set_production_secret(tmp_path, monkeypatch):
@@ -39,7 +41,7 @@ def test_admin_can_set_production_secret(tmp_path, monkeypatch):
             "shop", {"production": {"K": "prod-v1"}}, deployed_by="admin@x"
         )
     )
-    assert svc.read_bp_secrets("shop", by="admin@x")["production"]["K"] == "prod-v1"
+    assert svc.read_bp_secrets("shop")["production"]["K"] == "prod-v1"
 
 
 def test_member_cannot_change_production_but_can_edit_dev(tmp_path, monkeypatch):
@@ -62,7 +64,7 @@ def test_member_cannot_change_production_but_can_edit_dev(tmp_path, monkeypatch)
     )
     # Read back as a privileged caller: production is untouched, dev edit applied.
     _as_role(monkeypatch, "admin")
-    got = svc.read_bp_secrets("shop", by="admin@x")
+    got = svc.read_bp_secrets("shop")
     assert got["production"]["K"] == "real", "member overwrote a production secret"
     assert got["dev"]["D"] == "dev-v1", "member's dev edit was dropped"
 
@@ -76,7 +78,9 @@ def test_unidentified_writer_cannot_change_production(tmp_path, monkeypatch):
         )
     )
     # No identity → fail-closed → production preserved.
+    current_requester.set(None)
     asyncio.run(
         svc.write_bp_secrets("shop", {"production": {"K": "wiped"}}, deployed_by=None)
     )
-    assert svc.read_bp_secrets("shop", by="admin@x")["production"]["K"] == "real"
+    current_requester.set("admin@x")
+    assert svc.read_bp_secrets("shop")["production"]["K"] == "real"

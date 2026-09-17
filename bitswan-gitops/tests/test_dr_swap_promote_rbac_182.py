@@ -12,6 +12,7 @@ from fastapi import HTTPException
 
 import app.services.automation_service as mod
 from app.services.automation_service import AutomationService
+from app.task_queue import current_requester
 
 
 def _svc(tmp_path):
@@ -22,14 +23,15 @@ def _svc(tmp_path):
     return svc
 
 
-def _as_role(monkeypatch, role):
+def _as_role(monkeypatch, role, email=None):
     monkeypatch.setattr(mod, "daemon_user_role", lambda by: role)
+    current_requester.set(email)
 
 
 @pytest.mark.parametrize("op", ["swap_production_dr", "zero_downtime_promote"])
 def test_member_cannot_swap_or_promote(tmp_path, monkeypatch, op):
     svc = _svc(tmp_path)
-    _as_role(monkeypatch, "member")
+    _as_role(monkeypatch, "member", "member@x")
     with pytest.raises(HTTPException) as ei:
         asyncio.run(getattr(svc, op)("shop", by="member@x"))
     assert ei.value.status_code == 403
@@ -50,6 +52,6 @@ def test_admin_clears_the_swap_gate(tmp_path, monkeypatch):
     live slot to the default DR slot — proving the gate let the admin through
     (a member/None caller is rejected 403 above, before any of this)."""
     svc = _svc(tmp_path)
-    _as_role(monkeypatch, "admin")
+    _as_role(monkeypatch, "admin", "admin@x")
     result = asyncio.run(svc.swap_production_dr("shop", by="admin@x"))
     assert result["live_slot"] == "green"
