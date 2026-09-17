@@ -65,7 +65,7 @@ func startEgressProbes() {
 type App struct {
 	db   *gorm.DB
 	mc   *minio.Client
-	jwks *JWKSProvider
+	jwks *JWKSSet
 }
 
 func envOr(key, fallback string) string {
@@ -134,9 +134,15 @@ func main() {
 	// genuinely has no identity provider — an AOC-connected platform that
 	// failed to inject the issuer is a misconfiguration and refusing to
 	// start beats silently trusting every request.
-	issuerURL := os.Getenv("KEYCLOAK_ISSUER_URL")
+	// BITSWAN_ISSUER_URLS is every provider this server has; KEYCLOAK_ISSUER_URL
+	// is the primary one and all a platform that predates the multi-provider
+	// contract injects. Either alone is a complete answer.
+	issuers := parseIssuerList(os.Getenv("BITSWAN_ISSUER_URLS"))
+	if len(issuers) == 0 {
+		issuers = parseIssuerList(os.Getenv("KEYCLOAK_ISSUER_URL"))
+	}
 	fatal, warning := resolveAuthStartup(
-		issuerURL,
+		issuers,
 		os.Getenv("BITSWAN_AUTH_MODE"),
 		os.Getenv("BITSWAN_AUTOMATION_STAGE"),
 	)
@@ -146,9 +152,9 @@ func main() {
 	if warning != "" {
 		log.Println("WARNING: " + warning)
 	}
-	var jwks *JWKSProvider
-	if issuerURL != "" {
-		jwks = NewJWKSProvider(issuerURL)
+	var jwks *JWKSSet
+	if len(issuers) > 0 {
+		jwks = NewJWKSSet(issuers)
 	} else {
 		log.Println("KEYCLOAK_ISSUER_URL not set — simple mode: the Bailey gate authenticates upstream; backend does not validate JWTs itself.")
 	}

@@ -90,6 +90,14 @@ elif [ -n "$COPY" ] && [ -d "/workspace/copies/${COPY}" ]; then
     cd "/workspace/copies/${COPY}"
 fi
 
+# Copies created after the container booted missed the entrypoint's MCP seeding
+# (#210) — cover them here so every session has the browser tools. Idempotent
+# and scoped to this session's copy; it runs as the agent user, and
+# seed-copy-mcp skips the chown it does on the root/entrypoint path.
+if [ -n "$COPY" ]; then
+    /usr/local/bin/seed-copy-mcp "/workspace/copies/${COPY}" || true
+fi
+
 # Non-interactive one-shot command (dashboard's agent-exec path): run it and
 # pipe the output straight back.
 if [ -n "$SSH_ORIGINAL_COMMAND" ]; then

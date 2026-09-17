@@ -561,3 +561,23 @@ def test_dpa_upload_production_requires_role(tmp_path, monkeypatch):
             )
         )
     assert e.value.status_code == 403
+
+
+def test_dev_realm_also_allows_the_agent_issuer(monkeypatch):
+    """A live-dev worker fetches the agent issuer's keys when the coding agent's
+    browser calls it (#210), so the dev realm's seeded allow-list has to cover
+    that host. Nothing above dev ever sees a token from that issuer."""
+    monkeypatch.setenv("KEYCLOAK_URL", "https://keycloak.tp-sandbox.bswn.io/realms/r")
+    monkeypatch.setenv("BITSWAN_GITOPS_DOMAIN", "tp-sandbox.bswn.io")
+    assert fws.default_allowed_hosts("dev") == [
+        "keycloak.tp-sandbox.bswn.io",
+        "agent-auth.tp-sandbox.bswn.io",
+    ]
+    for realm in ("staging", "production"):
+        assert fws.default_allowed_hosts(realm) == ["keycloak.tp-sandbox.bswn.io"]
+
+
+def test_agent_issuer_is_not_seeded_without_a_domain(monkeypatch):
+    monkeypatch.setenv("KEYCLOAK_URL", "https://keycloak.tp-sandbox.bswn.io/realms/r")
+    monkeypatch.delenv("BITSWAN_GITOPS_DOMAIN", raising=False)
+    assert fws.default_allowed_hosts("dev") == ["keycloak.tp-sandbox.bswn.io"]

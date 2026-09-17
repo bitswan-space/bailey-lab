@@ -38,6 +38,30 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 			return
 		}
 
+		// The coding agent's issuer (#210) publishes its discovery document and
+		// key set on its own hostname. Its consumer is a deployed worker with no
+		// browser and no session, so this answers before any gate runs — the
+		// documents are public key material either way.
+		if serveAgentIDP(w, r) {
+			return
+		}
+
+		// A sign-in URL (#210): exchange the hand-over token for the session
+		// cookie and redirect. Before the device gate, because there is no
+		// session yet to exempt it.
+		if serveAgentHandover(w, r) {
+			return
+		}
+
+		// A coding-agent session (#210) is resolved once, here, and then
+		// answers two questions below: it skips the device-trust gate (there is
+		// no device to approve and nobody to approve it) and it stands in for
+		// the forwarded identity the bypassed oauth2-proxy would have set.
+		// Everything else about the request — the wrap, the inner/outer split,
+		// the oauth2 passthroughs — is deliberately left alone, because the
+		// agent is here to see the page a person sees.
+		agentCtx := agentSessionFor(r)
+
 		// Bailey device-trust gate (phase 1). Runs before the console /
 		// inner / chrome branches so it covers the Server Console, the
 		// chrome wrap, AND the proxied apps (which flow through
@@ -48,7 +72,7 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 		// are exempt inside enforceMFAGate so the redirect target itself
 		// stays reachable. The per-endpoint ACL is NOT run here — it's
 		// enforced separately in enforceProtectedGate.
-		if !enforceMFAGate(w, r) {
+		if agentCtx == nil && !enforceMFAGate(w, r) {
 			return
 		}
 
@@ -139,6 +163,15 @@ func chromeWrapMiddleware(inner http.Handler) http.Handler {
 
 		if !isTopLevelHTMLGet(r) {
 			http.NotFound(w, r)
+			return
+		}
+		if agentCtx != nil {
+			// The wrap names who is looking at the page, so give it the test
+			// identity rather than a blank bar. Client-supplied identity
+			// headers are dropped first: holding a session cookie must not let
+			// a caller choose which identity it carries.
+			applyAgentIdentityHeaders(r, agentCtx)
+			serveBaileyChrome(w, r)
 			return
 		}
 		email, groups := identityFromHeaders(r)

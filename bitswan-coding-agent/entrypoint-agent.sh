@@ -96,6 +96,23 @@ if [ -n "$BITSWAN_GIT_REMOTE" ] && [ -n "$BITSWAN_GITOPS_AGENT_SECRET" ]; then
     chmod 600 /home/agent/.git-credentials
 fi
 
+# Seed the browser MCP config (.mcp.json, #210) into each copy's app root — the
+# directory agent sessions start in, and the only place Claude Code auto-loads it
+# from. This covers the copies that exist at boot; copies created while the
+# container runs are seeded by agent-session-wrapper at session start.
+for copy in /workspace/copies/*/; do
+    /usr/local/bin/seed-copy-mcp "$copy"
+done
+
+# playwright-mcp treats a MISSING or malformed --storage-state file as a hard
+# error on every browser call, not as "start with an empty browser" — and
+# tools/list still succeeds, which makes it read like a broken browser rather
+# than a missing file. Pre-create a valid empty document so the browser works
+# before the agent has asked for a session.
+if [ ! -s /home/agent/.bitswan-browser-state.json ]; then
+    echo '{"cookies":[],"origins":[]}' > /home/agent/.bitswan-browser-state.json
+fi
+
 # Ensure correct permissions
 chown -R agent:agent /home/agent
 chown -R agent:agent /var/log/agent-sessions
@@ -119,6 +136,13 @@ export BITSWAN_AGENT_MODE=true
     # installed above, drifting the CLI away from the dashboard's extension,
     # which is coupled to a specific build.
     echo "export DISABLE_AUTOUPDATER=1"
+    # Playwright lives at the paths the Dockerfile set, and the browser session
+    # the CLI writes lives where the MCP config points. SSH sessions inherit
+    # none of the container's environment, so re-export all three or the agent
+    # cannot find the browser it was given.
+    echo "export PLAYWRIGHT_BROWSERS_PATH=\"${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}\""
+    echo "export NODE_PATH=\"${NODE_PATH:-/usr/lib/node_modules}\""
+    echo "export BITSWAN_BROWSER_STATE=\"/home/agent/.bitswan-browser-state.json\""
 } > /etc/profile.d/bitswan-agent.sh
 chmod 644 /etc/profile.d/bitswan-agent.sh
 

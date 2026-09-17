@@ -112,6 +112,7 @@ type traefikHTTPConfig struct {
 type traefikRouter struct {
 	EntryPoints []string          `json:"entryPoints,omitempty"`
 	Rule        string            `json:"rule"`
+	Priority    int               `json:"priority,omitempty"`
 	Service     string            `json:"service"`
 	Middlewares []string          `json:"middlewares,omitempty"`
 	TLS         *traefikRouterTLS `json:"tls,omitempty"`
@@ -452,6 +453,11 @@ func sanitizeHostname(hostname string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(hostname, ".", "_"), "-", "_")
 }
 
+// SanitizeHostname exposes the hostname→route-id mapping to callers that build
+// a second router for a hostname and therefore need an id that will not collide
+// with the hostname's own route (see RuleRoute).
+func SanitizeHostname(hostname string) string { return sanitizeHostname(hostname) }
+
 // ensureUpstreamURL ensures the upstream is a full URL for Traefik's loadBalancer.
 // Traefik requires "http://host:port" (not just "host:port").
 // Also remaps WSS port 8084 → WS port 8083 since TLS termination happens at Traefik.
@@ -566,6 +572,68 @@ func AddRouteWithTLSDomains(hostname, upstream, traefikBaseURL, resolver string,
 		fmt.Printf("AddRoute: added route %s -> %s (ID: %s)\n", hostname, processedUpstream, routeID)
 		return nil
 	})
+}
+
+// RuleRoute is a route whose matcher is given explicitly rather than derived
+// from a hostname. It exists for the case where ONE hostname needs a second
+// router that matches only some of its requests — the coding agent's live-dev
+// browsing (bailey-lab#210), where a request carrying the agent's session
+// cookie skips the oauth2-proxy hop the same hostname otherwise goes through.
+//
+// ID must not be the hostname's own route id, or adding this route would
+// replace the hostname's normal one; SanitizeHostname is exported so a caller
+// can derive a distinct id from it.
+type RuleRoute struct {
+	ID         string
+	Rule       string
+	Priority   int
+	Upstream   string
+	Resolver   string
+	TLSDomains []TLSDomain
+}
+
+// AddRuleRoute registers a RuleRoute on the global Traefik. Always TLS-enabled
+// on both entrypoints: a rule route fronts a public hostname, like every other
+// route on the global instance.
+func AddRuleRoute(rt RuleRoute) error {
+	if strings.TrimSpace(rt.ID) == "" || strings.TrimSpace(rt.Rule) == "" {
+		return fmt.Errorf("a rule route needs both an id and a rule")
+	}
+	traefikBaseURL := getTraefikBaseURL()
+	processedUpstream := ensureUpstreamURL(rt.Upstream)
+	return modifyState(traefikBaseURL, func(state *traefikDynConfig) error {
+		state.HTTP.Routers[rt.ID] = &traefikRouter{
+			EntryPoints: []string{"web", "websecure"},
+			Rule:        rt.Rule,
+			Priority:    rt.Priority,
+			Service:     rt.ID,
+			TLS:         &traefikRouterTLS{CertResolver: rt.Resolver, Domains: rt.TLSDomains},
+		}
+		state.HTTP.Services[rt.ID] = &traefikService{
+			LoadBalancer: &traefikLoadBalancer{
+				Servers: []traefikServer{{URL: processedUpstream}},
+			},
+		}
+		return nil
+	})
+}
+
+// RemoveRouteByID removes a route by its router id rather than by hostname —
+// the counterpart to AddRuleRoute, whose id is not derived from a hostname
+// alone. Connection errors are success, as in RemoveRouteWithTraefik: an
+// unreachable Traefik has no route to remove.
+func RemoveRouteByID(id string) error {
+	err := modifyState(getTraefikBaseURL(), func(state *traefikDynConfig) error {
+		delete(state.HTTP.Routers, id)
+		delete(state.HTTP.Services, id)
+		return nil
+	})
+	if err != nil && (strings.Contains(err.Error(), "connection refused") ||
+		strings.Contains(err.Error(), "no such host") ||
+		strings.Contains(err.Error(), "timeout")) {
+		return nil
+	}
+	return err
 }
 
 // ApplyWildcardCertResolver switches existing ACME routes whose hostname is
