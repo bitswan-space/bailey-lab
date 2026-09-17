@@ -5915,8 +5915,9 @@ class AutomationService:
     async def start_automation(self, deployment_id: str):
         """Start all containers for a deployment using async Docker client.
 
-        If no container exists for the deployment, re-runs the full deploy
-        flow (regenerate compose, docker compose up) to create it fresh.
+        If no container exists, wakes it if it was asleep, otherwise re-runs
+        the full deploy flow (regenerate compose, docker compose up) to
+        create it fresh.
         """
         containers = await self.get_container(deployment_id)
 
@@ -5930,10 +5931,36 @@ class AutomationService:
                     detail=f"Deployment '{deployment_id}' not found in bitswan.yaml",
                 )
 
-            logger.info(
-                "No container for %s, running deploy to create it", deployment_id
-            )
-            await self.deploy_automations()
+            if (deployments.get(deployment_id) or {}).get("active") is False:
+                logger.info("%s is asleep, waking it", deployment_id)
+                await self.mark_as_active(deployment_id)
+                try:
+                    await self.apply_compose_for_deployments(
+                        [deployment_id], report=None
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "wake of %s failed to redeploy: %s", deployment_id, e
+                    )
+                    await self.mark_as_inactive(deployment_id)
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Waking {deployment_id} failed to redeploy: {e}",
+                    ) from e
+            else:
+                logger.info(
+                    "No container for %s, running deploy to create it", deployment_id
+                )
+                await self.deploy_automations()
+
+            if not await self.get_container(deployment_id):
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Deploy ran for '{deployment_id}' but no container came up. "
+                        "Check the deploy log for this business process."
+                    ),
+                )
             return {
                 "status": "success",
                 "message": f"Container for deployment {deployment_id} created and started",
@@ -6856,30 +6883,12 @@ class AutomationService:
     async def restart_automation(self, deployment_id: str):
         """Restart all containers for a deployment using async Docker client.
 
-        If no container exists for the deployment, re-runs the full deploy
-        flow (regenerate compose, docker compose up) to create it fresh.
+        If no container exists, delegates to start_automation.
         """
         containers = await self.get_container(deployment_id)
 
         if not containers:
-            # No container found — check if the deployment exists in bitswan.yaml
-            bs_yaml = read_bitswan_yaml(self.gitops_dir)
-            deployments = bs_yaml.get("deployments", {}) if bs_yaml else {}
-            if deployment_id not in deployments:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Deployment '{deployment_id}' not found in bitswan.yaml",
-                )
-
-            # Deployment exists but container is missing — start it fresh
-            logger.info(
-                "No container for %s, running deploy to create it", deployment_id
-            )
-            await self.deploy_automations()
-            return {
-                "status": "success",
-                "message": f"Container for deployment {deployment_id} created and started",
-            }
+            return await self.start_automation(deployment_id)
 
         ctx = self._workspace_ctx()
         for container in containers:

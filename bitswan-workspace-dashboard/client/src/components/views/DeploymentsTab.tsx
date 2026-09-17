@@ -75,6 +75,7 @@ import { useLastDeploy } from '@/hooks/useLastDeploy';
 import { displayFor, isUpStatus, STATUS_META, type DisplayStatus } from '@/lib/status';
 import { stageHealth, type StageHealthKind } from '@/lib/stageHealth';
 import { memoryPair } from '@/lib/memory';
+import { stagePower } from '@/lib/stagePower';
 import {
   api,
   errorMessage,
@@ -825,11 +826,18 @@ function ContainersSection({
   // "Running" is the live container state, NOT whether a deploy record exists —
   // an asleep stage still has its records (present=true) but no running container.
   const isUp = (m: Member) => isUpStatus(m.display);
-  const anyRunning = members.some(isUp);
-  const asleep = members.length > 0 && members.every((m) => m.display === 'asleep');
   // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
   // so the message can attribute the sleep instead of a bare "asleep".
   const asleepReason = members.map((m) => m.asleepReason).find(Boolean) ?? null;
+  const powerState = stagePower(
+    members.map((m) => ({
+      asleep: m.display === 'asleep',
+      up: isUp(m),
+      present: m.present,
+      expose: m.expose,
+    })),
+    asleepReason ?? undefined,
+  );
   // Sleep/Wake apply to the promoted stages (their context is the raw BP); DR is
   // a standby slot managed via the backup swap, so no power toggle there.
   const canPower = stage === 'dev' || stage === 'staging' || stage === 'production';
@@ -875,28 +883,18 @@ function ContainersSection({
         </>
       ) : (
         <>
-      {canPower && members.length > 0 && (
+      {canPower && (powerState.canWake || powerState.canSleep) && (
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />
-          <span className="text-[12.5px] text-muted-foreground">
-            {asleep
-              ? asleepReason === 'manual'
-                ? 'Asleep — put to sleep manually. Wakes on access, or wake now.'
-                : asleepReason === 'memory-pressure'
-                  ? 'Asleep — evicted under memory pressure. Wakes on access, or wake now.'
-                  : 'Asleep — containers removed to free memory. Wakes on access, or wake now.'
-              : anyRunning
-                ? 'Free this stage’s memory now. On-demand stages wake automatically on access.'
-                : 'Nothing is running on this stage. Wake redeploys it — these containers are not asleep, so nothing will bring them back on access.'}
-          </span>
+          <span className="text-[12.5px] text-muted-foreground">{powerState.label}</span>
           <span className="ml-auto flex items-center gap-2">
-            {!anyRunning && (
+            {powerState.canWake && (
               <Button variant="outline" size="sm" className="h-7" disabled={busy}
                 onClick={() => power('wake')}>
                 <Power className="mr-1.5 size-3.5" aria-hidden /> Wake
               </Button>
             )}
-            {anyRunning && (
+            {powerState.canSleep && (
               <Button variant="outline" size="sm" className="h-7" disabled={busy}
                 onClick={() => power('sleep')}>
                 <Moon className="mr-1.5 size-3.5" aria-hidden /> Put to sleep
