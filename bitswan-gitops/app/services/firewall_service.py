@@ -87,16 +87,33 @@ def bare_host(url: str) -> str:
     return host if _BARE_HOST_RE.match(host) else ""
 
 
-def default_allowed_hosts() -> list[str]:
+def default_allowed_hosts(realm: str = "") -> list[str]:
     """The hosts seeded into a BP realm's allow-list on its first deploy.
 
     FAILS CLOSED: an unset, empty or unparseable KEYCLOAK_URL seeds NOTHING, so
     the host simply keeps showing up under needs-review for manual approval —
     exactly the behaviour before this default existed. There is deliberately no
     fallback: a misconfigured value must never silently widen egress.
+
+    The dev realm additionally gets the server's own agent issuer, whose keys a
+    live-dev worker fetches when the coding agent's browser calls it (#210).
+    Only the dev realm: nothing above it ever sees a token from that issuer, so
+    nothing above it has any reason to reach it.
     """
     host = bare_host(os.environ.get("KEYCLOAK_URL", ""))
-    return [host] if host else []
+    hosts = [host] if host else []
+    if realm == "dev" and hosts:
+        agent_host = bare_host(_agent_issuer_host())
+        if agent_host:
+            hosts.append(agent_host)
+    return hosts
+
+
+def _agent_issuer_host() -> str:
+    """The coding agent's issuer hostname, derived from the workspace domain the
+    same way the daemon derives it. Empty when no domain is configured."""
+    domain = (os.environ.get("BITSWAN_GITOPS_DOMAIN") or "").strip().strip(".")
+    return f"agent-auth.{domain}" if domain else ""
 
 
 def seed_default_rules_for_members(bs_yaml: dict, members: list[dict]) -> list[tuple]:
@@ -123,9 +140,6 @@ def seed_default_rules_for_members(bs_yaml: dict, members: list[dict]) -> list[t
     """
     seeded: list[tuple] = []
     try:
-        hosts = default_allowed_hosts()
-        if not hosts:
-            return seeded  # fail closed: nothing configured, nothing seeded
         at = date.today().strftime("%b %-d, %Y")
         for m in members or []:
             # Same bp derivation the caller uses to decide which per-BP files to
@@ -138,6 +152,9 @@ def seed_default_rules_for_members(bs_yaml: dict, members: list[dict]) -> list[t
             realm = realm_for_stage(stage)
             if not realm:
                 continue
+            hosts = default_allowed_hosts(realm)
+            if not hosts:
+                continue  # fail closed: nothing configured, nothing seeded
             by_bp = bs_yaml.setdefault("firewall", {}).setdefault(bp, {})
             if realm in by_bp:
                 continue  # operator territory — never re-seed

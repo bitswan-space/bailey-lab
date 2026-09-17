@@ -1310,6 +1310,14 @@ func removeRouteFromIngress(hostname string) error {
 	inner := toInnerHost(outer)
 
 	_ = traefikapi.RemoveRoute(inner)
+	// The coding agent's cookie-matched router (#210) hangs off the same
+	// hostname under its own id, so removing the hostname's route leaves it
+	// behind. Drop it and every session that pointed at it: an endpoint that is
+	// gone must not still be reachable by a cookie somebody is holding.
+	removeAgentRoute(outer)
+	if derr := dbDeleteAgentSessionsForEndpoint(outer); derr != nil {
+		fmt.Printf("Warning: failed to drop agent sessions for %s: %v\n", outer, derr)
+	}
 	err := traefikapi.RemoveRoute(outer)
 	if err == nil {
 		if derr := deleteEndpoint(outer); derr != nil {

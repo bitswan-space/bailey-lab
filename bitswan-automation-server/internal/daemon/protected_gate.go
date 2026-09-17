@@ -174,6 +174,13 @@ func gateDirector(r *http.Request) {
 		directPublic(r, underlying)
 		return
 	}
+	// A coding-agent session (#210): serve the live-dev app as the test identity
+	// the session names. Same shape as the public path above, narrowed to one
+	// endpoint and one revocable secret.
+	if ctx := agentSessionFor(r); ctx != nil {
+		directAgent(r, ctx)
+		return
+	}
 	email, groups := identityFromHeaders(r)
 	// Capture the oauth2-proxy-injected access token BEFORE the strip so
 	// it can be re-applied to trusted first-party upstreams only. Only
@@ -386,6 +393,17 @@ func gateHandler(w http.ResponseWriter, r *http.Request, proxy *httputil.Reverse
 	// so it can't tell it's public.
 	if isPublicEndpointHost(requestEndpointHost(r)) {
 		if servePublicOAuth2(w, r) {
+			return
+		}
+		proxy.ServeHTTP(w, r)
+		return
+	}
+	// Coding-agent session (#210): the app's own /oauth2/* calls are answered
+	// here with the agent's token, and the ACL is not consulted — a live-dev
+	// endpoint's access list is about people, and the session already says this
+	// request may see this one endpoint.
+	if ctx := agentSessionFor(r); ctx != nil {
+		if serveAgentOAuth2(w, r, ctx) {
 			return
 		}
 		proxy.ServeHTTP(w, r)

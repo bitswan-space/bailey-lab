@@ -25,7 +25,7 @@ func TestResolveAuthStartup(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			fatal, warning := resolveAuthStartup(c.issuer, c.authMode, c.stage)
+			fatal, warning := resolveAuthStartup(parseIssuerList(c.issuer), c.authMode, c.stage)
 			if (fatal != "") != c.wantFatal {
 				t.Errorf("fatal = %q, want fatal=%v", fatal, c.wantFatal)
 			}
@@ -191,5 +191,40 @@ func TestJWKSURLComesFromDiscoveryWhenTheIssuerPublishesIt(t *testing.T) {
 	if got := p.resolveJWKSURL(); got != "https://auth.example.com/keys" {
 		t.Errorf("resolveJWKSURL = %q, want the jwks_uri the issuer advertises — a broker does not "+
 			"serve keys on Keycloak's path", got)
+	}
+}
+
+// A server can have more than one identity provider at once, so a worker has to
+// accept a token from any of them and refuse one from an issuer it was never
+// told about. Picking the key set by the token's own iss claim is what makes
+// that safe: an unknown iss never reaches a verification key.
+func TestIssuerListSelectsTheKeySetAndRefusesStrangers(t *testing.T) {
+	const kc = "https://kc.example/realms/r"
+	const agent = "https://agent-auth.example.com"
+	set := NewJWKSSet(parseIssuerList(kc + " , " + agent + "/"))
+
+	for _, iss := range []string{kc, agent} {
+		if _, ok := set.providers[iss]; !ok {
+			t.Fatalf("issuer %q was not accepted; parsed set is %v", iss, set.issuers)
+		}
+	}
+	// A key fetch against these unreachable issuers fails, but the failure must
+	// be about reaching them, never about refusing them.
+	if _, err := set.keyFor(kc, "some-kid"); err != nil && strings.Contains(err.Error(), "not one this deployment accepts") {
+		t.Fatalf("a configured issuer was refused: %v", err)
+	}
+	_, err := set.keyFor("https://evil.example/realms/r", "some-kid")
+	if err == nil || !strings.Contains(err.Error(), "not one this deployment accepts") {
+		t.Fatalf("an unconfigured issuer was not refused: %v", err)
+	}
+}
+
+func TestParseIssuerListDropsBlanksAndTrailingSlashes(t *testing.T) {
+	got := parseIssuerList(" https://a.example/ ,, https://b.example ")
+	if len(got) != 2 || got[0] != "https://a.example" || got[1] != "https://b.example" {
+		t.Fatalf("parseIssuerList = %v", got)
+	}
+	if len(parseIssuerList("")) != 0 {
+		t.Fatal("an empty setting must yield no issuers, which is what simple mode keys on")
 	}
 }

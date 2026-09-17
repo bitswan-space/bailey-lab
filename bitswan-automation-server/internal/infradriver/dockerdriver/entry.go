@@ -758,7 +758,44 @@ func (c *compileState) buildServiceEntry(depID string, conf *Deployment, slot st
 			env["KEYCLOAK_URL"] = ku
 			env["KEYCLOAK_REALM"] = ""
 		}
-		env["KEYCLOAK_ISSUER_URL"] = ku
+		issuerForWorker := ku
+		// The FULL set of issuers this deployment accepts, which can be more
+		// than one: a server can have several identity providers at once, and a
+		// worker takes a token from any of them (examples/*/auth.go).
+		//
+		// A separate variable, not a list stuffed into KEYCLOAK_ISSUER_URL.
+		// Every business process carries its own copy of the worker, and the
+		// ones already out there read that variable as a single URL — joining a
+		// list into it would point their JWKS discovery at nonsense and 401
+		// every authenticated call on their next deploy.
+		issuers := []string{ku}
+		// A live-dev deployment additionally accepts the server's own agent
+		// issuer, which is what lets the coding agent's browser reach it as a
+		// test user (bailey-lab#210). ONLY live-dev: that issuer's users are
+		// invented by a robot, so no higher stage should ever honour one.
+		//
+		// Added only when the deployment already validates tokens. A worker in
+		// simple mode trusts the gate and checks nothing; handing it an issuer
+		// would switch it into verifying mode, which is a behaviour change
+		// nobody asked for.
+		if stage == "live-dev" && c.domain != "" {
+			agentIssuer := "https://agent-auth." + c.domain
+			issuers = append(issuers, agentIssuer)
+			// A worker that predates the multi-issuer contract reads ONE issuer
+			// and verifies a token against whatever keys that issuer publishes,
+			// without checking the iss claim. Point those at the agent issuer,
+			// whose key set republishes the real provider's keys alongside its
+			// own: they then accept the coding agent AND a real person, with no
+			// change to a business process that is already deployed.
+			//
+			// Live-dev only. Nothing above it is pointed anywhere but the real
+			// provider, so no other stage can be opened with an agent token.
+			issuerForWorker = agentIssuer
+		}
+		env["KEYCLOAK_ISSUER_URL"] = issuerForWorker
+		if len(issuers) > 1 {
+			env["BITSWAN_ISSUER_URLS"] = strings.Join(issuers, ",")
+		}
 	}
 
 	if c.orgGroupPath != "" {

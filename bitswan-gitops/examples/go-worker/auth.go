@@ -57,8 +57,8 @@ func deriveAdminGroup(explicit, allowed string) string {
 // Returned fatal/warning messages are for main to act on; token
 // verification itself is keyed on KEYCLOAK_ISSUER_URL being set.
 //
-//   - issuerURL set → AOC mode: validate Bearer JWTs against the issuer's
-//     JWKS. Nothing to report.
+//   - at least one issuer → AOC mode: validate Bearer JWTs against the JWKS of
+//     whichever accepted issuer the token names. Nothing to report.
 //   - authMode "aoc" without an issuer → FATAL. The platform is
 //     AOC-connected and should have injected KEYCLOAK_ISSUER_URL; running
 //     anyway would silently trust every request (this exact silent degrade
@@ -67,9 +67,9 @@ func deriveAdminGroup(explicit, allowed string) string {
 //     provider at all; the Bailey gate upstream is the only authentication.
 //     Warn loudly so the posture is visible in the logs.
 //   - neither → genuinely local development; quiet simple mode.
-func resolveAuthStartup(issuerURL, authMode, stage string) (fatal, warning string) {
+func resolveAuthStartup(issuers []string, authMode, stage string) (fatal, warning string) {
 	switch {
-	case issuerURL != "":
+	case len(issuers) > 0:
 		return "", ""
 	case authMode == "aoc":
 		return "KEYCLOAK_ISSUER_URL is not set, but BITSWAN_AUTH_MODE=aoc means this platform is AOC-connected and should have injected it. " +
@@ -85,6 +85,54 @@ func resolveAuthStartup(issuerURL, authMode, stage string) (fatal, warning strin
 type contextKey string
 
 const claimsKey contextKey = "claims"
+
+// parseIssuerList splits the platform-injected issuer setting into the issuers
+// this worker will accept. It is a LIST because a server can have more than one
+// provider at once: Bitswan accounts, an admin's own OIDC provider behind the
+// broker, and the coding agent's issuer on a live-dev deployment. A worker that
+// only ever trusted one of them would 401 every caller who signed in through
+// another — which is not a configuration mistake, it is the normal shape of a
+// server with a second provider.
+func parseIssuerList(raw string) []string {
+	out := []string{}
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimRight(strings.TrimSpace(part), "/"); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// JWKSSet holds one JWKSProvider per accepted issuer and picks between them by
+// the token's own iss claim.
+//
+// Reading iss before the signature is checked is safe here and only here: it
+// selects WHICH keys to verify against, and an unknown iss is refused outright.
+// A forged iss therefore buys nothing — the token still has to be signed by the
+// issuer it names.
+type JWKSSet struct {
+	providers map[string]*JWKSProvider
+	issuers   []string
+}
+
+func NewJWKSSet(issuers []string) *JWKSSet {
+	s := &JWKSSet{providers: map[string]*JWKSProvider{}, issuers: issuers}
+	for _, iss := range issuers {
+		s.providers[iss] = NewJWKSProvider(iss)
+	}
+	return s
+}
+
+// keyFor returns the verification key for a token naming issuer iss, or an
+// error naming what this worker does accept.
+func (s *JWKSSet) keyFor(iss, kid string) (*rsa.PublicKey, error) {
+	p, ok := s.providers[strings.TrimRight(strings.TrimSpace(iss), "/")]
+	if !ok {
+		return nil, fmt.Errorf("token issuer %q is not one this deployment accepts (%s)",
+			iss, strings.Join(s.issuers, ", "))
+	}
+	return p.getKey(kid)
+}
 
 // JWKSProvider fetches and caches RSA public keys from the issuer's JWKS
 // endpoint. The endpoint is discovered rather than assumed: a server whose
@@ -221,7 +269,9 @@ func (app *App) requireAuth(next http.Handler) http.Handler {
 				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 			}
 			kid, _ := t.Header["kid"].(string)
-			return app.jwks.getKey(kid)
+			claims, _ := t.Claims.(jwtv5.MapClaims)
+			iss, _ := claims["iss"].(string)
+			return app.jwks.keyFor(iss, kid)
 		})
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "Invalid token: "+err.Error())
