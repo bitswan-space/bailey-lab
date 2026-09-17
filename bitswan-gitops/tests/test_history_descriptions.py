@@ -84,7 +84,7 @@ def test_history_entries_say_what_changed(tmp_path, monkeypatch):
     _git("clone", "-q", bare, clone)
     state = _StateRepo(svc.gitops_dir)
 
-    first = _publish(clone, "shop", "v1\n", "Add invoice validation")
+    first = _publish(clone, "shop", "v1\n", "Add invoice validation (shop)")
     state.record("dev", first, "deploy")
     second = _publish(clone, "shop", "v2\n", "Round totals to whole units")
     state.record("dev", second, "deploy")
@@ -142,4 +142,11 @@ def test_firewall_entries_describe_the_rules_not_the_commit_that_carried_them(
     _git("commit", "-qm", "deploy shop", cwd=state.path)
     dev = asyncio.run(svc.bp_history("shop", "dev"))["history"]
     assert dev[0]["source"] == "firewall"
-    assert dev[0]["summary"] == "Firewall rules changed (dev) — 1 allowed, 1 denied"
+    assert (
+        dev[0]["summary"]
+        == "Firewall (dev): allowed api.example.com; denied evil.example.com"
+    )
+    assert (
+        dev[0]["firewall"]["summary"]
+        == "allowed api.example.com; denied evil.example.com"
+    )

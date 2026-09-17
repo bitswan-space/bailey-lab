@@ -1996,6 +1996,33 @@ class AutomationService:
         rec["released_shas"] = released[: self.RELEASED_SHAS_KEPT]
 
     HISTORY_STAGE_LABEL = {"dev": "Development", "staging": "Staging"}
+    FIREWALL_SUMMARY_HOSTS = 3
+
+    @classmethod
+    def _firewall_change_summary(cls, before: tuple | None, after: tuple) -> str:
+        prev = dict(before or ())
+        cur = dict(after)
+        allowed = sorted(
+            h for h, st in cur.items() if st == "allowed" and prev.get(h) != "allowed"
+        )
+        denied = sorted(
+            h for h, st in cur.items() if st == "denied" and prev.get(h) != "denied"
+        )
+        removed = sorted(h for h in prev if h not in cur)
+
+        def hosts(names: list[str]) -> str:
+            shown = names[: cls.FIREWALL_SUMMARY_HOSTS]
+            extra = len(names) - len(shown)
+            return ", ".join(shown) + (f" (+{extra} more)" if extra > 0 else "")
+
+        parts = []
+        if allowed:
+            parts.append(f"allowed {hosts(allowed)}")
+        if denied:
+            parts.append(f"denied {hosts(denied)}")
+        if removed:
+            parts.append(f"removed {hosts(removed)}")
+        return "; ".join(parts) or "rules changed"
 
     async def _source_subjects(self, bp: str, shas: list[str]) -> dict[str, str]:
         if not shas:
@@ -2030,14 +2057,15 @@ class AutomationService:
         for e in entries:
             src = e.get("source_commit")
             code = subjects.get(src) if src else None
+            if code and code.endswith(f" ({bp})"):
+                code = code[: -len(f" ({bp})")]
             e["source_subject"] = code
             kind = e.get("source")
             if kind == "firewall":
                 fw = e.get("firewall") or {}
                 realm = fw.get("realm") or ""
                 e["summary"] = (
-                    f"Firewall rules changed ({realm}) — "
-                    f"{fw.get('allowed', 0)} allowed, {fw.get('denied', 0)} denied"
+                    f"Firewall ({realm}): {fw.get('summary') or 'rules changed'}"
                 )
             elif kind == "backup":
                 bk = e.get("backup") or {}
@@ -2209,7 +2237,9 @@ class AutomationService:
                         "members": {},
                         "firewall": {
                             "realm": realm,
-                            "summary": subject,
+                            "summary": self._firewall_change_summary(
+                                prev_fw_key, fw_key
+                            ),
                             "allowed": sum(
                                 1
                                 for r in fw_rules.values()
