@@ -560,8 +560,29 @@ function LiveState({ status, error, label, onRetry }) {
   return null;
 }
 
+// ─── Update ordering: the server binary goes first ──────────────────────────
+// A workspace update pulls the latest gitops/dashboard images off the server's
+// track, and those images expect the current automation-server release — so a
+// workspace must never be pulled ahead of a server that is still behind. Both
+// surfaces that offer a workspace update (the Updates view and the workspace
+// cards) withhold it while the server has an update pending, and point at the
+// server update instead.
+//
+// Deliberately conservative, like the daemon's own tagBehind: only a server the
+// daemon has POSITIVELY reported as behind holds workspace updates back. When
+// /bailey/api/admin/updates hasn't loaded yet, or 403'd (a non-admin), the
+// answer is "nothing pending" — we never block on an unknown.
+function serverUpdatePending(data) {
+  const s = data && data.updates && data.updates.server;
+  return !!(s && s.update_available);
+}
+
+// One sentence for the gate, so both surfaces say the same thing.
+const SERVER_FIRST_NOTE = 'Update the automation server first';
+
 window.SC_UI = {
   Avatar, UserChip, avatarUrlForEmail, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRImage,
   Toggle, DeviceIcon, Toast, EmptyState, CopyChip, ProtoHint, Stat,
   Drawer, Select, AvatarStack, LoadBanner, ErrorBanner, LiveState,
+  serverUpdatePending, SERVER_FIRST_NOTE,
 };

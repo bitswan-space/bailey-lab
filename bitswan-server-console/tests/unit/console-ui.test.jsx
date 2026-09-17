@@ -8,7 +8,7 @@ import { SC_UI } from './harness.js';
 const {
   Avatar, Card, PageHeader, Field, TextInput, Modal, SegmentedCode, QRImage,
   Toggle, DeviceIcon, Toast, EmptyState, CopyChip, ProtoHint, Stat,
-  Drawer, Select, AvatarStack, LoadBanner, ErrorBanner, LiveState,
+  Drawer, Select, AvatarStack, LoadBanner, ErrorBanner, LiveState, serverUpdatePending,
 } = SC_UI;
 
 const user = { id: 'u1', name: 'Ada Lovelace', color: '#093df5' };
@@ -259,5 +259,21 @@ describe('Select', () => {
     render(<Select value="a" onChange={onChange} options={[{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }]} />);
     fireEvent.change(screen.getByRole('combobox'), { target: { value: 'b' } });
     expect(onChange).toHaveBeenCalledWith('b');
+  });
+});
+
+// The rule both update surfaces share: a workspace update waits for the server
+// binary, but only when the daemon has positively said the server is behind.
+describe('serverUpdatePending', () => {
+  it('is true only when the server reports an available update', () => {
+    expect(serverUpdatePending({ updates: { server: { current: 'v1', latest: 'v2', update_available: true } } })).toBe(true);
+    expect(serverUpdatePending({ updates: { server: { current: 'v2', update_available: false } } })).toBe(false);
+  });
+
+  it('never blocks on an unknown server state', () => {
+    expect(serverUpdatePending(undefined)).toBe(false);
+    expect(serverUpdatePending({})).toBe(false);               // nothing loaded
+    expect(serverUpdatePending({ updates: null })).toBe(false); // /admin/updates 403'd (non-admin)
+    expect(serverUpdatePending({ updates: {} })).toBe(false);  // payload without a server block
   });
 });

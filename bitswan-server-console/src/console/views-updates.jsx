@@ -4,9 +4,15 @@ import React from 'react';
 // updates and the server binary apply from here; each update is recorded in the
 // version ledger, and the last few versions can be rolled back to from the
 // history list (bounded server-side — no CLI needed).
+//
+// Updates are ordered: while this server is behind, its workspaces can't be
+// updated — the server binary goes first (see serverUpdatePending in
+// console-ui.jsx). Rollbacks are never gated; going back doesn't need the new
+// server.
 
 const { C: WC, Icon: WIcon, Pill: WPill, Btn: WBtn } = window.WD_SHELL;
-const { Card: WCard, PageHeader: WPageHeader, UpdateBar: WUpdateBar, Modal: WModal } = window.SC_UI;
+const { Card: WCard, PageHeader: WPageHeader, UpdateBar: WUpdateBar, Modal: WModal,
+  serverUpdatePending: srvPending, SERVER_FIRST_NOTE: SRV_FIRST } = window.SC_UI;
 const { Api: UApi } = window.SC_API;
 const { useState: useUS } = React;
 
@@ -37,6 +43,8 @@ function ownerNote(ws) {
 function UpdatesView({ ctx }) {
   const { data, toast, refresh } = ctx;
   const upd = data.updates; // { server, workspaces, count, history, rollback_depth }
+  // Workspace updates are held back until this server is on the latest release.
+  const serverStale = srvPending(data);
   const [busy, setBusy] = useUS('');
   const [prog, setProg] = useUS(null); // { fraction, label } for the workspace being updated
   const [srvBusy, setSrvBusy] = useUS(false);
@@ -109,7 +117,13 @@ function UpdatesView({ ctx }) {
     } finally { setBusy(''); setProg(null); setRbId(0); }
   };
 
-  const doUpgrade = (name) => runWorkspaceOp(name, (onEvent) => UApi.upgradeWorkspace(name, onEvent), `${name} updated`);
+  // The button is withheld while the server is behind; this is the belt-and-braces
+  // guard for anything that reaches the handler anyway (a stale render between
+  // the server update finishing and the refetch landing).
+  const doUpgrade = (name) => {
+    if (serverStale) { toast(`${SRV_FIRST}, then update workspaces.`, 'danger'); return undefined; }
+    return runWorkspaceOp(name, (onEvent) => UApi.upgradeWorkspace(name, onEvent), `${name} updated`);
+  };
   const doWorkspaceRollback = (entry) => {
     setRbId(entry.id);
     return runWorkspaceOp(entry.target_name,
@@ -201,6 +215,16 @@ function UpdatesView({ ctx }) {
 
           <WCard style={{ marginTop: 12 }}>
             <div style={{ fontWeight: 700, color: WC.fg, marginBottom: 8 }}>Workspaces</div>
+            {serverStale && upd.workspaces && upd.workspaces.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 12px', marginBottom: 10,
+                border: `1px solid ${WC.amber}55`, background: '#fffbeb', borderRadius: 10 }}>
+                <WIcon name="arrow-up-circle" size={15} color="#b45309" style={{ flex: '0 0 auto' }} />
+                <span style={{ fontSize: 12.5, color: '#92400e', lineHeight: '17px' }}>
+                  {SRV_FIRST}. Workspace updates unlock once this server is
+                  on {fmtVer(upd.server.latest) || 'the latest release'}.
+                </span>
+              </div>
+            )}
             {(!upd.workspaces || upd.workspaces.length === 0) ? (
               <p style={{ color: WC.muted, fontSize: 13, margin: 0 }}>All workspaces you can update are up to date.</p>
             ) : (
@@ -215,6 +239,10 @@ function UpdatesView({ ctx }) {
                     </div>
                     {busy === ws.name && !rbId ? (
                       <WUpdateBar prog={prog} />
+                    ) : serverStale ? (
+                      // Ordered updates: the server binary goes first, so don't
+                      // offer a workspace update that would run against it.
+                      <div style={{ fontSize: 12, color: WC.muted, textAlign: 'right' }}>{SRV_FIRST}</div>
                     ) : ws.can_update ? (
                       <WBtn variant="primary" size="sm" leftIcon="arrow-up-circle" disabled={anyBusy} onClick={() => doUpgrade(ws.name)}>
                         Update
