@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -78,17 +79,35 @@ func runApply(cmd *cobra.Command, gitDir string) error {
 	defer releaseApplyLock()
 
 	ref := pushedRef() // post-receive feeds "<old> <new> <ref>" on stdin
-	// Materialize the pushed tree into the state dir — the authoritative deployed
-	// tree (per-BP: just this BP's bitswan.yaml; the shared source root is NOT
-	// wiped). It must mirror the push exactly (deletions included), so the dir is
-	// rebuilt from the archive (.git kept).
-	if err := materialize(gitDir, ref, stateDir); err != nil {
-		return err
-	}
 
-	yamlBytes, err := os.ReadFile(filepath.Join(stateDir, "bitswan.yaml"))
-	if err != nil {
-		return fmt.Errorf("read bitswan.yaml from push: %w", err)
+	// What the apply needs off the push is one file: this BP's bitswan.yaml. It
+	// is read straight out of the pushed commit, so the apply writes nothing into
+	// gitops's working tree and there is no window in which it can revert what
+	// gitops committed while this apply sat waiting for the lock.
+	//
+	// The per-BP deploy repo carries ONLY gitops's own state — bitswan.yaml, the
+	// generated compose, a firewall DPA document. Source trees and secrets live
+	// under the shared gitops root, which the compiler resolves for itself and
+	// which this never touched. So there is nothing here a materialised tree was
+	// contributing that the object store cannot answer directly.
+	var yamlBytes []byte
+	if bp != "" {
+		yamlBytes, err = showPushedFile(gitDir, ref, "bitswan.yaml")
+		if err != nil {
+			return err
+		}
+	} else {
+		// Legacy whole-workspace repo: there the state dir IS the shared source
+		// root and the push genuinely carries the tree, so it still has to be
+		// materialised. Nothing creates one of these any more; it exists for
+		// installations that predate the per-BP split.
+		if err := materialize(gitDir, ref, stateDir); err != nil {
+			return err
+		}
+		yamlBytes, err = os.ReadFile(filepath.Join(stateDir, "bitswan.yaml"))
+		if err != nil {
+			return fmt.Errorf("read bitswan.yaml from push: %w", err)
+		}
 	}
 	wctx := infradriver.WorkspaceContext{
 		WorkspaceName: workspace,
@@ -128,6 +147,22 @@ func pushedRef() string {
 	return "HEAD"
 }
 
+// showPushedFile reads one path out of the pushed commit, from the bare repo's
+// object store. No checkout, no temp directory, nothing on disk to race with —
+// a commit is immutable, so the bytes this returns are exactly what was pushed
+// no matter how long the apply waited to run.
+func showPushedFile(gitDir, ref, path string) ([]byte, error) {
+	out, err := exec.Command("git", "--git-dir", gitDir, "show", ref+":"+path).Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("read %s from push %s: %s", path, short(ref), strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, fmt.Errorf("read %s from push %s: %w", path, short(ref), err)
+	}
+	return out, nil
+}
+
 // materialize rebuilds dest to mirror the pushed ref's tree exactly: it clears
 // dest's contents (dest is the gitops volume subpath mount point, so the mount
 // itself is kept) and extracts the ref via `git archive | tar`. Deletions in
@@ -136,18 +171,50 @@ func pushedRef() string {
 // docker-compose.yaml); secrets/snapshots/firewall are separate volume subpaths
 // mounted elsewhere, so clearing dest never touches them.
 //
+// LEGACY ONLY. A per-BP apply reads the one file it needs out of the pushed
+// commit (showPushedFile) and materialises nothing, because the per-BP deploy
+// repo carries only state gitops authored in that same directory — rebuilding it
+// from the push could never add anything, and could only take something away.
+// This remains for the whole-workspace repo, where the state dir is the shared
+// source root and the push really does carry the tree.
+//
 // CRITICAL: dest is gitops's OWN git working tree (it commits bitswan.yaml there
 // and pushes HEAD to us), so .git is PRESERVED — wiping it would destroy gitops's
 // repo. The pushed tree's content matches what gitops just committed, so keeping
 // .git and refreshing the worktree is consistent.
+//
+// ...unless gitops has committed AGAIN since the push. An apply can wait a long
+// time — the workspace apply lock serialises them, so a deploy queued behind
+// another one materialises minutes after its push — and every governance write
+// in that window (an audit sign-off, a freeze, a firewall edit, a secret) lands
+// as a NEW commit in this same working tree. Extracting the pushed tree over it
+// then silently reverts those files, while gitops's HEAD still carries them.
+// Nothing errors, nothing logs, and the change is simply gone from every reader:
+// an auditor's approval disappeared and a release gate refused a promotion it
+// had already been given.
+//
+// So the tree to materialise is the pushed ref only while it is still the tip
+// gitops holds. When gitops has moved on — HEAD is a DESCENDANT of the ref — its
+// own HEAD is materialised instead. That keeps the mirror-a-tree-exactly
+// property (deletions in the push are still reflected) without discarding
+// commits the push simply predates. A HEAD that is not a descendant is not
+// "newer", so the pushed ref still wins.
 func materialize(gitDir, ref, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
+	archiveGitDir, archiveRef := gitDir, ref
+	if newer, ok := worktreeAheadOf(dest, ref); ok {
+		fmt.Printf("[apply] gitops committed %s after this push; materialising that instead of %s\n",
+			short(newer), short(ref))
+		// From dest's own repo: the bare repo we received the push into does not
+		// have this commit yet.
+		archiveGitDir, archiveRef = filepath.Join(dest, ".git"), newer
+	}
 	if err := clearDir(dest); err != nil {
 		return fmt.Errorf("clear gitops dir %s: %w", dest, err)
 	}
-	archive := exec.Command("git", "--git-dir", gitDir, "archive", ref)
+	archive := exec.Command("git", "--git-dir", archiveGitDir, "archive", archiveRef)
 	untar := exec.Command("tar", "-x", "-C", dest)
 	pipe, err := archive.StdoutPipe()
 	if err != nil {
@@ -158,7 +225,7 @@ func materialize(gitDir, ref, dest string) error {
 		return err
 	}
 	if err := archive.Run(); err != nil {
-		return fmt.Errorf("git archive %s: %w", ref, err)
+		return fmt.Errorf("git archive %s: %w", archiveRef, err)
 	}
 	if err := untar.Wait(); err != nil {
 		return fmt.Errorf("untar push into %s: %w", dest, err)
@@ -174,6 +241,41 @@ func materialize(gitDir, ref, dest string) error {
 		return err
 	}
 	return nil
+}
+
+// worktreeAheadOf reports the working tree's own HEAD when it is a descendant of
+// ref — i.e. gitops committed something after the push this apply is serving.
+//
+// Deliberately conservative: anything it cannot answer (no repo yet, no HEAD, a
+// git that fails, an unrelated history) returns false, and the caller falls back
+// to materialising the pushed ref exactly as before.
+func worktreeAheadOf(dest, ref string) (string, bool) {
+	gitDir := filepath.Join(dest, ".git")
+	if _, err := os.Stat(gitDir); err != nil {
+		return "", false
+	}
+	head, err := exec.Command("git", "--git-dir", gitDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", false
+	}
+	headSHA := strings.TrimSpace(string(head))
+	if headSHA == "" || headSHA == ref {
+		return "", false
+	}
+	// --is-ancestor is the whole question: is the pushed ref behind HEAD? A
+	// sibling or unrelated commit is not "newer" and must not win.
+	if err := exec.Command("git", "--git-dir", gitDir,
+		"merge-base", "--is-ancestor", ref, headSHA).Run(); err != nil {
+		return "", false
+	}
+	return headSHA, true
+}
+
+func short(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
 }
 
 // chownToRepoOwner recursively chowns dir to the uid/gid that owns dir/.git —
