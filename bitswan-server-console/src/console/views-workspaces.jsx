@@ -6,6 +6,7 @@ const {
   Avatar: WAvatar, UserChip: WUserChip, Card: WCard, PageHeader: WPageHeader, Field: WField, TextInput: WTextInput,
   Modal: WModal, Toggle: WToggle, EmptyState: WEmpty, Stat: WStat, Drawer: WDrawer,
   Select: WSelect, AvatarStack: WAvatarStack, LiveState: WLiveState,
+  serverUpdatePending: WSrvPending, SERVER_FIRST_NOTE: WSRV_FIRST,
 } = window.SC_UI;
 const { Api: WApi } = window.SC_API;
 const { useState: useWS } = React;
@@ -505,6 +506,10 @@ function WorkspacesView({ ctx }) {
   const [restoreBusy, setRestoreBusy] = useWS('');
   const [updateBusy, setUpdateBusy] = useWS('');
   const [updateProg, setUpdateProg] = useWS(null); // { fraction, label } for the workspace being updated
+  // Ordered updates: a workspace can't be pulled ahead of a server that's still
+  // behind, so the card's Update button waits for the server update (same rule
+  // as the Updates view — serverUpdatePending in console-ui.jsx).
+  const serverStale = WSrvPending(data);
 
   // The managed workspace lives in the URL (/workspaces/:name) so the drawer
   // survives refresh and is shareable.
@@ -584,7 +589,10 @@ function WorkspacesView({ ctx }) {
 
   // Owner-initiated workspace update: pulls the latest images and recreates the
   // workspace's containers (streams progress). Rollback is intentionally CLI-only.
+  // Guarded on the server being current — the button is already withheld, this
+  // catches a stale render (server updated elsewhere, refetch not landed yet).
   const doUpdate = async (w) => {
+    if (serverStale) { toast(`${WSRV_FIRST}, then update ${w.name}.`, 'danger'); return; }
     setUpdateBusy(w.id);
     setUpdateProg({ fraction: 0, label: 'Starting…' });
     try {
@@ -691,6 +699,22 @@ function WorkspacesView({ ctx }) {
                     {!archived && isOwner && w.updateAvailable && (
                       updateBusy === w.id ? (
                         <WUpdateBar prog={updateProg} />
+                      ) : serverStale ? (
+                        // The server goes first. An admin can act on it right
+                        // here; anyone else needs one, so say so rather than
+                        // sending them to a page they can't open.
+                        currentUser && currentUser.isAdmin ? (
+                          <WBtn variant="default" size="sm" leftIcon="arrow-up-circle"
+                            title={`${WSRV_FIRST} — this workspace can be updated after that`}
+                            onClick={() => go('updates')}>
+                            Update server first
+                          </WBtn>
+                        ) : (
+                          <span style={{ fontSize: 12, color: WC.muted, textAlign: 'right' }}
+                            title={`${WSRV_FIRST} — this workspace can be updated after that`}>
+                            Ask an admin to update this server first
+                          </span>
+                        )
                       ) : (
                         <WBtn variant="primary" size="sm" leftIcon="arrow-up-circle" onClick={() => doUpdate(w)}>
                           Update available

@@ -472,6 +472,58 @@ describe('WorkspacesView', () => {
     expect(screen.queryByPlaceholderText('Search people…')).toBeNull();
   });
 
+  // Ordered updates: a workspace update pulls images built for the current
+  // server release, so it stays unavailable until the server itself is updated.
+  describe('server-first update ordering', () => {
+    const stale = (over) => liveWs({
+      versions: { gitops: 'g1', latest_gitops: 'g2', update_available: true },
+      updateAvailable: true, ...over,
+    });
+    const serverBehind = { server: { current: 'v1', latest: 'v2', update_available: true }, workspaces: [], history: [] };
+    const serverCurrent = { server: { current: 'v2', latest: '', update_available: false }, workspaces: [], history: [] };
+
+    it('offers the update when the server is up to date', () => {
+      render(<Host View={WorkspacesView} data={makeData({ workspaces: [stale()], updates: serverCurrent })} />);
+      expect(screen.getByRole('button', { name: /Update available/ })).toBeTruthy();
+    });
+
+    it('replaces it with a route to the server update while the server is behind', () => {
+      const s = spies();
+      render(<Host View={WorkspacesView} data={makeData({ workspaces: [stale()], updates: serverBehind })} extra={s} />);
+      expect(screen.queryByRole('button', { name: /Update available/ })).toBeNull();
+      const btn = screen.getByRole('button', { name: /Update server first/ });
+      fireEvent.click(btn);
+      expect(s.go).toHaveBeenCalledWith('updates');
+    });
+
+    it('clicking through cannot upgrade the workspace while the server is behind', async () => {
+      const s = spies();
+      let hit = false;
+      installFetch({ '/bailey/api/workspaces/demo/upgrade': () => { hit = true; return { ndjson: [{ event: 'done' }] }; } });
+      render(<Host View={WorkspacesView} data={makeData({ workspaces: [stale()], updates: serverBehind })} extra={s} />);
+      fireEvent.click(screen.getByRole('button', { name: /Update server first/ }));
+      await waitFor(() => expect(s.go).toHaveBeenCalled());
+      expect(hit).toBe(false);
+    });
+
+    // A non-admin can't update the server, so sending them to the Updates view
+    // (which they can't open) would be a dead end — name who can instead.
+    it('tells a non-admin owner to ask an admin', () => {
+      const s = spies();
+      render(<Host View={WorkspacesView} data={makeData({ workspaces: [stale()], updates: serverBehind })}
+        extra={{ ...s, currentUser: { id: 'me@x', email: 'me@x', name: 'me@x', role: 'member', isAdmin: false } }} />);
+      expect(screen.queryByRole('button', { name: /Update/ })).toBeNull();
+      expect(screen.getByText('Ask an admin to update this server first')).toBeTruthy();
+    });
+
+    // The Workspaces view is reachable by non-admins, for whom /admin/updates
+    // 403s — an unknown server state must not withhold their update.
+    it('does not gate when the server state is unknown', () => {
+      render(<Host View={WorkspacesView} data={makeData({ workspaces: [stale()] })} />);
+      expect(screen.getByRole('button', { name: /Update available/ })).toBeTruthy();
+    });
+  });
+
   // #276: members with a real avatar show the photo; the initials chip is the
   // fallback (no avatar, or the image fails to load).
   it('workspace card shows member avatar images keyed by email', () => {

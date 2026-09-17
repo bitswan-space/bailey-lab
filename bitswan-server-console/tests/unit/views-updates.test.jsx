@@ -126,6 +126,61 @@ describe('UpdatesView', () => {
     });
   });
 
+  // Ordered updates: while the server binary is behind, a workspace update would
+  // run the new images against the old server — so the workspace Update button
+  // is withheld until the server is updated.
+  describe('server-first ordering', () => {
+    const behind = { current: '2026.08.03.68', latest: 'v2026.08.05.70', update_available: true };
+    const stale = (over) => ({
+      name: 'mine', versions: { gitops: 'g1', latest_gitops: 'g2' }, can_update: true, owner: 'me@x', ...over,
+    });
+
+    it('withholds the workspace Update button and points at the server update', () => {
+      render(<Host View={UpdatesView} data={withUpdates({ server: behind, workspaces: [stale()] })} />);
+      // The only Update button left is the server's own.
+      expect(screen.getAllByRole('button', { name: /Update available/ }).length).toBe(1);
+      expect(screen.getByText(/Workspace updates unlock once this server is on v2026\.08\.05\.70/)).toBeTruthy();
+      // The row still reports what's behind, with the reason in place of the button.
+      expect(screen.getByText('mine')).toBeTruthy();
+      expect(screen.getByText('Update the automation server first')).toBeTruthy();
+      // Nothing in the row can fire the upgrade — not even a disabled button
+      // the row's owner note used to sit beside.
+      expect(screen.queryByRole('button', { name: /^Update$/ })).toBeNull();
+    });
+
+    it('offers the workspace update again once the server is up to date', () => {
+      render(<Host View={UpdatesView} data={withUpdates({
+        server: { current: 'v2026.08.05.70', latest: '', update_available: false },
+        workspaces: [stale()],
+      })} />);
+      expect(screen.getByRole('button', { name: /^Update$/ })).toBeTruthy();
+      expect(screen.queryByText(/Workspace updates unlock/)).toBeNull();
+    });
+
+    it('still allows a rollback while the server is behind', async () => {
+      const s = spies();
+      let hit = null;
+      installFetch({ '/bailey/api/workspaces/wraptest/rollback': (url, init) => {
+        hit = { url, body: init.body };
+        return { ndjson: [{ event: 'done', fraction: 1, message: 'ok' }] };
+      } });
+      render(<Host View={UpdatesView} data={withUpdates({ server: behind })} extra={s} />);
+      fireEvent.click(screen.getByTitle('Roll back to g1'));
+      fireEvent.click(screen.getByRole('button', { name: 'Roll back' }));
+      await waitFor(() => expect(hit).not.toBeNull());
+    });
+
+    // The gate is positive-only: an /admin/updates payload that never resolved a
+    // server version must not freeze every workspace update on this server.
+    it('does not gate on an unknown server state', () => {
+      render(<Host View={UpdatesView} data={withUpdates({
+        server: { current: '', latest: '', update_available: false },
+        workspaces: [stale()],
+      })} />);
+      expect(screen.getByRole('button', { name: /^Update$/ })).toBeTruthy();
+    });
+  });
+
   it('cancelling the confirm dialog does not roll back', async () => {
     const s = spies();
     let hit = null;
