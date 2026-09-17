@@ -81,7 +81,11 @@ func reconcile(ctx context.Context, wctx infradriver.WorkspaceContext, bs *Bitsw
 		report("compose_up", fmt.Sprintf("egress pre-pass skipped (%v) — full reconcile", perr))
 		finalYAML, workers = composeYAML, nil
 	}
-	if err := os.WriteFile(composePath, []byte(finalYAML), 0o644); err != nil {
+	// Written through a rename, not in place. This is the one file an apply puts
+	// in gitops's own directory, and gitops stages it into whatever commit it is
+	// making at the time — an in-place write leaves a window where it commits
+	// half a compose file.
+	if err := writeFileAtomic(composePath, []byte(finalYAML), 0o644); err != nil {
 		return fmt.Errorf("write docker-compose.yaml: %w", err)
 	}
 
@@ -421,4 +425,26 @@ func installCertificatesInContainers(ctx context.Context, wctx infradriver.Works
 	}
 	wg.Wait()
 	return nil
+}
+
+// writeFileAtomic writes to a temp file beside path and renames it over path, so
+// a reader either sees the whole previous file or the whole new one.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".compose-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(name, perm); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
 }
