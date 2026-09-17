@@ -1733,6 +1733,14 @@ function DeploymentCard({
           )}
         </div>
       </div>
+      {entry.summary && (
+        <div
+          className="text-[13px] leading-snug text-foreground"
+          title={entry.subject ?? undefined}
+        >
+          {entry.summary}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-3.5 text-[12px] text-muted-foreground">
         {entry.deployed_by && (
           <span className="inline-flex items-center gap-1.5">

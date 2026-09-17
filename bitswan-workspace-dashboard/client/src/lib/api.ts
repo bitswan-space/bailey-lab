@@ -601,6 +601,14 @@ export interface BpHistoryEntry {
   status: string; // "deployed" | "rolled-back" | "firewall" | "backup" | "secret"
   source: string; // "deploy" | "dev" | "staging" | "rollback" | "firewall" | "backup" | "secret"
   members: Record<string, BpHistoryMember>;
+  /** One line saying what this event did, ready to show: "Deployed 49ab0bc4 —
+   *  edit README.md (test)", "Promoted from Staging — …", "Secrets changed (dev)". */
+  summary?: string;
+  /** The deploy-state commit's own subject (the mechanical record). */
+  subject?: string;
+  /** Subject of the code commit this event deployed, when the repo still has it. */
+  // eslint-disable-next-line no-restricted-syntax -- nullable wire field
+  source_subject?: string | null;
   /** Auditors who signed off the image this deploy promoted (production promotes
    *  only) — {who, at, note, report}. Empty for unaudited deploys. Drives the "audited
    *  by" badge on the history row. */

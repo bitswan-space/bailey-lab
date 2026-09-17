@@ -1995,6 +1995,63 @@ class AutomationService:
             released.insert(0, csha)
         rec["released_shas"] = released[: self.RELEASED_SHAS_KEPT]
 
+    HISTORY_STAGE_LABEL = {"dev": "Development", "staging": "Staging"}
+
+    async def _source_subjects(self, bp: str, shas: list[str]) -> dict[str, str]:
+        if not shas:
+            return {}
+        try:
+            bare = bp_bare_repo_path(bp)
+        except ValueError:
+            return {}
+        if not os.path.isdir(bare):
+            return {}
+        out, _, rc = await call_git_command_with_output(
+            "git",
+            "-C",
+            bare,
+            "log",
+            "--no-walk=unsorted",
+            "--format=%H%x1f%s",
+            *shas,
+        )
+        subjects: dict[str, str] = {}
+        if rc != 0:
+            return subjects
+        for line in out.splitlines():
+            sha, _, subject = line.partition("\x1f")
+            if sha and subject:
+                subjects[sha] = subject
+        return subjects
+
+    async def _describe_history(self, bp: str, entries: list[dict]) -> None:
+        shas = sorted({e["source_commit"] for e in entries if e.get("source_commit")})
+        subjects = await self._source_subjects(bp, shas)
+        for e in entries:
+            src = e.get("source_commit")
+            code = subjects.get(src) if src else None
+            e["source_subject"] = code
+            kind = e.get("source")
+            if kind == "firewall":
+                e["summary"] = e.get("subject") or "Firewall rules changed"
+            elif kind == "backup":
+                bk = e.get("backup") or {}
+                e["summary"] = bk.get("detail") or bk.get("summary") or "Backup event"
+            elif kind == "secret":
+                realm = (e.get("secret") or {}).get("realm") or ""
+                e["summary"] = (
+                    f"Secrets changed ({realm})" if realm else "Secrets changed"
+                )
+            else:
+                short = (src or "")[:8]
+                if kind == "rollback":
+                    head = f"Rolled back to {short}"
+                elif kind in self.HISTORY_STAGE_LABEL:
+                    head = f"Promoted from {self.HISTORY_STAGE_LABEL[kind]}"
+                else:
+                    head = f"Deployed {short}"
+                e["summary"] = f"{head} — {code}" if code else head
+
     async def bp_history(self, bp: str, stage: str, limit: int = 200) -> dict:
         """Deployment + firewall history for one BP stage, derived from the GIT
         LOG of bitswan.yaml (no history is stored in the file). Two interleaved
@@ -2100,6 +2157,7 @@ class AutomationService:
                         "source_commit": src,  # the deployed source version
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": status,
                         "source": source,
                         "members": members,
@@ -2140,6 +2198,7 @@ class AutomationService:
                         "source_commit": None,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "firewall",
                         "source": "firewall",
                         "members": {},
@@ -2183,6 +2242,7 @@ class AutomationService:
                         "source_commit": None,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "backup",
                         "source": "backup",
                         "members": {},
@@ -2216,6 +2276,7 @@ class AutomationService:
                         "source_commit": src,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "secret",
                         "source": "secret",
                         "members": members,
@@ -2224,6 +2285,7 @@ class AutomationService:
                 )
             prev_sec_key = sec_key
         entries.reverse()  # newest-first
+        await self._describe_history(bp, entries)
         # The current deployment is the newest APPLIED state. On dev/staging a
         # secret change applies immediately (it redeploys the single-slot
         # members), so it counts. On PRODUCTION a secret change is PENDING — it
