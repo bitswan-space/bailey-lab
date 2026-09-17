@@ -826,16 +826,9 @@ function ContainersSection({
   // "Running" is the live container state, NOT whether a deploy record exists —
   // an asleep stage still has its records (present=true) but no running container.
   const isUp = (m: Member) => isUpStatus(m.display);
-  // Whether the row appears, what it says and which buttons it offers is ONE
-  // decision and it lives in lib/stagePower.ts — the locals this used to keep
-  // (`asleep`, `anyRunning`) went with it, so there is no second definition of
-  // "asleep" here to drift from the first.
   // Why it's asleep (memory-pressure | manual) — gitops stamps it on the members,
   // so the message can attribute the sleep instead of a bare "asleep".
   const asleepReason = members.map((m) => m.asleepReason).find(Boolean) ?? null;
-  // What the power row may offer. The sweep evicts per DEPLOYMENT, so "some of
-  // this stage is asleep" is the ordinary case — and it used to be the one case
-  // with no way back (see lib/stagePower.ts).
   const powerState = stagePower(
     members.map((m) => ({
       asleep: m.display === 'asleep',
@@ -890,12 +883,6 @@ function ContainersSection({
         </>
       ) : (
         <>
-      {/* The row always has exactly one thing to offer: if anything is up it can
-          free the memory, and if nothing is up Wake brings the group back —
-          `_wake_context_stage` re-activates every member and runs
-          `docker compose up`, which revives dead containers as well as slept
-          ones. What must not happen is the SENTENCE calling dead containers
-          asleep; stagePower owns both that decision and that wording. */}
       {canPower && (powerState.canWake || powerState.canSleep) && (
         <div className="flex items-center gap-2 rounded-[10px] border border-border bg-muted/40 px-4 py-2.5">
           <MemoryStick className="size-3.5 text-muted-foreground" aria-hidden />

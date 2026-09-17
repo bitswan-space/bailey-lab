@@ -1,12 +1,3 @@
-"""Start on a container that isn't there must actually bring it back.
-
-A slept deployment (evicted by the memory sweep, or an operator's Sleep) is
-`active: false`, and both the deploy and the compiler skip inactive entries by
-design. So pressing Start on it ran a deploy that skipped it and then reported
-"Container … created and started" — a success message for something that never
-happened, and the only per-automation way back from sleep in the UI.
-"""
-
 import pytest
 import yaml
 from fastapi import HTTPException
@@ -57,8 +48,6 @@ async def test_start_wakes_a_slept_automation(tmp_path, monkeypatch):
     applied: list[list[str]] = []
 
     async def _apply(dep_ids, report=None):
-        # Mirrors the real apply: it only ever creates containers for entries
-        # that are active by the time it runs.
         applied.append(list(dep_ids))
         if _yaml(tmp_path)["deployments"]["frontend-bp-staging"]["active"]:
             containers.append({"Id": "c1"})
@@ -77,8 +66,6 @@ async def test_start_wakes_a_slept_automation(tmp_path, monkeypatch):
     assert _yaml(tmp_path)["deployments"]["frontend-bp-staging"]["active"] is True
     assert res["status"] == "success"
     assert containers, "Start reported success without creating a container"
-    # Scoped to the one deployment: an unrelated broken service elsewhere in the
-    # workspace must not be able to fail this.
     assert applied == [["frontend-bp-staging"]]
 
 
@@ -91,7 +78,7 @@ async def test_a_deploy_that_creates_nothing_is_not_reported_as_success(
         return []
 
     async def _deploy():
-        return None  # the build failed, the member is skipped, … — nothing came up
+        return None
 
     monkeypatch.setattr(svc, "get_container", _get_container)
     monkeypatch.setattr(svc, "deploy_automations", _deploy)
@@ -115,12 +102,6 @@ async def test_an_unknown_deployment_is_still_a_404(tmp_path, monkeypatch):
 
 
 async def test_a_failed_wake_leaves_the_deployment_asleep(tmp_path, monkeypatch):
-    """A wake that could not redeploy must not leave the flag saying it woke.
-
-    Otherwise bitswan.yaml claims a container that does not exist, and the NEXT
-    Start reads `active: true` and takes the whole-workspace branch — the one
-    this change exists to avoid, where the same unrelated failure is waiting.
-    """
     svc = _svc(tmp_path, monkeypatch, active=False)
 
     async def _get_container(dep_id):
@@ -142,7 +123,6 @@ async def test_a_failed_wake_leaves_the_deployment_asleep(tmp_path, monkeypatch)
 
 
 async def test_restart_on_a_missing_container_wakes_it_too(tmp_path, monkeypatch):
-    """Restart is offered on asleep members as well, and carried the same bug."""
     svc = _svc(tmp_path, monkeypatch, active=False)
     containers: list[dict] = []
 
