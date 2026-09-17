@@ -590,6 +590,13 @@ export interface BpHistoryMember {
 
 /** One deployment in a BP stage's history (newest-first). Derived from the git
  *  log of bitswan.yaml. */
+export interface BpHistoryChange {
+  sha: string;
+  author: string;
+  at: string;
+  subject: string;
+}
+
 export interface BpHistoryEntry {
   /** bitswan.yaml commit sha = the deploy-event id (the rollback key). */
   commit: string;
@@ -609,6 +616,14 @@ export interface BpHistoryEntry {
   /** Subject of the code commit this event deployed, when the repo still has it. */
   // eslint-disable-next-line no-restricted-syntax -- nullable wire field
   source_subject?: string | null;
+  /** The code commits this event brought to the stage — everything since the
+   *  previously deployed version, newest first; a rollback lists its target. */
+  changes?: BpHistoryChange[];
+  /** More commits existed than were kept (see the server's cap). */
+  changes_truncated?: boolean;
+  /** The version deployed on this stage before this event, if any. */
+  // eslint-disable-next-line no-restricted-syntax -- nullable wire field
+  since?: string | null;
   /** Auditors who signed off the image this deploy promoted (production promotes
    *  only) — {who, at, note, report}. Empty for unaudited deploys. Drives the "audited
    *  by" badge on the history row. */

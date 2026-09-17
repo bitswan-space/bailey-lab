@@ -2051,16 +2051,67 @@ class AutomationService:
                 subjects[sha] = subject
         return subjects
 
+    HISTORY_CHANGES_KEPT = 50
+
+    async def _source_commits(
+        self, bp: str, base: str | None, tip: str
+    ) -> list[dict] | None:
+        try:
+            bare = bp_bare_repo_path(bp)
+        except ValueError:
+            return None
+        if not os.path.isdir(bare):
+            return None
+        fmt = "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%s"
+        spec = f"{base}..{tip}" if base and base != tip else tip
+        out, _, rc = await call_git_command_with_output(
+            "git", "-C", bare, "log", f"-{self.HISTORY_CHANGES_KEPT + 1}", fmt, spec
+        )
+        if rc != 0 or not out.strip():
+            if spec == tip:
+                return None
+            out, _, rc = await call_git_command_with_output(
+                "git", "-C", bare, "log", "-1", fmt, tip
+            )
+            if rc != 0 or not out.strip():
+                return None
+        rows: list[dict] = []
+        for line in out.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 5:
+                continue
+            sha, name, email, at, subject = parts
+            if subject.endswith(f" ({bp})"):
+                subject = subject[: -len(f" ({bp})")]
+            rows.append(
+                {"sha": sha, "author": email or name, "at": at, "subject": subject}
+            )
+        return rows
+
     async def _describe_history(self, bp: str, entries: list[dict]) -> None:
-        shas = sorted({e["source_commit"] for e in entries if e.get("source_commit")})
-        subjects = await self._source_subjects(bp, shas)
-        for e in entries:
-            src = e.get("source_commit")
-            code = subjects.get(src) if src else None
-            if code and code.endswith(f" ({bp})"):
-                code = code[: -len(f" ({bp})")]
-            e["source_subject"] = code
+        previous_version: str | None = None
+        for e in reversed(entries):
             kind = e.get("source")
+            if kind in ("firewall", "backup", "secret"):
+                e["changes"] = []
+                continue
+            src = e.get("source_commit")
+            if not src:
+                e["changes"] = []
+                continue
+            rows = await self._source_commits(bp, previous_version, src)
+            truncated = rows is not None and len(rows) > self.HISTORY_CHANGES_KEPT
+            if truncated:
+                rows = rows[: self.HISTORY_CHANGES_KEPT]
+            e["changes"] = rows or []
+            e["changes_truncated"] = truncated
+            e["since"] = previous_version
+            previous_version = src
+
+        for e in entries:
+            kind = e.get("source")
+            changes = e.get("changes") or []
+            e["source_subject"] = changes[0]["subject"] if changes else None
             if kind == "firewall":
                 fw = e.get("firewall") or {}
                 realm = fw.get("realm") or ""
@@ -2076,14 +2127,18 @@ class AutomationService:
                     f"Secrets changed ({realm})" if realm else "Secrets changed"
                 )
             else:
-                short = (src or "")[:8]
+                short = (e.get("source_commit") or "")[:8]
                 if kind == "rollback":
                     head = f"Rolled back to {short}"
                 elif kind in self.HISTORY_STAGE_LABEL:
                     head = f"Promoted from {self.HISTORY_STAGE_LABEL[kind]}"
                 else:
                     head = f"Deployed {short}"
-                e["summary"] = f"{head} — {code}" if code else head
+                count = len(changes) + (1 if e.get("changes_truncated") else 0)
+                if kind != "rollback" and count > 1:
+                    more = "+" if e.get("changes_truncated") else ""
+                    head += f" · {len(changes)}{more} commits"
+                e["summary"] = head
 
     async def bp_history(self, bp: str, stage: str, limit: int = 200) -> dict:
         """Deployment + firewall history for one BP stage, derived from the GIT

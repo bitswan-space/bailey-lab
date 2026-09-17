@@ -86,25 +86,38 @@ def test_history_entries_say_what_changed(tmp_path, monkeypatch):
 
     first = _publish(clone, "shop", "v1\n", "Add invoice validation (shop)")
     state.record("dev", first, "deploy")
-    second = _publish(clone, "shop", "v2\n", "Round totals to whole units")
+    _publish(clone, "shop", "v1a\n", "Round totals to whole units")
+    _publish(clone, "shop", "v1b\n", "add .claude/settings.local.json")
+    second = _publish(clone, "shop", "v2\n", "Hold invoices over 5000 for approval")
     state.record("dev", second, "deploy")
     state.record("staging", second, "dev", "promote business process shop to staging")
     state.record("dev", first, "rollback")
 
     dev = asyncio.run(svc.bp_history("shop", "dev"))["history"]
     assert [e["summary"] for e in dev] == [
-        f"Rolled back to {first[:8]} — Add invoice validation",
-        f"Deployed {second[:8]} — Round totals to whole units",
-        f"Deployed {first[:8]} — Add invoice validation",
+        f"Rolled back to {first[:8]}",
+        f"Deployed {second[:8]} · 3 commits",
+        f"Deployed {first[:8]} · 2 commits",
     ]
-    assert dev[1]["source_subject"] == "Round totals to whole units"
+    assert [c["subject"] for c in dev[1]["changes"]] == [
+        "Hold invoices over 5000 for approval",
+        "add .claude/settings.local.json",
+        "Round totals to whole units",
+    ]
+    assert dev[1]["since"] == first
+    assert dev[1]["source_subject"] == "Hold invoices over 5000 for approval"
     assert dev[1]["subject"] == f"deploy shop → dev @ {second[:8]}"
+    assert [c["subject"] for c in dev[2]["changes"]] == [
+        "Add invoice validation",
+        "Initialize business process shop",
+    ]
+    assert dev[2]["changes"][0]["author"] == "dev@example.com"
     assert dev[0]["status"] == "rolled-back"
+    assert [c["subject"] for c in dev[0]["changes"]] == ["Add invoice validation"]
 
     staging = asyncio.run(svc.bp_history("shop", "staging"))["history"]
-    assert staging[0]["summary"] == (
-        f"Promoted from Development — Round totals to whole units"
-    )
+    assert staging[0]["summary"] == f"Promoted from Development · 5 commits"
+    assert len(staging[0]["changes"]) == 5
 
 
 def test_a_version_the_repo_no_longer_has_still_gets_a_summary(tmp_path, monkeypatch):
@@ -115,6 +128,7 @@ def test_a_version_the_repo_no_longer_has_still_gets_a_summary(tmp_path, monkeyp
     dev = asyncio.run(svc.bp_history("shop", "dev"))["history"]
     assert dev[0]["summary"] == "Deployed 01234567"
     assert dev[0]["source_subject"] is None
+    assert dev[0]["changes"] == []
 
 
 def test_firewall_entries_describe_the_rules_not_the_commit_that_carried_them(
