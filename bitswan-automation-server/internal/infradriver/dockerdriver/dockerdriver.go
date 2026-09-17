@@ -88,7 +88,7 @@ func (d *DockerDriver) ContainerList(ctx context.Context, wctx infradriver.Works
 		return nil, err
 	}
 	if filter.WithRestartCounts {
-		fillRestartCounts(ctx, containers)
+		fillInspectReadings(ctx, containers)
 	}
 	return containers, nil
 }
@@ -123,25 +123,28 @@ func (d *DockerDriver) listContainers(ctx context.Context, filter infradriver.Co
 	return parsePS(out)
 }
 
-const restartFormat = "{{.Id}}" + psSep + "{{.RestartCount}}"
+const inspectReadingsFormat = "{{.Id}}" + psSep + "{{.RestartCount}}" + psSep + "{{.State.StartedAt}}"
 
-func fillRestartCounts(ctx context.Context, containers []infradriver.Container) {
+func fillInspectReadings(ctx context.Context, containers []infradriver.Container) {
 	ids := allIDs(containers)
 	if len(ids) == 0 {
 		return
 	}
-	args := append([]string{"inspect", "--format", restartFormat}, ids...)
+	args := append([]string{"inspect", "--format", inspectReadingsFormat}, ids...)
 	out, err := exec.CommandContext(ctx, "docker", args...).Output()
 	if len(out) == 0 {
 		if err != nil && ctx.Err() == nil {
-			log.Printf("infra-driver: restart counts unavailable: %v", err)
+			log.Printf("infra-driver: container inspect readings unavailable: %v", err)
 		}
 		return
 	}
-	counts := parseRestartCounts(out)
+	counts, started := parseInspectReadings(out)
 	for i := range containers {
 		if n, ok := counts[containers[i].ID]; ok {
 			containers[i].RestartCount = &n
+		}
+		if ts, ok := started[containers[i].ID]; ok {
+			containers[i].StartedAt = &ts
 		}
 	}
 }
@@ -154,23 +157,26 @@ func allIDs(containers []infradriver.Container) []string {
 	return ids
 }
 
-func parseRestartCounts(raw []byte) map[string]int {
+func parseInspectReadings(raw []byte) (map[string]int, map[string]int64) {
 	counts := map[string]int{}
+	started := map[string]int64{}
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		id, count, ok := strings.Cut(line, psSep)
-		if !ok {
+		f := strings.SplitN(line, psSep, 3)
+		if len(f) < 3 {
 			continue
 		}
-		n, err := strconv.Atoi(strings.TrimSpace(count))
-		if err != nil {
-			continue
+		id := f[0]
+		if n, err := strconv.Atoi(strings.TrimSpace(f[1])); err == nil {
+			counts[id] = n
 		}
-		counts[id] = n
+		if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(f[2])); err == nil && !t.IsZero() {
+			started[id] = t.Unix()
+		}
 	}
-	return counts
+	return counts, started
 }
 
 // ContainerStats returns live memory usage for the workspace's RUNNING

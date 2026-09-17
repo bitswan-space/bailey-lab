@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 import { api } from '@/lib/api';
+import { observePending } from '@/lib/pendingActions';
 import type {
   BusinessProcess,
   DeployedAutomation,
@@ -362,6 +363,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       es?.close();
     };
   }, []);
+
+  useEffect(() => {
+    observePending(automations);
+  }, [automations]);
 
   return (
     <WorkspaceContext.Provider

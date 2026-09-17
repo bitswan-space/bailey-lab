@@ -935,6 +935,7 @@ class AutomationService:
                     a.state = None
                     a.container_id = None
                     a.restart_count = None
+                    a.started_at = None
                     a.mem_usage_bytes = None
                     a.mem_over_reservation = False
                     entries.append(a)
@@ -967,12 +968,21 @@ class AutomationService:
                 except (ValueError, TypeError):
                     pass
 
+            started_str = container.get("StartedAt")
+            started_at = None
+            if started_str:
+                try:
+                    started_at = datetime.fromtimestamp(started_str, tz=timezone.utc)
+                except (ValueError, TypeError, OSError):
+                    pass
+
             a.endpoint_name = info.get("Name")
             merged = self._worse_state(a.state, container.get("State", "unknown"))
             won = a.container_id is None or merged != a.state
             if won:
                 a.container_id = container.get("Id")
                 a.created_at = created_at
+                a.started_at = started_at
                 a.status = container.get("Status", "")
                 a.mem_usage_bytes = None
                 a.mem_over_reservation = False

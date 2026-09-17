@@ -134,6 +134,7 @@ class Container:
     created: int = 0
     labels: dict = field(default_factory=dict)
     restart_count: int | None = None
+    started_at: int | None = None
 
     @classmethod
     def from_json(cls, d: dict) -> "Container":
@@ -146,6 +147,7 @@ class Container:
             created=d.get("created", 0) or 0,
             labels=d.get("labels") or {},
             restart_count=d.get("restart_count"),
+            started_at=d.get("started_at"),
         )
 
     def to_docker_dict(self) -> dict:
@@ -161,6 +163,7 @@ class Container:
             "Image": self.image,
             "Labels": self.labels,
             "RestartCount": self.restart_count,
+            "StartedAt": self.started_at,
         }
 
 
