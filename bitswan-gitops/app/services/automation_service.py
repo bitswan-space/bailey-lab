@@ -2033,7 +2033,12 @@ class AutomationService:
             e["source_subject"] = code
             kind = e.get("source")
             if kind == "firewall":
-                e["summary"] = e.get("subject") or "Firewall rules changed"
+                fw = e.get("firewall") or {}
+                realm = fw.get("realm") or ""
+                e["summary"] = (
+                    f"Firewall rules changed ({realm}) — "
+                    f"{fw.get('allowed', 0)} allowed, {fw.get('denied', 0)} denied"
+                )
             elif kind == "backup":
                 bk = e.get("backup") or {}
                 e["summary"] = bk.get("detail") or bk.get("summary") or "Backup event"

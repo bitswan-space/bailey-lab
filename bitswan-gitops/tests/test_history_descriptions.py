@@ -115,3 +115,31 @@ def test_a_version_the_repo_no_longer_has_still_gets_a_summary(tmp_path, monkeyp
     dev = asyncio.run(svc.bp_history("shop", "dev"))["history"]
     assert dev[0]["summary"] == "Deployed 01234567"
     assert dev[0]["source_subject"] is None
+
+
+def test_firewall_entries_describe_the_rules_not_the_commit_that_carried_them(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(git_server, "GIT_REPOS_DIR", str(tmp_path / "git"))
+    svc = _svc(tmp_path)
+    state = _StateRepo(svc.gitops_dir)
+    state.record("dev", "0123456789abcdef0123456789abcdef01234567", "deploy")
+    with open(os.path.join(state.path, "bitswan.yaml")) as f:
+        bs = yaml.safe_load(f)
+    bs["firewall"] = {
+        "shop": {
+            "dev": {
+                "rules": {
+                    "api.example.com": {"status": "allowed"},
+                    "evil.example.com": {"status": "denied"},
+                }
+            }
+        }
+    }
+    with open(os.path.join(state.path, "bitswan.yaml"), "w") as f:
+        yaml.safe_dump(bs, f)
+    _git("add", "-A", cwd=state.path)
+    _git("commit", "-qm", "deploy shop", cwd=state.path)
+    dev = asyncio.run(svc.bp_history("shop", "dev"))["history"]
+    assert dev[0]["source"] == "firewall"
+    assert dev[0]["summary"] == "Firewall rules changed (dev) — 1 allowed, 1 denied"
