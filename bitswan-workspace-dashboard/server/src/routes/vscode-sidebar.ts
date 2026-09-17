@@ -19,6 +19,7 @@ import {
 const pendingOpens = new Map<string, SidebarOpen>();
 
 const PREFIX = '/api/coding-agent/sidebar';
+const MAX_PROMPT_CHARS = 8 * 1024;
 
 const MIME: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
@@ -98,7 +99,9 @@ export function registerVscodeSidebarRoutes(
    * returns; `delivered: false` means the prompt is waiting for the panel to
    * come up, not that anything went wrong.
    */
-  app.post<{ Body: { copy?: string; bp?: string; kind?: string; parent?: string } }>(
+  app.post<{
+    Body: { copy?: string; bp?: string; kind?: string; parent?: string; text?: string };
+  }>(
     `${PREFIX}/prompt`,
     async (req, reply) => {
       reply.header('Cache-Control', 'no-store');
@@ -106,14 +109,22 @@ export function registerVscodeSidebarRoutes(
       const body = req.body ?? {};
       const s = scope(body);
       if (!s) return reply.code(400).send({ error: 'copy and bp are required' });
-      if (!isSessionKind(body.kind)) return reply.code(400).send({ error: 'unknown kind' });
-      // A parent is a copy name — it becomes a branch name in the prompt text.
-      const parent = body.parent?.trim();
-      if (parent !== undefined && parent !== '' && !isValidCopyName(parent)) {
-        return reply.code(400).send({ error: 'invalid parent' });
+      let text: string | undefined;
+      if (typeof body.text === 'string') {
+        // A caller-written ask (an audit report to write). Bounded: it is typed
+        // into the composer, not stored, but a page-sized prompt is a mistake.
+        text = body.text.trim().slice(0, MAX_PROMPT_CHARS);
+        if (!text) return reply.code(400).send({ error: 'text is empty' });
+      } else {
+        if (!isSessionKind(body.kind)) return reply.code(400).send({ error: 'unknown kind' });
+        // A parent is a copy name — it becomes a branch name in the prompt text.
+        const parent = body.parent?.trim();
+        if (parent !== undefined && parent !== '' && !isValidCopyName(parent)) {
+          return reply.code(400).send({ error: 'invalid parent' });
+        }
+        text = promptForKind(body.kind, parent || undefined);
+        if (!text) return reply.code(400).send({ error: `kind ${body.kind} has no canned prompt` });
       }
-      const text = promptForKind(body.kind, parent || undefined);
-      if (!text) return reply.code(400).send({ error: `kind ${body.kind} has no canned prompt` });
       const email = await emailFromRequest(req, app.log);
       if (!email) return reply.code(403).send({ error: 'no verified identity' });
 
