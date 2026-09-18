@@ -60,6 +60,7 @@ import {
 } from '@/components/workspace/WorkspaceProvider';
 import { AuditSignOff, isAuditor } from '@/components/audits/AuditSignOff';
 import { AuditReportDialog } from '@/components/audits/AuditReportDialog';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
@@ -1250,18 +1251,16 @@ function InspectModal({
   ];
 
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-5"
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[620px] max-h-[90vh] w-[960px] max-w-[96vw] overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <>
+      <Dialog open onOpenChange={(o) => !o && onClose()}>
+        <DialogContent
+          aria-describedby={undefined}
+          className="flex h-[620px] max-h-[90vh] w-[960px] max-w-[96vw] gap-0 overflow-hidden rounded-xl p-0"
+        >
         {/* Left rail */}
         <div className="flex w-[210px] shrink-0 flex-col border-r border-border bg-muted/40">
           <div className="border-b border-border px-4 py-3">
-            <div className="text-[13px] font-bold text-foreground">Inspect</div>
+            <DialogTitle className="text-[13px] font-bold text-foreground">Inspect</DialogTitle>
             <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
               {stageLabel} · {short(entry.source_commit ?? entry.commit, 7)}
             </div>
@@ -1291,18 +1290,10 @@ function InspectModal({
         </div>
         {/* Right content */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex items-center gap-2.5 border-b border-border px-4 py-3">
+          <div className="flex items-center gap-2.5 border-b border-border px-4 py-3 pr-12">
             <div className="flex-1 text-sm font-semibold text-foreground">
               {tabs.find((t) => t.id === panel)?.label}
             </div>
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-muted"
-              aria-label="Close"
-            >
-              <X className="size-4" aria-hidden />
-            </button>
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {panel === 'diff' ? (
@@ -1586,7 +1577,8 @@ function InspectModal({
             </div>
           )}
         </div>
-      </div>
+        </DialogContent>
+      </Dialog>
       <TakeVersionDialog
         open={takeOpen}
         source="commit"
@@ -1617,7 +1609,7 @@ function InspectModal({
           setRevertError('');
         }}
       />
-    </div>
+    </>
   );
 }
 
