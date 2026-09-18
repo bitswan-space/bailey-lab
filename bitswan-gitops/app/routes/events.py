@@ -12,6 +12,8 @@ from app.dependencies import get_automation_service, get_image_service
 from app.deploy_manager import deploy_manager
 from app.event_broadcaster import event_broadcaster
 from app.task_queue import task_queue
+from app.test_run_manager import test_run_manager
+from app.test_runner import current_state
 from app.services.process_service import process_service
 from app.routes.copies import get_cached_copies
 
@@ -62,6 +64,16 @@ async def stream_events():
 
             images = await get_image_service().get_images()
             yield f"event: images\ndata: {json.dumps(images)}\n\n"
+
+            # Requirement test state, one frame per BP that has been run.
+            # LAST because it is the only producer that shells out (staleness
+            # is measured against the working tree, so it costs a few git
+            # calls per BP) — and because a dashboard can render the whole
+            # Requirements tab without it, just without verdicts.
+            for run in test_run_manager.all_runs():
+                state = await current_state(run.copy, run.bp)
+                if state is not None:
+                    yield f"event: test_state\ndata: {json.dumps(state)}\n\n"
 
             while True:
                 try:

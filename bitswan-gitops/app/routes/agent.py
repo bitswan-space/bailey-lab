@@ -827,3 +827,40 @@ async def _required_group(deployment_id: str) -> str:
     except Exception as e:  # noqa: BLE001 - a hint is never worth failing over
         logger.debug("could not read the required group for %s: %s", deployment_id, e)
     return ""
+
+
+# --- Requirement tests (agent-token mirror of /processes/{bp}/tests) ---
+#
+# The coding agent is a client of the same engine the dashboard uses, so a
+# verdict cannot differ depending on who asked for it. The CLI no longer execs
+# tests itself: it triggers a run here and reads the result back.
+
+
+class AgentRunTestsRequest(BaseModel):
+    ids: list[str] | None = None
+    failed_only: bool = False
+
+
+@router.get("/processes/{bp}/tests")
+async def agent_get_requirement_tests(
+    bp: str, copy: str | None = None, _token=Depends(verify_agent_token)
+):
+    from app.routes.processes import get_requirement_tests
+
+    return await get_requirement_tests(bp, copy)
+
+
+@router.post("/processes/{bp}/tests/run")
+async def agent_run_requirement_tests(
+    bp: str,
+    body: AgentRunTestsRequest | None = None,
+    copy: str | None = None,
+    _token=Depends(verify_agent_token),
+):
+    from app.routes.processes import RunTestsRequest, run_requirement_tests
+
+    payload = RunTestsRequest(
+        ids=(body.ids if body else None),
+        failed_only=(body.failed_only if body else False),
+    )
+    return await run_requirement_tests(bp, payload, copy)

@@ -458,3 +458,113 @@ async def rename_process(name: str, body: RenameProcessRequest) -> dict:
         pass
 
     return entry
+
+
+# ── Requirement tests ──────────────────────────────────────────────────────
+# Running a BP's requirement tests lives here, not in the coding-agent CLI:
+# gitops holds the docker socket (through the infra-driver), the live-dev
+# deployment map and the copies checkout, so it is the only place that can
+# wake an instance, exec in it and read the contract in one operation. The
+# dashboard and the CLI are both clients of this.
+
+
+class RunTestsRequest(BaseModel):
+    # Specific requirements to run; empty means the whole contract.
+    ids: list[str] | None = None
+    # Re-run just what failed last time (plus anything never evaluated).
+    failed_only: bool = False
+
+
+def _validated_bp_and_copy(bp: str, copy: str | None) -> None:
+    if not _BP_DIR_RE.match(bp):
+        raise HTTPException(status_code=400, detail="Invalid business process name")
+    if copy is not None and not _COPY_NAME_RE.match(copy):
+        raise HTTPException(status_code=400, detail="Invalid copy name")
+
+
+@router.get("/{bp}/tests")
+async def get_requirement_tests(bp: str, copy: str | None = None):
+    """Current test state for a BP, or `null` when nothing has run yet.
+
+    Never 404s on "no run": a BP whose tests have not been run is a normal
+    state the dashboard renders, not an error.
+    """
+    _validated_bp_and_copy(bp, copy)
+    from app.test_runner import current_state
+
+    return await current_state(copy, bp)
+
+
+@router.post("/{bp}/tests/run")
+async def run_requirement_tests(
+    bp: str, body: RunTestsRequest | None = None, copy: str | None = None
+):
+    """Start a run in the background and return the state it starts from.
+
+    Returns immediately: a suite can take minutes, and the caller follows the
+    `test_state` SSE event (or polls this BP's GET) rather than holding a
+    request open for it.
+    """
+    _validated_bp_and_copy(bp, copy)
+    from app.services.testable_requirements import is_valid_requirement_id
+    from app.test_runner import current_state, spawn_run
+
+    body = body or RunTestsRequest()
+    ids = set(body.ids or [])
+    for req_id in ids:
+        if not is_valid_requirement_id(req_id):
+            raise HTTPException(
+                status_code=400, detail=f"Invalid requirement id {req_id!r}"
+            )
+
+    spawn_run(copy, bp, only_ids=ids or None, failed_only=body.failed_only)
+    return await current_state(copy, bp)
+
+
+@router.get("/{bp}/tests/gate")
+async def get_requirement_tests_gate(bp: str, copy: str | None = None):
+    """Whether this BP's tests permit a deploy, and why not when they don't.
+
+    `reason` is written for a human: the dashboard shows it verbatim on the
+    blocking button in the Deploy tab.
+    """
+    _validated_bp_and_copy(bp, copy)
+    from app.test_runner import current_state
+
+    state = await current_state(copy, bp)
+    if state is None:
+        return {
+            "green": False,
+            "known": False,
+            "running": False,
+            "reason": "Tests have not run for this business process yet.",
+            "state": None,
+        }
+
+    counts = state["counts"]
+    running = state["status"] == "running"
+    if running:
+        pending = counts["queued"] + counts["running"]
+        reason = f"{pending} test(s) still running."
+    elif state["stale"]:
+        reason = (
+            "The code changed after the last test run — the results are out of date."
+        )
+    elif counts["fail"] or counts["blocked"]:
+        reason = (
+            f"{counts['fail']} test(s) failed"
+            + (f", {counts['blocked']} blocked" if counts["blocked"] else "")
+            + "."
+        )
+    elif state["status"] != "completed":
+        reason = "The last test run did not complete."
+    else:
+        reason = ""
+
+    return {
+        "green": state["green"],
+        "known": True,
+        "running": running,
+        "reason": reason,
+        "state": state,
+    }
