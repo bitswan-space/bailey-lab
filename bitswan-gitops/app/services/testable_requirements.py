@@ -81,7 +81,7 @@ class Requirement:
         return f"Requirement({self.id!r}, parent={self.parent!r})"
 
 
-class TestingConfig:
+class BpTestingConfig:
     """The optional `[testing]` section of a BP's process.toml.
 
     It lives there rather than in testable-requirements.toml because the
@@ -262,11 +262,11 @@ def next_requirement_id(
     raise RuntimeError("could not mint a unique requirement id")
 
 
-def parse_testing_config(process_toml_content: str) -> TestingConfig:
+def parse_testing_config(process_toml_content: str) -> BpTestingConfig:
     """Read `[testing]` out of a process.toml. A missing file or section is
     the zero value — a single-automation BP needs no configuration at all."""
     if not process_toml_content or not process_toml_content.strip():
-        return TestingConfig()
+        return BpTestingConfig()
     try:
         data = toml.loads(process_toml_content)
     except toml.TomlDecodeError as e:
@@ -274,7 +274,7 @@ def parse_testing_config(process_toml_content: str) -> TestingConfig:
 
     section = data.get("testing")
     if not isinstance(section, dict):
-        return TestingConfig()
+        return BpTestingConfig()
 
     def _str(key: str) -> str:
         value = section.get(key)
@@ -284,7 +284,7 @@ def parse_testing_config(process_toml_content: str) -> TestingConfig:
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
         timeout = None
 
-    return TestingConfig(
+    return BpTestingConfig(
         automation=_str("automation"),
         runner=_str("runner"),
         framework=_str("framework"),
@@ -292,13 +292,13 @@ def parse_testing_config(process_toml_content: str) -> TestingConfig:
     )
 
 
-def read_testing_config(copy: str | None, bp: str) -> TestingConfig:
+def read_testing_config(copy: str | None, bp: str) -> BpTestingConfig:
     path = os.path.join(bp_clone_path(copy, bp), "process.toml")
     try:
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
     except FileNotFoundError:
-        return TestingConfig()
+        return BpTestingConfig()
     return parse_testing_config(content)
 
 
