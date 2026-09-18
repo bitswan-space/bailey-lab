@@ -1296,38 +1296,39 @@ async def _tests_gate_for(copy: str, bp: str) -> dict:
     passed here, so every later promote (dev→staging→production) inherits a
     verdict rather than needing one of its own. Gating the promote instead
     would mean mapping a commit back to whichever copy tested it, which stops
-    being answerable as soon as that copy moves on — a gate that blocks
+    being answerable as soon as that copy moves on — and a gate that blocks
     legitimate promotes is worse than no gate.
 
-    When there is no usable verdict (never run, or the code moved since the
-    last one) a run is started here, so pressing Sync & Deploy is what gets
-    the tests going and the user is never stuck waiting for something nobody
-    scheduled.
+    A PURE READ. It never starts a run: the work-in-progress commit made just
+    before this is itself what triggers one (the copies watcher fires on a
+    branch tip moving), so the loop closes without this request having a side
+    effect on background state.
     """
-    from app.test_runner import current_state, spawn_run
-    from app.test_run_manager import test_run_manager
+    from app.services.testable_requirements import read_requirements
+    from app.test_runner import current_state
+
+    try:
+        requirements = read_requirements(copy, bp)
+    except ValueError as e:
+        # A contract that does not parse cannot be judged either way. Say so
+        # rather than silently letting the deploy through.
+        return {
+            "green": False,
+            "reason": f"'{bp}' has an unreadable testable-requirements.toml: {e}",
+        }
+
+    if not requirements:
+        # Nothing to test. A business process with no requirements is not
+        # "failing its tests" — it has none — and must deploy as it always did.
+        return {"green": True, "reason": ""}
 
     state = await current_state(copy, bp)
-    if state is None or state["stale"]:
-        if not test_run_manager.is_running(copy, bp):
-            try:
-                spawn_run(copy, bp)
-            except Exception as e:  # noqa: BLE001 — never fail a sync on this
-                logger.warning("could not start tests for %s/%s: %s", copy, bp, e)
+    if state is None or state["stale"] or state["status"] == "running":
         return {
             "green": False,
             "reason": (
                 f"Tests for '{bp}' are running against the code you just "
                 "committed. Deploy will be available once they pass."
-            ),
-        }
-    if state["status"] == "running":
-        pending = state["counts"]["queued"] + state["counts"]["running"]
-        return {
-            "green": False,
-            "reason": (
-                f"{pending} test(s) for '{bp}' are still running. Deploy will "
-                "be available once they pass."
             ),
         }
     if state["green"]:

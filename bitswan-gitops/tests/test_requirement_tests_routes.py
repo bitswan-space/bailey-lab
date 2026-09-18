@@ -122,3 +122,64 @@ def _result(req_id, verdict):
     from app.test_run_manager import RequirementResult
 
     return RequirementResult(id=req_id, verdict=verdict)
+
+
+# ---- the deploy gate on the sync path ---------------------------------------
+
+
+async def test_a_bp_with_no_requirements_is_not_gated(tmp_path, monkeypatch):
+    """Most BPs have no contract at all. "No tests" is not "failing tests" —
+    gating them would stop every one of them from ever deploying."""
+    from app.routes.copies import _tests_gate_for
+
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
+    (tmp_path / "dev1" / "shop").mkdir(parents=True)
+
+    gate = await _tests_gate_for("dev1", "shop")
+    assert gate["green"] is True
+
+
+async def test_a_failing_run_blocks_the_sync_with_a_reason(tmp_path, monkeypatch):
+    from app.routes.copies import _tests_gate_for
+    from app.test_run_manager import RUN_COMPLETED, VERDICT_FAIL, RequirementResult
+
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
+    bp_dir = tmp_path / "dev1" / "shop"
+    bp_dir.mkdir(parents=True)
+    (bp_dir / "testable-requirements.toml").write_text(
+        '[[requirement]]\nid = "REQ-AAAA"\n'
+    )
+
+    run = test_run_manager.start("dev1", "shop", "abc123", "wip", "tree1")
+    run.results["REQ-AAAA"] = RequirementResult(id="REQ-AAAA", verdict=VERDICT_FAIL)
+    test_run_manager.finish(run, RUN_COMPLETED)
+
+    async def same_tree(_path):
+        return "tree1"
+
+    monkeypatch.setattr(test_runner, "working_tree_sha", same_tree)
+
+    gate = await _tests_gate_for("dev1", "shop")
+    assert gate["green"] is False
+    assert "1 test(s) failed" in gate["reason"]
+
+
+async def test_the_gate_starts_nothing(tmp_path, monkeypatch):
+    """A read must not spawn a run: the work-in-progress commit that precedes
+    it already triggers one, and a request that leaves a background task behind
+    hangs whoever is waiting on the event loop."""
+    from app.routes.copies import _tests_gate_for
+
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
+    bp_dir = tmp_path / "dev1" / "shop"
+    bp_dir.mkdir(parents=True)
+    (bp_dir / "testable-requirements.toml").write_text(
+        '[[requirement]]\nid = "REQ-AAAA"\n'
+    )
+
+    spawned = []
+    monkeypatch.setattr(test_runner, "spawn_run", lambda *a, **k: spawned.append(a))
+
+    gate = await _tests_gate_for("dev1", "shop")
+    assert gate["green"] is False
+    assert spawned == []
