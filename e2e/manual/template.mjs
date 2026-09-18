@@ -260,6 +260,12 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
      header stays with its first rows) so a long chapter fills the foot of its
      page and continues, rather than jumping the whole card to a half-empty page. */
   .shot, .two, .howto, .callout, .specs, .scorecard, .std li, .std-h, .guide table tr{ break-inside:avoid }
+  /* A caption is part of the picture, not a paragraph that happens to follow
+     it: break-inside on .shot alone kept the image whole and still let the
+     sheet end between it and its .shotcap, stranding the caption at the top
+     of the next page under someone else's screenshot. Same pair the guide
+     headings and .runfoot already use. */
+  .shot{ break-after:avoid } .shotcap{ break-before:avoid }
   /* ...except the prose/How-to row. It is routinely taller than a sheet, and an
      avoid that cannot be honoured is simply ignored, so the break lands wherever
      it falls — which cut ch5's box mid-list. Letting the CONTAINER break while
