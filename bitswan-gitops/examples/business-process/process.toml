@@ -1,0 +1,19 @@
+# Example business process: a small internal app (Go backend + React frontend).
+#
+# `process-id` is normally minted when a business process is created; this one
+# is fixed so the example is reproducible.
+process-id = "00000000-0000-4000-8000-00000000e2e1"
+name = "Internal app"
+
+# How this BP's requirement tests are run.
+#
+# `automation` is REQUIRED here because the BP has two automations (backend and
+# frontend) — without it the container to test in would be ambiguous, and
+# guessing is how a suite silently tests the wrong thing.
+#
+# `framework` selects the built-in runner and the report parser. The verdict is
+# read out of that report, never out of the exit code: `go test -run REQ_XXXX`
+# exits 0 with "no tests to run" when nothing matches, which is not a pass.
+[testing]
+automation = "backend"
+framework = "go"

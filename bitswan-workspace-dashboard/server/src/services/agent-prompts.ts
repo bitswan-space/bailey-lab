@@ -68,18 +68,32 @@ export function mergeBackPrompt(parentBranch: string): string {
 /**
  * "Write tests" button in the Requirements tab. The agent turns the BP's
  * testable requirements into mechanically-verifiable tests.
+ *
+ * It does NOT tell the agent to record results: it cannot. A verdict comes
+ * from gitops running the test, which happens on every commit.
  */
 export const WRITE_TESTS_PROMPT =
-  'Write automated tests for this BP\'s testable requirements. ' +
-  'Run `bitswan-coding-agent requirements list` to see the requirements, and read the ' +
-  'BP\'s README.md, process.toml, and existing source/tests first to follow the conventions. ' +
-  'For each requirement write a deterministic test whose name carries the requirement ID with ' +
-  'hyphens turned into underscores, so REQ-003 maps to the token REQ_003 (e.g. def test_REQ_003_...). ' +
-  'This naming lets a test be triggered by ID. Then run and record each one with ' +
-  '`bitswan-coding-agent requirements test --id <id>`, which execs the test inside the BP\'s ' +
-  'live-dev container and writes pass/fail back to the requirement automatically (run without ' +
-  '--id to test all of them; default runner is pytest, pass --runner with a {id} placeholder for ' +
-  'other frameworks). Do not change requirement descriptions.';
+  "Write automated tests for this BP's testable requirements. " +
+  'Run `bitswan-coding-agent requirements list` to see them, and read the ' +
+  "BP's README.md, process.toml and the existing source/tests first to follow " +
+  'the conventions. ' +
+  'For each requirement write a deterministic test whose NAME carries the ' +
+  'requirement id with hyphens turned into underscores, so REQ-7QX4 is tested ' +
+  'by a test whose name contains REQ_7QX4 (e.g. def test_REQ_7QX4_… or ' +
+  'func TestREQ_7QX4_…). That name is the only binding — there is no registry ' +
+  'to update. ' +
+  'Put each test INSIDE the automation directory (the one with ' +
+  'automation.toml): only that directory is mounted into the container the ' +
+  'tests run in, so a test elsewhere in the BP cannot be found. That mount is ' +
+  'read-only — write any temporary file to /tmp. ' +
+  'If the BP has more than one automation, make sure process.toml says which ' +
+  'one runs the tests and which framework, under [testing]. ' +
+  'Then commit: the tests run automatically on every commit and the verdicts ' +
+  'appear in Requirements & tests. Read them with ' +
+  '`bitswan-coding-agent requirements list` and fix whatever does not pass. ' +
+  'You cannot set a verdict by hand and must not try to — if a requirement ' +
+  'genuinely cannot be tested mechanically, say so rather than writing a test ' +
+  'that always passes. Do not change requirement descriptions.';
 
 /**
  * "Build automation" button in the Description tab. The agent implements
@@ -87,13 +101,16 @@ export const WRITE_TESTS_PROMPT =
  * testable requirements as the work list where they exist.
  */
 export const BUILD_AUTOMATION_PROMPT =
-  'Build the automation this BP\'s description describes. ' +
-  'Read the BP\'s README.md first — it is the specification the user wrote — then ' +
-  'process.toml and bitswan.yaml to orient yourself. ' +
-  'Run `bitswan-coding-agent requirements list`; if testable requirements exist, work through ' +
-  'them in order (`bitswan-coding-agent requirements next` gives the next one), updating each with ' +
-  '`bitswan-coding-agent requirements update --id <id> --status <pass|fail>` as you go. ' +
-  'Otherwise implement what the README describes and propose requirements for it.';
+  "Build the automation this BP's description describes. " +
+  "Read the BP's README.md first — it is the specification the user wrote — " +
+  'then process.toml and bitswan.yaml to orient yourself. ' +
+  'Run `bitswan-coding-agent requirements list`; if testable requirements ' +
+  'exist, work through them in order (`bitswan-coding-agent requirements next` ' +
+  'gives the next one). Commit as you go: the tests run on every commit and ' +
+  'the verdicts come back on their own — you do not record them yourself, and ' +
+  'there is no flag that would let you. ' +
+  'Otherwise implement what the README describes and propose requirements for ' +
+  'it with `bitswan-coding-agent requirements add --proposed`.';
 
 /**
  * The jobs the dashboard can hand the agent. 'claude' is a plain session with

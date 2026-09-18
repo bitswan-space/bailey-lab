@@ -1,0 +1,29 @@
+# The contract this business process is held to.
+#
+# There is no status here on purpose: a verdict is produced by running the
+# test, is held by gitops for the commit it ran against, and is shown in the
+# Requirements & tests tab. Nothing can write one into this file.
+#
+# A requirement's test is the test whose NAME carries its id with hyphens
+# turned into underscores — REQ-H3AL is tested by TestREQ_H3AL_… in
+# backend/requirements_test.go.
+
+[[requirement]]
+id = "REQ-H3AL"
+parent = ""
+description = "The backend reports its health on /health"
+
+[[requirement]]
+id = "REQ-GR33"
+parent = "REQ-H3AL"
+description = "The public root endpoint greets the caller"
+
+[[requirement]]
+id = "REQ-D3M0"
+parent = ""
+description = "A requirement whose test is deliberately failing, to show what a failure looks like"
+
+[[requirement]]
+id = "REQ-T0D0"
+parent = ""
+description = "A requirement nobody has written a test for yet — it shows as 'no test', which does not block a deploy"

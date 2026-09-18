@@ -112,10 +112,14 @@ function TestStatusDot({ bp }: { bp: string | null }) {
       : state.green
         ? 'All tests passing'
         : 'Tests are out of date';
+  // Decorative, like every other icon in this bar: an aria-label here would
+  // append the status to the tab button's accessible name, changing what the
+  // button is called every time a test run moves. The status itself lives in
+  // the tab this dot points at.
   return (
     <span
       title={label}
-      aria-label={label}
+      aria-hidden
       className={cn('ml-0.5 size-2 shrink-0 rounded-full', tone, running && 'animate-pulse')}
     />
   );
