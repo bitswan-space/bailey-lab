@@ -49,19 +49,26 @@ class Requirement:
     point individual requirements at different containers.
     """
 
-    __slots__ = ("id", "parent", "description", "automation", "runner")
+    __slots__ = ("id", "parent", "description", "origin", "automation", "runner")
 
     def __init__(
         self,
         id: str,
         parent: str = "",
         description: str = "",
+        origin: str = "",
         automation: str = "",
         runner: str = "",
     ):
         self.id = id
         self.parent = parent
         self.description = description
+        # "proposed" for a requirement the agent suggested and nobody has
+        # accepted yet, empty otherwise. Unlike a verdict this IS contract
+        # data: it says where the requirement came from, not whether it holds.
+        # Accepting a proposal clears it, which is why acceptance does not have
+        # to renumber an id that tests already refer to.
+        self.origin = origin
         self.automation = automation
         self.runner = runner
 
@@ -70,6 +77,7 @@ class Requirement:
             "id": self.id,
             "parent": self.parent,
             "description": self.description,
+            "origin": self.origin,
             "automation": self.automation,
             "runner": self.runner,
         }
@@ -187,6 +195,7 @@ def parse_testable_requirements(content: str) -> list[Requirement]:
                 id=req_id,
                 parent=_str("parent"),
                 description=_str("description"),
+                origin=_str("origin"),
                 automation=_str("automation"),
                 runner=_str("runner"),
             )
@@ -204,6 +213,8 @@ def serialize_testable_requirements(requirements: list[Requirement]) -> str:
             "parent": req.parent,
             "description": req.description,
         }
+        if req.origin:
+            row["origin"] = req.origin
         if req.automation:
             row["automation"] = req.automation
         if req.runner:

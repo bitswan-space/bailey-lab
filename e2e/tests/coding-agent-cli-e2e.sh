@@ -129,12 +129,15 @@ log "requirements (in a BP dir)"
 assert_ok       "requirements list"            "$BP_DIR" "requirements list"
 # additive mutation round-trip, then clean up
 REQ_TXT="cli-e2e probe $(docker exec "$AGENT" sh -c 'date +%s')"
-ADD_OUT=$(docker exec "$AGENT" sh -c "cd '$BP_DIR' && $CLI requirements add --text '$REQ_TXT' --status proposed 2>&1")
+ADD_OUT=$(docker exec "$AGENT" sh -c "cd '$BP_DIR' && $CLI requirements add --text '$REQ_TXT' --proposed 2>&1")
 if echo "$ADD_OUT" | grep -qE 'AI-|REQ-|added|proposed'; then
   ok "requirements add"
-  NEWID=$(echo "$ADD_OUT" | grep -oE '(AI|REQ)-[0-9]+' | head -1)
+  NEWID=$(echo "$ADD_OUT" | grep -oE '(AI|REQ)-[0-9A-Z]+' | head -1)
   assert_contains "requirements list shows the new req" "$BP_DIR" "${NEWID:-cli-e2e}" "requirements list"
-  [ -n "$NEWID" ] && assert_ok "requirements update status" "$BP_DIR" "requirements update --id $NEWID --status pending"
+  [ -n "$NEWID" ] && assert_ok "requirements update text" "$BP_DIR" "requirements update --id $NEWID --text 'cli-e2e probe (edited)'"
+  # A verdict cannot be set by hand — the flag is gone, and cobra says so.
+  assert_contains "requirements update rejects --status" "$BP_DIR" \
+    "unknown flag" "requirements update --id ${NEWID:-REQ-XXXX} --status pass"
   # clean up the probe requirement so we don't leave state behind
   [ -n "$NEWID" ] && docker exec "$AGENT" sh -c "cd '$BP_DIR' && $CLI requirements remove --id $NEWID >/dev/null 2>&1"
 else
@@ -166,24 +169,25 @@ fi
 log "requirements next / json / test"
 assert_ok       "requirements next"          "$BP_DIR" "requirements next"
 assert_contains "requirements json is JSON"  "$BP_DIR" '\[|\{' "requirements json"
-# `requirements test` must actually EXECUTE a test run inside the BP's live-dev
-# container. Run it against the BP that owns the RUNNING deployment, pinned with
-# --deployment so it never falls back to auto-detect. A pass/fail result or
-# "no requirements" is fine — the guard is that the command reaches execution.
-# Only a hard contract/transport/crash counts as failure (NOT cobra's benign
-# "Usage:" banner, which it prints on every handled error).
+# `requirements test` now asks gitops to run the suite and waits for the
+# verdicts — the CLI no longer execs anything itself, so there is no
+# --deployment to pin. A pass/fail result or "no requirements" is fine; the
+# guard is that the command reaches the server and gets a verdict back. Only a
+# hard contract/transport/crash counts as failure (NOT cobra's benign "Usage:"
+# banner, which it prints on every handled error, and NOT a non-zero exit from
+# a genuinely failing requirement).
 if [ -n "${RUN:-}" ]; then
   RUN_BP="${RUN#*-copy-${COPY}-}"; RUN_BP="${RUN_BP%-live-dev}"
   RUN_BP_DIR="/workspace/copies/$COPY/$RUN_BP"
   docker exec "$AGENT" sh -c "[ -d '$RUN_BP_DIR' ]" || RUN_BP_DIR="$BP_DIR"
-  TOUT=$(docker exec "$AGENT" sh -c "cd '$RUN_BP_DIR' && $CLI requirements test --deployment '$RUN' 2>&1")
+  TOUT=$(docker exec "$AGENT" sh -c "cd '$RUN_BP_DIR' && $CLI requirements test --wait 120 2>&1")
   if echo "$TOUT" | grep -qiE 'unknown flag|API error \(HTTP 5|connection refused|no such file or directory|panic:|runtime error'; then
     fail "requirements test (contract/transport error: $(echo "$TOUT" | grep -iE 'error|panic' | head -1))"
   else
-    ok "requirements test executes (against $RUN_BP)"
+    ok "requirements test reaches gitops and returns verdicts (against $RUN_BP)"
   fi
 else
-  echo "::warning::no running deployment to pin requirements test against — skipping (infra timing, not a CLI defect)"
+  echo "::warning::no running deployment to run requirements test against — skipping (infra timing, not a CLI defect)"
 fi
 
 # --- summary ---------------------------------------------------------------

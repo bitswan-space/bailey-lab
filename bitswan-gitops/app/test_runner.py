@@ -414,6 +414,7 @@ async def execute_run(
         result = RequirementResult(
             id=req.id,
             description=req.description,
+            origin=req.origin,
             verdict=VERDICT_QUEUED
             if req.id in selected
             else (carried or VERDICT_QUEUED),

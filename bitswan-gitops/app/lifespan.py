@@ -201,6 +201,11 @@ class CopyChangeHandler(FileSystemEventHandler):
     # How long a burst of events settles before a copy is recomputed.
     _COPIES_DEBOUNCE_SECONDS = 1.0
 
+    # Longer than the copy ping: a commit is usually followed by more writes
+    # (a hook, a checkout), and a test run is expensive enough to be worth
+    # coalescing them.
+    _TESTS_DEBOUNCE_SECONDS = 2.0
+
     # Path segments whose contents can never change anything we publish, but
     # which git writes to in bulk: a single `git fetch` creates hundreds of
     # loose-object and log events. Dropping them at the very top of `_handle`
@@ -229,6 +234,9 @@ class CopyChangeHandler(FileSystemEventHandler):
         # full rescan is needed). See `_schedule_copies_ping`.
         self._copy_ping_task: asyncio.Task | None = None
         self._copies_dirty: set[str | None] = set()
+        # Per-(copy, bp) pending test runs, same drain shape as the copy ping.
+        self._tests_ping_task: asyncio.Task | None = None
+        self._tests_dirty: set[tuple[str, str]] = set()
 
     def _copy_from_path(self, path: str) -> str | None:
         """Return the name of the copy containing `path`, or None when the
@@ -276,6 +284,71 @@ class CopyChangeHandler(FileSystemEventHandler):
         if norm.endswith(self._GIT_STATE_SUFFIXES):
             return True
         return self._GIT_REFS_SEGMENT in norm
+
+    def _is_commit(self, path: str) -> bool:
+        """True only when a BRANCH TIP moved — i.e. a commit landed.
+
+        Deliberately narrower than `_is_git_state_change`, which also fires on
+        `.git/index` writes: `git add` is not a commit, and re-running a whole
+        test suite on every staging operation would make the feature cost more
+        than it is worth.
+        """
+        if not path:
+            return False
+        norm = path.replace("\\", "/")
+        return norm.endswith("/.git/HEAD") or self._GIT_REFS_SEGMENT in norm
+
+    def _bp_from_git_path(self, path: str) -> str | None:
+        """The BP a `.git/...` event belongs to: `<copy>/<bp>/.git/...`.
+
+        Returns None when the `.git` sits directly under a copy (the copy root
+        is itself a repo in some layouts) — there is no BP to test there.
+        """
+        try:
+            rel = os.path.relpath(path, self.copies_root)
+        except ValueError:
+            return None
+        if rel.startswith(".."):
+            return None
+        parts = rel.replace("\\", "/").split("/")
+        if len(parts) >= 3 and parts[2] == ".git" and parts[1]:
+            return parts[1]
+        return None
+
+    def _schedule_tests_ping(self, copy: str, bp: str):
+        """Queue a test run for a BP whose HEAD just moved.
+
+        Uses the mark-dirty + drain shape of `_schedule_copies_ping` rather
+        than cancel-and-restart, for the reason documented there: a test run
+        touches the tree it is testing, and a scheduler that restarts on its
+        own events can starve forever.
+        """
+
+        def _run():
+            self._tests_dirty.add((copy, bp))
+            if self._tests_ping_task and not self._tests_ping_task.done():
+                return
+            self._tests_ping_task = asyncio.ensure_future(self._drain_tests_dirty())
+
+        self.event_loop.call_soon_threadsafe(_run)
+
+    async def _drain_tests_dirty(self):
+        """Start a run per BP marked dirty, once the commit burst settles."""
+        from app.test_runner import spawn_run
+
+        while self._tests_dirty:
+            # A commit writes HEAD and the ref within milliseconds of each
+            # other; wait for that to settle so one commit is one run.
+            await asyncio.sleep(self._TESTS_DEBOUNCE_SECONDS)
+            pending = self._tests_dirty
+            self._tests_dirty = set()
+            for copy, bp in sorted(pending):
+                try:
+                    # Supersedes an in-flight run for the same BP — the new
+                    # commit is the only one anyone is waiting on now.
+                    spawn_run(copy, bp)
+                except Exception as e:  # noqa: BLE001
+                    print(f"failed to start tests for {copy}/{bp}: {e}")
 
     def _schedule_copies_ping(self, copy: str | None):
         """Queue a copy-state refresh, coalescing bursts.
@@ -407,6 +480,14 @@ class CopyChangeHandler(FileSystemEventHandler):
         elif self._is_git_state_change(src):
             self._schedule_copies_ping(copy)
 
+        # 1b. Commit-triggered tests. Copies only: the deploy gate is on the
+        #     copy, main's tip is whatever a sync just fast-forwarded to, and
+        #     re-running there would double every run for no extra signal.
+        if copy is not None and self._is_commit(src):
+            bp = self._bp_from_git_path(src)
+            if bp:
+                self._schedule_tests_ping(copy, bp)
+
         # 2. Copy directory itself appearing / disappearing → full
         #    refresh of both pipelines so the new scope is picked up (or
         #    stale scope dropped).
@@ -438,6 +519,48 @@ class CopyChangeHandler(FileSystemEventHandler):
 
     def on_moved(self, event):
         self._handle(event)
+
+
+async def _rerun_tests_after_restart(copies_root: str, delay: float = 15.0):
+    """Re-run every copy's requirement tests once, after a restart.
+
+    Test state is in memory by design, so a restart leaves every BP with no
+    verdict and the deploy gate closed. Rather than persist verdicts — which
+    would mean trusting a result for code that may have changed while gitops
+    was down — the state is rebuilt from the only source that cannot be stale:
+    running the tests again.
+
+    Deliberately unhurried: it waits for the workspace to finish coming up, and
+    staggers the BPs, because each run may have to wake a sleeping live-dev
+    group and a stampede at boot would fight the deploys that are also starting.
+    """
+    from app.services.testable_requirements import REQUIREMENTS_FILENAME
+    from app.test_runner import spawn_run
+
+    await asyncio.sleep(delay)
+    try:
+        copies = sorted(os.listdir(copies_root))
+    except OSError:
+        return
+    for copy in copies:
+        if copy == "main":
+            continue  # tests are scoped to copies; see the watcher's 1b
+        copy_path = os.path.join(copies_root, copy)
+        if not os.path.isdir(copy_path):
+            continue
+        try:
+            bps = sorted(os.listdir(copy_path))
+        except OSError:
+            continue
+        for bp in bps:
+            contract = os.path.join(copy_path, bp, REQUIREMENTS_FILENAME)
+            if not os.path.isfile(contract):
+                continue
+            try:
+                spawn_run(copy, bp)
+            except Exception as e:  # noqa: BLE001 — never break startup
+                print(f"restart test re-run failed for {copy}/{bp}: {e}")
+            await asyncio.sleep(2)
 
 
 async def _broadcast_automations_after_delay():
@@ -686,6 +809,10 @@ async def lifespan(app: FastAPI):
         copy_observer.schedule(copy_handler, copies_dir, recursive=True)
         copy_observer.start()
         print(f"Started watching copies directory: {copies_dir}")
+
+        # Rebuild test state for the current HEADs (see the function's note on
+        # why nothing is restored from disk).
+        asyncio.ensure_future(_rerun_tests_after_restart(copies_dir))
     else:
         print(f"Workspace directory does not exist: {workspace_dir}")
 

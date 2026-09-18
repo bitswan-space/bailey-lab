@@ -57,6 +57,7 @@ class RequirementResult:
     __slots__ = (
         "id",
         "description",
+        "origin",
         "verdict",
         "output",
         "deployment_id",
@@ -69,6 +70,7 @@ class RequirementResult:
         self,
         id: str,
         description: str = "",
+        origin: str = "",
         verdict: str = VERDICT_QUEUED,
         output: str = "",
         deployment_id: str = "",
@@ -78,6 +80,9 @@ class RequirementResult:
     ):
         self.id = id
         self.description = description
+        # "proposed" — an agent suggestion the user has not accepted. Carried
+        # through so the tab can group proposals separately from verdicts.
+        self.origin = origin
         self.verdict = verdict
         self.output = output
         self.deployment_id = deployment_id
@@ -89,6 +94,7 @@ class RequirementResult:
         return {
             "id": self.id,
             "description": self.description,
+            "origin": self.origin,
             "verdict": self.verdict,
             "output": self.output,
             "deployment_id": self.deployment_id,
@@ -231,6 +237,7 @@ class TestRunManager:
                     run.results[req_id] = RequirementResult(
                         id=req_id,
                         description=old.description,
+                        origin=old.origin,
                         deployment_id=old.deployment_id,
                         automation=old.automation,
                         previous_verdict=old.verdict,

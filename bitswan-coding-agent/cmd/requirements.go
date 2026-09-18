@@ -1,22 +1,35 @@
 package cmd
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
 
+// Requirement is one row of the BP's contract. Status is NOT part of the
+// file: it is the verdict gitops produced by running the test, filled in from
+// the server on read and never written back. A verdict that could be edited
+// into a file is exactly what the CI model removes.
 type Requirement struct {
 	ID          string `json:"id"`
 	Description string `json:"description"`
-	Status      string `json:"status"`
+	Status      string `json:"status,omitempty"`
 	Parent      string `json:"parent"`
+	// Origin is "proposed" for a requirement the agent suggested and a human
+	// has not accepted yet, empty otherwise. Unlike a verdict this IS contract
+	// data — it says where the requirement came from, not whether it holds.
+	Origin     string `json:"origin,omitempty"`
+	Automation string `json:"automation,omitempty"`
+	Runner     string `json:"runner,omitempty"`
 }
 
 const requirementsFilename = "testable-requirements.toml"
@@ -104,14 +117,15 @@ func parseRequirementsToml(content string) []Requirement {
 		if block == "" {
 			continue
 		}
-		r := Requirement{Status: "pending"}
+		r := Requirement{}
 		r.ID = extractTomlString(block, "id")
 		r.Description = extractTomlString(block, "description")
-		r.Status = extractTomlString(block, "status")
 		r.Parent = extractTomlString(block, "parent")
-		if r.Status == "" {
-			r.Status = "pending"
-		}
+		r.Origin = extractTomlString(block, "origin")
+		r.Automation = extractTomlString(block, "automation")
+		r.Runner = extractTomlString(block, "runner")
+		// A `status` key left over from before verdicts moved out of the file
+		// is read past and dropped on the next write. Nothing migrates it.
 		if r.ID != "" {
 			reqs = append(reqs, r)
 		}
@@ -121,7 +135,7 @@ func parseRequirementsToml(content string) []Requirement {
 
 // extractTomlString extracts a string value for a key, handling all TOML string types:
 // double-quoted ("..."), single-quoted ('...'), multi-line double ("""..."""),
-// and multi-line single ('''...''').
+// and multi-line single (”'...”').
 func extractTomlString(block, key string) string {
 	escaped := regexp.QuoteMeta(key)
 
@@ -160,7 +174,15 @@ func serializeRequirementsToml(reqs []Requirement) string {
 		b.WriteString(fmt.Sprintf("id = %s\n", tomlQuote(r.ID)))
 		b.WriteString(fmt.Sprintf("parent = %s\n", tomlQuote(r.Parent)))
 		b.WriteString(fmt.Sprintf("description = %s\n", tomlQuote(r.Description)))
-		b.WriteString(fmt.Sprintf("status = %s\n", tomlQuote(r.Status)))
+		if r.Origin != "" {
+			b.WriteString(fmt.Sprintf("origin = %s\n", tomlQuote(r.Origin)))
+		}
+		if r.Automation != "" {
+			b.WriteString(fmt.Sprintf("automation = %s\n", tomlQuote(r.Automation)))
+		}
+		if r.Runner != "" {
+			b.WriteString(fmt.Sprintf("runner = %s\n", tomlQuote(r.Runner)))
+		}
 		blocks = append(blocks, b.String())
 	}
 	return strings.Join(blocks, "\n")
@@ -173,19 +195,45 @@ func tomlQuote(s string) string {
 	return strconv.Quote(s)
 }
 
+// idAlphabet is Crockford base32 without the letters it excludes (I, L, O, U):
+// no pair a human can confuse when reading an id out of a test name.
+const idAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+// nextReqID mints an id no other copy can mint at the same time.
+//
+// This used to be max(numeric suffix)+1, which is deterministic and therefore
+// collides by construction: two copies of the same BP both mint REQ-004, and
+// merging them silently fuses two different requirements. Randomness makes the
+// ids independent of each other's history.
 func nextReqID(reqs []Requirement, prefix string) string {
-	maxNum := 0
-	re := regexp.MustCompile(`\d+$`)
+	taken := map[string]bool{}
 	for _, r := range reqs {
-		if m := re.FindString(r.ID); m != "" {
-			n := 0
-			fmt.Sscanf(m, "%d", &n)
-			if n > maxNum {
-				maxNum = n
-			}
+		taken[r.ID] = true
+	}
+	for attempt := 0; attempt < 100; attempt++ {
+		b := make([]byte, 4)
+		if _, err := rand.Read(b); err != nil {
+			break
+		}
+		suffix := make([]byte, 4)
+		for i, v := range b {
+			suffix[i] = idAlphabet[int(v)%len(idAlphabet)]
+		}
+		candidate := prefix + string(suffix)
+		if !taken[candidate] {
+			return candidate
 		}
 	}
-	return fmt.Sprintf("%s%03d", prefix, maxNum+1)
+	// 32^4 is ~1M: exhausting 100 draws means something is badly wrong.
+	// Fall back to a time-based suffix rather than returning a duplicate.
+	return fmt.Sprintf("%s%d", prefix, time.Now().UnixNano()%1000000)
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 // --- Tree helpers ---
@@ -271,7 +319,7 @@ var reqListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		reqs, err := readRequirements(dir)
+		reqs, state, err := readRequirementsWithVerdicts(dir)
 		if err != nil {
 			return err
 		}
@@ -280,6 +328,12 @@ var reqListCmd = &cobra.Command{
 			return nil
 		}
 		printTree(buildTree(reqs), "")
+		if state != nil {
+			fmt.Printf("\n%s (%s)\n", state.HeadSubject, shortSHA(state.HeadSHA))
+			if state.Stale {
+				fmt.Println("The code changed after this run — these verdicts are out of date.")
+			}
+		}
 		return nil
 	},
 }
@@ -299,19 +353,20 @@ var reqAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		status := reqAddStatus
-		if status == "" {
-			status = "pending"
-		}
+		// The AI- prefix makes a proposal recognisable at a glance; `origin` is
+		// what the tooling actually reads, so accepting one never has to
+		// renumber an id that tests already refer to.
 		prefix := "REQ-"
-		if status == "proposed" {
+		origin := ""
+		if reqPropose {
 			prefix = "AI-"
+			origin = "proposed"
 		}
 		newReq := Requirement{
 			ID:          nextReqID(reqs, prefix),
 			Description: reqText,
-			Status:      status,
 			Parent:      reqParent,
+			Origin:      origin,
 		}
 		reqs = append(reqs, newReq)
 		if err := writeRequirements(dir, reqs); err != nil {
@@ -328,7 +383,11 @@ var reqAddCmd = &cobra.Command{
 
 var reqUpdateCmd = &cobra.Command{
 	Use:   "update",
-	Short: "Update a requirement's status or description",
+	Short: "Update a requirement's description",
+	Long: `Change what a requirement says.
+
+There is no --status: a verdict is produced by running the test and nothing
+else can set one. Use ` + "`requirements test`" + ` to run them.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir, err := resolveRequirementsDir(reqBPFlag)
 		if err != nil {
@@ -337,34 +396,24 @@ var reqUpdateCmd = &cobra.Command{
 		if reqID == "" {
 			return fmt.Errorf("--id is required")
 		}
+		if reqText == "" {
+			return fmt.Errorf("--text is required")
+		}
 		reqs, err := readRequirements(dir)
 		if err != nil {
 			return err
 		}
-		found := false
 		for i := range reqs {
 			if reqs[i].ID == reqID {
-				if reqStatus != "" {
-					if reqStatus != "pass" && reqStatus != "fail" && reqStatus != "pending" && reqStatus != "retest" && reqStatus != "proposed" {
-						return fmt.Errorf("--status must be one of: pass, fail, pending, retest, proposed")
-					}
-					reqs[i].Status = reqStatus
-				}
-				if reqText != "" {
-					reqs[i].Description = reqText
-				}
-				found = true
+				reqs[i].Description = reqText
 				if err := writeRequirements(dir, reqs); err != nil {
 					return err
 				}
-				fmt.Printf("Updated %s (status: %s)\n", reqs[i].ID, reqs[i].Status)
-				break
+				fmt.Printf("Updated %s: %s\n", reqs[i].ID, reqs[i].Description)
+				return nil
 			}
 		}
-		if !found {
-			return fmt.Errorf("requirement %s not found", reqID)
-		}
-		return nil
+		return fmt.Errorf("requirement %s not found", reqID)
 	},
 }
 
@@ -400,13 +449,16 @@ var reqRemoveCmd = &cobra.Command{
 var reqNextCmd = &cobra.Command{
 	Use:   "next",
 	Short: "Get the next non-passing requirement",
-	Long:  "Returns the first requirement in tree order that doesn't have status 'pass'.",
+	Long: `Returns the deepest requirement in tree order that is not passing.
+
+"Not passing" includes a requirement whose test has not been written yet, so
+this walks you through the contract from the leaves up.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir, err := resolveRequirementsDir(reqBPFlag)
 		if err != nil {
 			return err
 		}
-		reqs, err := readRequirements(dir)
+		reqs, _, err := readRequirementsWithVerdicts(dir)
 		if err != nil {
 			return err
 		}
@@ -432,243 +484,221 @@ var reqNextCmd = &cobra.Command{
 	},
 }
 
-// execResult mirrors the JSON returned by gitops POST /agent/deployments/{id}/exec.
-type execResult struct {
-	ExitCode int    `json:"exit_code"`
-	Output   string `json:"output"`
+// --- Test state: gitops owns running tests and their verdicts ---
+//
+// The CLI used to exec the tests itself and write the verdict back into the
+// contract file. It does neither now. gitops runs them — it holds the docker
+// socket, the live-dev deployment map and the copies checkout, so it is the
+// only place that can wake an instance, exec in it and read the contract in
+// one operation — and keeps the verdicts in memory for the current commit.
+// The CLI is a client of that, so the agent and the dashboard can never
+// disagree about a result.
+
+type reqTestResult struct {
+	ID              string `json:"id"`
+	Description     string `json:"description"`
+	Verdict         string `json:"verdict"`
+	Output          string `json:"output"`
+	DeploymentID    string `json:"deployment_id"`
+	Automation      string `json:"automation"`
+	PreviousVerdict string `json:"previous_verdict"`
 }
 
-// liveDevSuffix is the deployment-ID suffix that identifies a BP's per-copy
-// live-dev container: {automation}-copy-{copy}-{bp}-live-dev.
-func liveDevSuffix(copy, bp string) string {
-	return fmt.Sprintf("-copy-%s-%s-live-dev", copy, bp)
+type reqTestState struct {
+	RunID        string          `json:"run_id"`
+	Status       string          `json:"status"`
+	HeadSHA      string          `json:"head_sha"`
+	HeadSubject  string          `json:"head_subject"`
+	Stale        bool            `json:"stale"`
+	Green        bool            `json:"green"`
+	Error        string          `json:"error"`
+	Counts       map[string]int  `json:"counts"`
+	Requirements []reqTestResult `json:"requirements"`
 }
 
-// testingConfig is the optional [testing] section of a BP's process.toml.
-// It lives there (not in testable-requirements.toml) because the requirements
-// serializer rewrites that file wholesale and would drop foreign sections.
-type testingConfig struct {
-	// Automation names which automation's live-dev container runs the tests —
-	// required for BPs with more than one automation, where the deployment
-	// can't be auto-detected from the BP name alone.
-	Automation string
-	// Runner overrides the default test-runner template ("pytest -k {id} -v")
-	// for this BP; the --runner flag still wins over it.
-	Runner string
-}
-
-// readTestingConfig parses the [testing] section of process.toml in dir.
-// A missing file or section yields the zero value; any other read error is
-// surfaced rather than silently dropping the [testing] automation/runner
-// pinning.
-func readTestingConfig(dir string) (testingConfig, error) {
-	data, err := os.ReadFile(filepath.Join(dir, "process.toml"))
+// bpAndCopy resolves the (business process, copy) pair the requirement
+// commands address.
+func bpAndCopy(dir string) (string, string, error) {
+	bp := filepath.Base(dir)
+	copyName, err := detectCopyOrFlag(copyFlag)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return testingConfig{}, nil
-		}
-		return testingConfig{}, fmt.Errorf("read process.toml in %s: %w", dir, err)
+		return "", "", fmt.Errorf("cannot determine which copy this business process is in: %w", err)
 	}
-	return parseTestingConfig(string(data)), nil
+	return bp, copyName, nil
 }
 
-func parseTestingConfig(content string) testingConfig {
-	m := regexp.MustCompile(`(?ms)^\[testing\][ \t]*$(.*?)(?:^\[|\z)`).FindStringSubmatch(content)
-	if m == nil {
-		return testingConfig{}
-	}
-	return testingConfig{
-		Automation: extractTomlString(m[1], "automation"),
-		Runner:     extractTomlString(m[1], "runner"),
-	}
+func testStatePath(action, bp, copyName string) string {
+	return fmt.Sprintf("/processes/%s/tests%s?copy=%s",
+		url.PathEscape(bp), action, url.QueryEscape(copyName))
 }
 
-// resolveLiveDevDeployment finds the live-dev deployment to exec the tests in.
-// An explicit --deployment wins (this is what the dashboard "Run" button passes).
-// Otherwise it lists the copy's deployments and picks via pickLiveDevDeployment.
-func resolveLiveDevDeployment(deploymentFlag, bpDir string, cfg testingConfig) (string, error) {
-	if deploymentFlag != "" {
-		return deploymentFlag, nil
-	}
-	copy, err := detectCopyOrFlag(copyFlag)
-	if err != nil {
-		return "", fmt.Errorf("cannot detect copy (pass --deployment): %w", err)
-	}
-	var deployments []deployment
-	if err := agentRequestJSON("GET", fmt.Sprintf("/deployments?copy=%s", copy), nil, &deployments); err != nil {
-		return "", err
-	}
-	var ids []string
-	for _, d := range deployments {
-		ids = append(ids, d.DeploymentID)
-	}
-	return pickLiveDevDeployment(ids, copy, filepath.Base(bpDir), cfg.Automation)
-}
-
-// pickLiveDevDeployment selects the BP's live-dev deployment from ids. With an
-// automation name (from process.toml [testing]) the choice is exact; without
-// one, a single suffix match wins and anything ambiguous (0 or >1, e.g. a BP
-// with several automations) errors with the candidates so the caller can either
-// set [testing] automation or pass --deployment.
-func pickLiveDevDeployment(ids []string, copy, bp, automation string) (string, error) {
-	if automation != "" {
-		want := fmt.Sprintf("%s-copy-%s-%s-live-dev", automation, copy, bp)
-		for _, id := range ids {
-			if id == want {
-				return id, nil
-			}
-		}
-		return "", fmt.Errorf("process.toml [testing] sets automation = %q, but no live-dev deployment %q exists. Available: %s",
-			automation, want, strings.Join(ids, ", "))
-	}
-	var matches []string
-	for _, id := range ids {
-		if strings.HasSuffix(id, liveDevSuffix(copy, bp)) {
-			matches = append(matches, id)
-		}
-	}
-	if len(matches) == 1 {
-		return matches[0], nil
-	}
-	if len(matches) == 0 {
-		return "", fmt.Errorf("could not auto-detect a live-dev deployment for BP %q in copy %q; pass --deployment <id>. Available: %s",
-			bp, copy, strings.Join(ids, ", "))
-	}
-	return "", fmt.Errorf("multiple live-dev deployments match BP %q; set automation = \"<name>\" under [testing] in process.toml, or pass --deployment <id>. Candidates: %s",
-		bp, strings.Join(matches, ", "))
-}
-
-// testCommand renders the runner template for a requirement into the shell
-// command to exec. The requirement ID's hyphens become underscores
-// (REQ-003 -> REQ_003) so the ID can appear in a test function/identifier name,
-// and {id} in the template is replaced with that token; a template without {id}
-// runs unchanged (e.g. a whole-suite runner).
-func testCommand(runner, reqID string) []string {
-	token := strings.ReplaceAll(reqID, "-", "_")
-	return []string{"sh", "-c", strings.ReplaceAll(runner, "{id}", token)}
-}
-
-// execInDeployment runs command in the given live-dev container and returns its
-// exit code + combined output.
-func execInDeployment(deploymentID string, command []string) (*execResult, error) {
-	var res execResult
-	body := map[string]interface{}{"command": command}
-	if err := agentRequestJSON("POST", fmt.Sprintf("/deployments/%s/exec", deploymentID), body, &res); err != nil {
+func fetchTestState(bp, copyName string) (*reqTestState, error) {
+	var state *reqTestState
+	if err := agentRequestJSON("GET", testStatePath("", bp, copyName), nil, &state); err != nil {
 		return nil, err
 	}
-	return &res, nil
+	return state, nil
+}
+
+func triggerTestRun(bp, copyName string, ids []string, failedOnly bool) (*reqTestState, error) {
+	var state *reqTestState
+	body := map[string]interface{}{"failed_only": failedOnly}
+	if len(ids) > 0 {
+		body["ids"] = ids
+	}
+	path := testStatePath("/run", bp, copyName)
+	if err := agentRequestJSON("POST", path, body, &state); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+// applyVerdicts fills each requirement's Status in from the server's state.
+// A requirement the server has no verdict for reads as "unknown" — nobody has
+// judged it, which is a different thing from a test waiting to run.
+func applyVerdicts(reqs []Requirement, state *reqTestState) []Requirement {
+	byID := map[string]string{}
+	if state != nil {
+		for _, r := range state.Requirements {
+			byID[r.ID] = r.Verdict
+		}
+	}
+	for i := range reqs {
+		if v, ok := byID[reqs[i].ID]; ok && v != "" {
+			reqs[i].Status = v
+		} else {
+			reqs[i].Status = "unknown"
+		}
+	}
+	return reqs
+}
+
+// readRequirementsWithVerdicts is what the read-only commands use: the
+// contract from the file, the verdicts from gitops. A server that cannot be
+// reached is not fatal — the contract is still worth printing.
+func readRequirementsWithVerdicts(dir string) ([]Requirement, *reqTestState, error) {
+	reqs, err := readRequirements(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	bp, copyName, err := bpAndCopy(dir)
+	if err != nil {
+		return applyVerdicts(reqs, nil), nil, nil
+	}
+	state, err := fetchTestState(bp, copyName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not read test state from gitops: %v\n", err)
+		return applyVerdicts(reqs, nil), nil, nil
+	}
+	return applyVerdicts(reqs, state), state, nil
+}
+
+func printTestState(state *reqTestState) {
+	if state == nil {
+		fmt.Println("No test state yet.")
+		return
+	}
+	for _, r := range state.Requirements {
+		label := strings.ToUpper(r.Verdict)
+		where := ""
+		if r.Automation != "" {
+			where = " (" + r.Automation + ")"
+		}
+		fmt.Printf("%-8s %s%s %s\n", label, r.ID, where, r.Description)
+		if r.Output != "" {
+			for _, line := range strings.Split(strings.TrimRight(r.Output, "\n"), "\n") {
+				fmt.Printf("         %s\n", line)
+			}
+		}
+	}
+	c := state.Counts
+	fmt.Printf("\n%d passed, %d failed, %d blocked, %d without a test\n",
+		c["pass"], c["fail"], c["blocked"], c["no_test"])
+	if state.Stale {
+		fmt.Println("NOTE: the code changed after this run — the results are out of date.")
+	}
 }
 
 var reqTestCmd = &cobra.Command{
 	Use:   "test",
-	Short: "Run requirements' tests in the live-dev container and record pass/fail",
-	Long: `Run the deterministic test for each requirement inside the BP's live-dev
-container and write the verdict (pass/fail) back to testable-requirements.toml.
+	Short: "Run the requirement tests and wait for the verdicts",
+	Long: `Ask gitops to run this business process's requirement tests, then wait for
+the verdicts and print them.
 
-This is the mechanical counterpart to the "Write tests" agent flow: the agent
-authors tests whose name carries the requirement ID (hyphens become underscores,
-so REQ-003 -> REQ_003); this command runs them by that key and records the result.
-No model is involved — the exit code of the test runner is the verdict.
+You usually do not need this. Tests run automatically on every commit — commit
+your work and the run starts by itself. Use this to force a re-run without
+making a commit (a flaky test, or a container that was down).
 
-CONVENTION
-  A requirement's test is any test selected by the runner filter for its ID
-  token. The default runner is pytest: ` + "`pytest -k <ID_TOKEN> -v`" + `. Override
-  per-BP with --runner using a {id} placeholder, e.g.
-    --runner "go test -run {id} ./..."
+HOW A TEST IS FOUND
+  A requirement's test is the test whose NAME carries the requirement's id with
+  hyphens turned into underscores, so REQ-7QX4 is tested by, say,
+  ` + "`def test_REQ_7QX4_totals()`" + ` or ` + "`func TestREQ_7QX4_Totals(t *testing.T)`" + `.
+  The verdict comes from the test report, never from an exit code: a runner
+  that matched no test reports "no test", not a pass.
 
-CONFIG (process.toml)
-  A BP with more than one automation must say which automation's live-dev
-  container runs the tests — add a [testing] section to the BP's process.toml:
+WHERE IT RUNS
+  Inside the business process's live-dev container. A business process with
+  more than one automation must say which one, in its process.toml:
 
     [testing]
-    automation = "backend"            # required for multi-automation BPs
-    runner = "pytest -k {id} -v"      # optional per-BP runner default
+    automation = "backend"      # required when there is more than one
+    framework  = "go"           # or "pytest"
 
-  --deployment and --runner flags override the config when both are given.
+  A single requirement can override either with its own ` + "`automation`" + ` /
+  ` + "`runner`" + ` key in testable-requirements.toml.
+
+EXIT CODE
+  Non-zero when any requirement failed or was blocked, so this can gate a
+  script.
 
 EXAMPLES
-  bitswan-coding-agent requirements test                 # run every requirement
-  bitswan-coding-agent requirements test --id REQ-003    # run one requirement
-  bitswan-coding-agent requirements test --deployment backend-copy-dev1-shop-live-dev`,
+  bitswan-coding-agent requirements test
+  bitswan-coding-agent requirements test --id REQ-7QX4
+  bitswan-coding-agent requirements test --failed`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir, err := resolveRequirementsDir(reqBPFlag)
 		if err != nil {
 			return err
 		}
-		reqs, err := readRequirements(dir)
+		bp, copyName, err := bpAndCopy(dir)
 		if err != nil {
 			return err
 		}
-		if len(reqs) == 0 {
-			fmt.Println("No requirements found.")
-			return nil
-		}
 
-		// Select targets: one requirement (--id) or every non-proposed one.
-		var targets []*Requirement
+		var ids []string
 		if reqID != "" {
-			for i := range reqs {
-				if reqs[i].ID == reqID {
-					targets = append(targets, &reqs[i])
-				}
-			}
-			if len(targets) == 0 {
-				return fmt.Errorf("requirement %s not found", reqID)
-			}
-		} else {
-			for i := range reqs {
-				if reqs[i].Status == "proposed" {
-					continue // not accepted by a human yet
-				}
-				targets = append(targets, &reqs[i])
-			}
-			if len(targets) == 0 {
-				fmt.Println("No testable requirements (all proposed).")
-				return nil
-			}
+			ids = append(ids, reqID)
 		}
-
-		cfg, err := readTestingConfig(dir)
-		if err != nil {
-			return err
-		}
-		deploymentID, err := resolveLiveDevDeployment(reqTestDeployment, dir, cfg)
-		if err != nil {
+		if _, err := triggerTestRun(bp, copyName, ids, reqTestFailedOnly); err != nil {
 			return err
 		}
 
-		runner := reqTestRunner
-		if runner == "" {
-			runner = cfg.Runner
-		}
-		if runner == "" {
-			runner = "pytest -k {id} -v"
-		}
-
-		passed, failed := 0, 0
-		for _, r := range targets {
-			res, err := execInDeployment(deploymentID, testCommand(runner, r.ID))
+		deadline := time.Now().Add(time.Duration(reqTestWaitSeconds) * time.Second)
+		var state *reqTestState
+		for {
+			time.Sleep(2 * time.Second)
+			state, err = fetchTestState(bp, copyName)
 			if err != nil {
-				return fmt.Errorf("exec test for %s: %w", r.ID, err)
+				return err
 			}
-			if res.ExitCode == 0 {
-				r.Status = "pass"
-				passed++
-				fmt.Printf("PASS %s\n", r.ID)
-			} else {
-				r.Status = "fail"
-				failed++
-				fmt.Printf("FAIL %s (exit %d)\n", r.ID, res.ExitCode)
-				for _, line := range strings.Split(strings.TrimRight(res.Output, "\n"), "\n") {
-					fmt.Printf("     %s\n", line)
-				}
+			if state == nil || state.Status != "running" {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("tests still running after %ds; check `requirements list`",
+					reqTestWaitSeconds)
 			}
 		}
 
-		if err := writeRequirements(dir, reqs); err != nil {
-			return err
+		printTestState(state)
+		if state != nil && state.Error != "" {
+			return fmt.Errorf("test run failed: %s", state.Error)
 		}
-		fmt.Printf("\n%d passed, %d failed (in %s)\n", passed, failed, deploymentID)
+		if state != nil {
+			if n := state.Counts["fail"] + state.Counts["blocked"]; n > 0 {
+				return fmt.Errorf("%d requirement(s) not passing", n)
+			}
+		}
 		return nil
 	},
 }
@@ -681,7 +711,7 @@ var reqOutputJSONCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		reqs, err := readRequirements(dir)
+		reqs, _, err := readRequirementsWithVerdicts(dir)
 		if err != nil {
 			return err
 		}
@@ -695,20 +725,22 @@ var reqOutputJSONCmd = &cobra.Command{
 }
 
 var (
-	reqBPFlag    string
-	reqText      string
-	reqStatus    string
-	reqAddStatus string
-	reqID        string
-	reqParent    string
+	reqBPFlag  string
+	reqText    string
+	reqID      string
+	reqParent  string
+	reqPropose bool
 
-	reqTestDeployment string
-	reqTestRunner     string
+	reqTestFailedOnly  bool
+	reqTestWaitSeconds int
 )
 
 func init() {
 	requirementsCmd.PersistentFlags().StringVar(&reqBPFlag, "business-process", "", "Business process path (auto-detected from current directory if not set)")
 	requirementsCmd.PersistentFlags().StringVar(&reqBPFlag, "bp", "", "Business process path (shorthand)")
+	// Every requirement command now reads verdicts from gitops, so all of them
+	// need to know which copy they are in — not just `test`.
+	requirementsCmd.PersistentFlags().StringVar(&copyFlag, "copy", "", "Copy name (auto-detected from $PWD if omitted)")
 
 	requirementsCmd.AddCommand(reqListCmd)
 	requirementsCmd.AddCommand(reqAddCmd)
@@ -720,14 +752,12 @@ func init() {
 
 	reqAddCmd.Flags().StringVar(&reqText, "text", "", "Requirement description")
 	reqAddCmd.Flags().StringVar(&reqParent, "parent", "", "Parent requirement ID (for creating sub-requirements)")
-	reqAddCmd.Flags().StringVar(&reqAddStatus, "status", "pending", "Initial status (pending|proposed)")
+	reqAddCmd.Flags().BoolVar(&reqPropose, "proposed", false, "Propose this requirement for the user to accept, instead of adding it outright")
 	reqUpdateCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID")
-	reqUpdateCmd.Flags().StringVar(&reqStatus, "status", "", "New status (pass|fail|pending|retest|proposed)")
 	reqUpdateCmd.Flags().StringVar(&reqText, "text", "", "Updated description")
 	reqRemoveCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID to remove")
 
-	reqTestCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID to test (default: all non-proposed)")
-	reqTestCmd.Flags().StringVar(&reqTestDeployment, "deployment", "", "Live-dev deployment ID to exec in (default: auto-detect from copy + BP)")
-	reqTestCmd.Flags().StringVar(&reqTestRunner, "runner", "", "Test runner template; {id} is replaced with the requirement's ID token (default: \"pytest -k {id} -v\")")
-	reqTestCmd.Flags().StringVar(&copyFlag, "copy", "", "Copy name (auto-detected from $PWD if omitted)")
+	reqTestCmd.Flags().StringVar(&reqID, "id", "", "Requirement ID to test (default: all of them)")
+	reqTestCmd.Flags().BoolVar(&reqTestFailedOnly, "failed", false, "Re-run only what failed last time")
+	reqTestCmd.Flags().IntVar(&reqTestWaitSeconds, "wait", 900, "Seconds to wait for the run to finish")
 }

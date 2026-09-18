@@ -21,7 +21,7 @@ configured in each clone to that business process's repo on the workspace git
 server.
 
 COMMANDS
-  requirements  — Manage & run testable requirements (list, add, test, update)
+  requirements  — The testable-requirements contract; verdicts come from runs
   deployments   — Manage live-dev deployments (list, start, exec, logs)
   browser       — Open a live-dev app in a real browser as a test user you invent
 
@@ -34,12 +34,11 @@ TYPICAL WORKFLOW
 
   2. Check requirements:  bitswan-coding-agent requirements list
 
-  3. For any human-written requirement (REQ-xxx) that has no sub-requirements,
+  3. For any human-written requirement (REQ-xxxx) that has no sub-requirements,
      propose sub-requirements that break it down into testable pieces:
-       bitswan-coding-agent requirements add --text "..." --parent REQ-001 --status proposed
-     These get AI-xxx IDs. Do NOT propose sub-requirements for AI-xxx
-     requirements (to avoid infinite recursion). The user will review your
-     proposals and either accept them (change to pending) or delete them.
+       bitswan-coding-agent requirements add --text "..." --parent REQ-7QX4 --proposed
+     These get AI-xxxx IDs and wait for the user to accept them. Do NOT propose
+     sub-requirements for AI-xxxx requirements (to avoid infinite recursion).
 
   4. Work on a single requirement at a time. Get the next one:
        bitswan-coding-agent requirements next
@@ -54,35 +53,52 @@ TYPICAL WORKFLOW
      renders one thing for a plain member and another for an admin can only be
      checked by being both.
 
-  7. Write a deterministic test for each requirement and run it. Name the test
-     after the requirement's ID with hyphens turned into underscores, so a test
-     for REQ-003 matches the token REQ_003 (e.g. def test_REQ_003_...). Then:
-       bitswan-coding-agent requirements test --id REQ-003
-     This execs the test INSIDE the BP's live-dev container and records pass or
-     fail back into testable-requirements.toml for you — no manual update needed.
-     Omit --id to run every requirement. The default runner is pytest
-     (pytest -k REQ_003 -v); for other frameworks pass a template with {id}, e.g.
-       bitswan-coding-agent requirements test --runner "go test -run {id} ./..."
-     If the BP has MORE THAN ONE automation, declare which one runs the tests
-     (and optionally pin the per-BP runner) in the BP's process.toml:
+  7. Write a deterministic test for each requirement. Name the test after the
+     requirement's ID with hyphens turned into underscores, so REQ-7QX4 is
+     tested by a test whose name contains REQ_7QX4:
+       def test_REQ_7QX4_totals_include_vat():        # pytest
+       func TestREQ_7QX4_TotalsIncludeVAT(t *testing.T)  # go
+
+     Where the test file must live: INSIDE the automation directory (the one
+     with automation.toml). Only that directory is mounted into the container
+     the test runs in — a test elsewhere in the business process cannot be
+     found. That mount is READ-ONLY, so a test must not write next to itself;
+     write to /tmp.
+
+     If the business process has MORE THAN ONE automation, say which one runs
+     the tests, and which framework, in the BP's process.toml:
        [testing]
-       automation = "backend"
-       runner = "pytest -k {id} -v"
+       automation = "backend"     # required when there is more than one
+       framework  = "go"          # or "pytest"
+     A single requirement can override either with its own automation/runner
+     key in testable-requirements.toml.
 
-  8. For anything that genuinely cannot be tested mechanically, set the status by
-     hand instead:
-       bitswan-coding-agent requirements update --id REQ-ID --status pass
+  8. Commit. THE TESTS RUN THEMSELVES — every commit starts a run, the way CI
+     does; you do not have to trigger one:
+       git add -A && git commit -m "implement REQ-7QX4"
+     Then read the verdicts:
+       bitswan-coding-agent requirements list
+     and fix whatever did not pass. To force a re-run without committing
+     (a flaky test, a container that was down):
+       bitswan-coding-agent requirements test --failed
 
-     Statuses:
-       pending   — needs work
-       pass      — automated test passes
-       fail      — automated test fails
-       retest    — passed but manual testing found it lacking; write a new,
-                   harder/different test
-       proposed  — AI-suggested requirement awaiting human review
+     YOU CANNOT SET A VERDICT. There is no "requirements update --status": a
+     verdict is produced by running the test and by nothing else, and it comes
+     from the test report rather than an exit code — a runner that matched no
+     test reports "no test", never a pass. If a requirement genuinely cannot be
+     tested mechanically, say so to the user and leave it untested rather than
+     writing a test that always passes.
 
-  9. Commit when ready:
-       git add -A && git commit -m "implement feature X"
+     Verdicts:
+       pass     — a test carrying this ID ran and passed
+       fail     — it ran and failed (or the suite did not build)
+       blocked  — a parent requirement is failing, so this was not run. Fix the
+                  parent first: a parent is a precondition for its children.
+       no_test  — no test carries this ID yet
+       queued / running — the current run has not reached it
+
+     A requirement's verdict belongs to the code that was on disk when it ran.
+     Change the code and it goes stale until the next run.
 
 DIRECTORY STRUCTURE
 

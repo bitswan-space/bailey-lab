@@ -1082,7 +1082,7 @@ async def refresh_one_copy(name: str) -> list[dict]:
 
 
 class SyncCopyResponse(BaseModel):
-    status: str  # "success" | "needs_rebase"
+    status: str  # "success" | "needs_rebase" | "blocked_by_tests"
     method: str | None = None  # "fast-forward" when synced server-side
     message: str
     # Task id of the dev-stage redeploy spawned after a successful sync, so the
@@ -1288,6 +1288,64 @@ async def _tag_deploy(bp: str, deployer: str | None) -> None:
     request_workspace_mirror_push("publish", deployer)
 
 
+async def _tests_gate_for(copy: str, bp: str) -> dict:
+    """Whether this copy's BP may publish, and why not when it may not.
+
+    THE GATE IS ON THE COPY, on purpose. This is the boundary where a copy's
+    work becomes deployable: main only ever fast-forwards to a commit that
+    passed here, so every later promote (dev→staging→production) inherits a
+    verdict rather than needing one of its own. Gating the promote instead
+    would mean mapping a commit back to whichever copy tested it, which stops
+    being answerable as soon as that copy moves on — a gate that blocks
+    legitimate promotes is worse than no gate.
+
+    When there is no usable verdict (never run, or the code moved since the
+    last one) a run is started here, so pressing Sync & Deploy is what gets
+    the tests going and the user is never stuck waiting for something nobody
+    scheduled.
+    """
+    from app.test_runner import current_state, spawn_run
+    from app.test_run_manager import test_run_manager
+
+    state = await current_state(copy, bp)
+    if state is None or state["stale"]:
+        if not test_run_manager.is_running(copy, bp):
+            try:
+                spawn_run(copy, bp)
+            except Exception as e:  # noqa: BLE001 — never fail a sync on this
+                logger.warning("could not start tests for %s/%s: %s", copy, bp, e)
+        return {
+            "green": False,
+            "reason": (
+                f"Tests for '{bp}' are running against the code you just "
+                "committed. Deploy will be available once they pass."
+            ),
+        }
+    if state["status"] == "running":
+        pending = state["counts"]["queued"] + state["counts"]["running"]
+        return {
+            "green": False,
+            "reason": (
+                f"{pending} test(s) for '{bp}' are still running. Deploy will "
+                "be available once they pass."
+            ),
+        }
+    if state["green"]:
+        return {"green": True, "reason": ""}
+
+    counts = state["counts"]
+    detail = f"{counts['fail']} test(s) failed"
+    if counts["blocked"]:
+        detail += f" and {counts['blocked']} could not run"
+    return {
+        "green": False,
+        "reason": (
+            f"{detail} for '{bp}'. All tests must pass before it can be "
+            "deployed — see Requirements & tests."
+        ),
+    }
+
+
 async def _sync_one_bp(
     name: str, copy_path: str, bp: str, deployer: str | None
 ) -> dict:
@@ -1308,6 +1366,20 @@ async def _sync_one_bp(
     await _wip_commit(
         clone, deployer, ["-A"], bp, f"Sync: commit work in progress ({bp})"
     )
+
+    # Gate AFTER the work-in-progress commit, so pressing Sync & Deploy always
+    # captures what the user has on disk and tests exactly that — and never
+    # publishes it until those tests pass.
+    gate = await _tests_gate_for(name, bp)
+    if not gate["green"]:
+        return {
+            "bp": bp,
+            "status": "blocked_by_tests",
+            "method": None,
+            "deploy_task_id": None,
+            "message": gate["reason"],
+        }
+
     await fetch_main(clone, bp)
 
     ahead_out, _, _ = await call_git_command_with_output(
@@ -1429,6 +1501,7 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
         results = [await _sync_one_bp(name, copy_path, b, deployer) for b in clones]
 
     needs = [r for r in results if r["status"] == "needs_rebase"]
+    blocked = [r for r in results if r["status"] == "blocked_by_tests"]
     synced = [r for r in results if r["method"] == "fast-forward"]
     first_task = next(
         (r["deploy_task_id"] for r in results if r["deploy_task_id"]), None
@@ -1445,6 +1518,16 @@ async def sync_copy(name: str, body: SyncCopyRequest | None = None):
                 f"{'; '.join(parts)}. Hand off to the coding agent to rebase "
                 "and resolve."
             ),
+            deploy_task_id=first_task,
+            bp_results=results,
+        )
+    if blocked:
+        # Nothing was published for these BPs — their tests have not passed for
+        # the commit that was just made. The message is what the Deploy tab
+        # shows, so it says what to do rather than only what went wrong.
+        return SyncCopyResponse(
+            status="blocked_by_tests",
+            message=" ".join(r["message"] for r in blocked),
             deploy_task_id=first_task,
             bp_results=results,
         )

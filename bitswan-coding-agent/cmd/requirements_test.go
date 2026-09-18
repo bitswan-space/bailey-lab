@@ -1,133 +1,159 @@
 package cmd
 
 import (
-	"reflect"
+	"strings"
 	"testing"
 )
 
-// TestTestCommand pins the test-discovery convention the "Write tests" agent
-// flow and the requirements-test runner share: a requirement ID's hyphens
-// become underscores (so REQ-003 can name a test function), and {id} in the
-// runner template is replaced with that token. The result is always exec'd via
-// `sh -c` so arbitrary runner strings work.
-func TestTestCommand(t *testing.T) {
-	cases := []struct {
-		name   string
-		runner string
-		reqID  string
-		want   []string
-	}{
-		{
-			name:   "default pytest with id token",
-			runner: "pytest -k {id} -v",
-			reqID:  "REQ-003",
-			want:   []string{"sh", "-c", "pytest -k REQ_003 -v"},
-		},
-		{
-			name:   "AI-prefixed id",
-			runner: "pytest -k {id}",
-			reqID:  "AI-012",
-			want:   []string{"sh", "-c", "pytest -k AI_012"},
-		},
-		{
-			name:   "go runner template",
-			runner: "go test -run {id} ./...",
-			reqID:  "REQ-1",
-			want:   []string{"sh", "-c", "go test -run REQ_1 ./..."},
-		},
-		{
-			name:   "template without placeholder runs unchanged",
-			runner: "pytest",
-			reqID:  "REQ-9",
-			want:   []string{"sh", "-c", "pytest"},
-		},
+// The contract file is all this CLI owns now: running tests and producing
+// verdicts moved to gitops (and is tested there), so what is left to pin down
+// here is the file format, id minting, and how server verdicts are merged in.
+
+func TestParseDropsStatusAndKeepsTheContract(t *testing.T) {
+	reqs := parseRequirementsToml(`[[requirement]]
+id = "REQ-7QX4"
+parent = ""
+description = "totals include VAT"
+status = "pass"
+automation = "backend"
+
+[[requirement]]
+id = "AI-8ABC"
+parent = "REQ-7QX4"
+description = "proposed by the agent"
+origin = "proposed"
+`)
+	if len(reqs) != 2 {
+		t.Fatalf("expected 2 requirements, got %d", len(reqs))
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := testCommand(tc.runner, tc.reqID)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("testCommand(%q, %q) = %v; want %v", tc.runner, tc.reqID, got, tc.want)
-			}
-		})
+	// A stale `status` in the file must not become a verdict.
+	if reqs[0].Status != "" {
+		t.Errorf("status was read from the file: %q", reqs[0].Status)
+	}
+	if reqs[0].Automation != "backend" {
+		t.Errorf("automation = %q", reqs[0].Automation)
+	}
+	if reqs[1].Origin != "proposed" || reqs[1].Parent != "REQ-7QX4" {
+		t.Errorf("proposed child not parsed: %+v", reqs[1])
 	}
 }
 
-// TestLiveDevSuffix pins the deployment-ID suffix used to auto-resolve a BP's
-// per-copy live-dev container ({automation}-copy-{copy}-{bp}-live-dev).
-func TestLiveDevSuffix(t *testing.T) {
-	if got, want := liveDevSuffix("dev1", "shop"), "-copy-dev1-shop-live-dev"; got != want {
-		t.Errorf("liveDevSuffix = %q; want %q", got, want)
+func TestSerializeWritesNoStatus(t *testing.T) {
+	out := serializeRequirementsToml([]Requirement{
+		{ID: "REQ-7QX4", Description: "a", Status: "pass"},
+	})
+	if strings.Contains(out, "status") {
+		t.Errorf("serialized a verdict into the contract:\n%s", out)
+	}
+	if !strings.Contains(out, `id = "REQ-7QX4"`) {
+		t.Errorf("missing id:\n%s", out)
 	}
 }
 
-func TestParseTestingConfig(t *testing.T) {
-	cases := []struct {
-		name    string
-		content string
-		want    testingConfig
-	}{
-		{
-			name:    "no section",
-			content: "process-id = \"abc\"\n",
-			want:    testingConfig{},
-		},
-		{
-			name:    "automation and runner",
-			content: "process-id = \"abc\"\n\n[testing]\nautomation = \"backend\"\nrunner = \"go test -run {id} ./...\"\n",
-			want:    testingConfig{Automation: "backend", Runner: "go test -run {id} ./..."},
-		},
-		{
-			name:    "section ends at next table",
-			content: "[testing]\nautomation = \"backend\"\n\n[other]\nautomation = \"frontend\"\n",
-			want:    testingConfig{Automation: "backend"},
-		},
-		{
-			name:    "section at end of file without trailing newline",
-			content: "process-id = \"abc\"\n[testing]\nautomation = \"api\"",
-			want:    testingConfig{Automation: "api"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := parseTestingConfig(tc.content); got != tc.want {
-				t.Errorf("parseTestingConfig = %+v; want %+v", got, tc.want)
-			}
-		})
+func TestSerializeOmitsEmptyOptionalKeys(t *testing.T) {
+	out := serializeRequirementsToml([]Requirement{{ID: "REQ-7QX4"}})
+	for _, key := range []string{"origin", "automation", "runner"} {
+		if strings.Contains(out, key) {
+			t.Errorf("unset %s was written:\n%s", key, out)
+		}
 	}
 }
 
-// TestPickLiveDevDeployment pins the deployment-selection rules for
-// `requirements test`: an automation from [testing] selects exactly, a single
-// suffix match wins on its own, and anything ambiguous errors.
-func TestPickLiveDevDeployment(t *testing.T) {
-	multi := []string{
-		"backend-copy-dev1-shop-live-dev",
-		"frontend-copy-dev1-shop-live-dev",
-		"backend-copy-dev1-blog-live-dev",
+func TestRoundTrip(t *testing.T) {
+	in := []Requirement{
+		{ID: "REQ-7QX4", Description: "a", Automation: "backend"},
+		{ID: "AI-8ABC", Parent: "REQ-7QX4", Description: "b", Origin: "proposed"},
 	}
-	cases := []struct {
-		name       string
-		ids        []string
-		bp         string
-		automation string
-		want       string
-		wantErr    bool
-	}{
-		{name: "single match", ids: multi, bp: "blog", want: "backend-copy-dev1-blog-live-dev"},
-		{name: "multi-automation without config errors", ids: multi, bp: "shop", wantErr: true},
-		{name: "multi-automation with config", ids: multi, bp: "shop", automation: "frontend", want: "frontend-copy-dev1-shop-live-dev"},
-		{name: "config names missing automation", ids: multi, bp: "shop", automation: "worker", wantErr: true},
-		{name: "no match", ids: multi, bp: "wiki", wantErr: true},
+	out := parseRequirementsToml(serializeRequirementsToml(in))
+	if len(out) != len(in) {
+		t.Fatalf("round trip lost rows: %d -> %d", len(in), len(out))
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := pickLiveDevDeployment(tc.ids, "dev1", tc.bp, tc.automation)
-			if tc.wantErr != (err != nil) {
-				t.Fatalf("err = %v; wantErr = %v", err, tc.wantErr)
-			}
-			if got != tc.want {
-				t.Errorf("picked %q; want %q", got, tc.want)
-			}
-		})
+	for i := range in {
+		if out[i].ID != in[i].ID || out[i].Origin != in[i].Origin ||
+			out[i].Automation != in[i].Automation || out[i].Parent != in[i].Parent {
+			t.Errorf("row %d changed: %+v -> %+v", i, in[i], out[i])
+		}
+	}
+}
+
+func TestNextReqIDIsRandomSoCopiesDoNotCollide(t *testing.T) {
+	// The old max+1 scheme made two copies mint REQ-004 independently and
+	// fuse two different requirements when they merged.
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		id := nextReqID(nil, "REQ-")
+		if !strings.HasPrefix(id, "REQ-") || len(id) != 8 {
+			t.Fatalf("unexpected id shape: %q", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) < 40 {
+		t.Errorf("ids are not random enough: %d distinct out of 50", len(seen))
+	}
+}
+
+func TestNextReqIDAvoidsExistingIDs(t *testing.T) {
+	existing := []Requirement{}
+	for i := 0; i < 5; i++ {
+		existing = append(existing, Requirement{ID: nextReqID(existing, "REQ-")})
+	}
+	id := nextReqID(existing, "REQ-")
+	for _, r := range existing {
+		if r.ID == id {
+			t.Fatalf("minted an id that already exists: %s", id)
+		}
+	}
+}
+
+func TestApplyVerdictsFillsStatusFromTheServer(t *testing.T) {
+	reqs := []Requirement{{ID: "REQ-AAAA"}, {ID: "REQ-BBBB"}}
+	state := &reqTestState{Requirements: []reqTestResult{
+		{ID: "REQ-AAAA", Verdict: "pass"},
+	}}
+	out := applyVerdicts(reqs, state)
+	if out[0].Status != "pass" {
+		t.Errorf("verdict not applied: %q", out[0].Status)
+	}
+	// Nobody has judged REQ-BBBB — that is not the same as a test waiting to run.
+	if out[1].Status != "unknown" {
+		t.Errorf("unjudged requirement should be unknown, got %q", out[1].Status)
+	}
+}
+
+func TestApplyVerdictsWithNoServerStateIsNotFatal(t *testing.T) {
+	out := applyVerdicts([]Requirement{{ID: "REQ-AAAA"}}, nil)
+	if out[0].Status != "unknown" {
+		t.Errorf("expected unknown without server state, got %q", out[0].Status)
+	}
+}
+
+func TestNextNonPassingGoesDeepestFirst(t *testing.T) {
+	reqs := []Requirement{
+		{ID: "A", Status: "fail"},
+		{ID: "B", Parent: "A", Status: "fail"},
+		{ID: "C", Parent: "B", Status: "pass"},
+	}
+	next, path := dfsNextNonPassing(reqs)
+	if next == nil || next.ID != "B" {
+		t.Fatalf("expected the deepest non-passing requirement B, got %+v", next)
+	}
+	if len(path) != 2 || path[0].ID != "A" {
+		t.Errorf("unexpected path: %+v", path)
+	}
+}
+
+func TestTestStatePathEscapesItsArguments(t *testing.T) {
+	got := testStatePath("/run", "my bp", "my copy")
+	if !strings.Contains(got, "my%20bp") || !strings.Contains(got, "copy=my+copy") {
+		t.Errorf("path not escaped: %s", got)
+	}
+}
+
+func TestShortSHA(t *testing.T) {
+	if shortSHA("abcdef1234567") != "abcdef1" {
+		t.Errorf("unexpected short sha: %s", shortSHA("abcdef1234567"))
+	}
+	if shortSHA("abc") != "abc" {
+		t.Errorf("short input should pass through")
 	}
 }
