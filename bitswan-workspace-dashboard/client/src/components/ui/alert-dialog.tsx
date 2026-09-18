@@ -18,7 +18,16 @@ const AlertDialogOverlay = React.forwardRef<
     className={cn(
       // Transparent overlay — keeps Radix's outside-click + focus trap
       // without dimming the iframe. Matches the regular Dialog treatment.
-      "fixed inset-0 z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      //
+      // z-[1100]: an AlertDialog is a confirmation the user must resolve
+      // before doing anything else, so it must out-rank every other
+      // hand-rolled overlay in the app, not just the default Dialog (z-50).
+      // InspectModal (z-[60]) and the Supply Chain / Firewall panels
+      // (z-[1000]) all open an AlertDialog (e.g. TakeVersionDialog,
+      // RevertDevDialog) from inside themselves — at z-50 the confirmation
+      // rendered, was hit-testable, and was still invisible underneath
+      // them, which read as the button silently doing nothing.
+      "fixed inset-0 z-[1100] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
       className
     )}
     {...props}
@@ -36,7 +45,8 @@ const AlertDialogContent = React.forwardRef<
     <AlertDialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
+        // z-[1100]: matches AlertDialogOverlay above — see the comment there.
+        "fixed left-[50%] top-[50%] z-[1100] grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-left-1/2 data-[state=closed]:slide-out-to-top-[48%] data-[state=open]:slide-in-from-left-1/2 data-[state=open]:slide-in-from-top-[48%] sm:rounded-lg",
         className
       )}
       {...props}
