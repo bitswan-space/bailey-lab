@@ -9,7 +9,7 @@ gets them on the connection it already holds.
 
 from fastapi import APIRouter, HTTPException
 
-from app.task_queue import task_queue
+from app.task_queue import current_requester, task_queue
 from app.utils import daemon_user_role
 
 router = APIRouter(tags=["tasks"])
@@ -23,12 +23,13 @@ async def list_tasks() -> dict:
 
 
 @router.post("/tasks/clear")
-async def clear_tasks(by: str | None = None) -> dict:
+async def clear_tasks() -> dict:
     """Cancel every still-queued task. Admin-only: the role is resolved from the
     daemon's authoritative store (never client-asserted), and we fail closed.
     The currently-running task is left to finish — a git operation can't be
     safely killed mid-write."""
-    if daemon_user_role(by or "") != "admin":
+    actor = (current_requester.get() or "").strip()
+    if daemon_user_role(actor) != "admin":
         raise HTTPException(status_code=403, detail="clearing the queue is admin-only")
     cancelled = task_queue.clear()
     return {"cancelled": cancelled}

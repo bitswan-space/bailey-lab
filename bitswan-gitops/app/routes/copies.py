@@ -2755,7 +2755,7 @@ async def open_audit(body: OpenAuditRequest):
     bp = body.bp
     service = get_automation_service()
     owner = (current_requester.get() or "").strip()
-    role = service._role_of(owner)
+    role = service._role_of()
     if role not in ("admin", "auditor"):
         raise HTTPException(
             status_code=403,
