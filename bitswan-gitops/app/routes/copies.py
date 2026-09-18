@@ -1143,7 +1143,7 @@ async def _staged_change_summary(clone_path: str) -> str:
         if len(parts) < 2:
             continue
         verb = verbs.get(parts[0][0], "edit")
-        groups.setdefault(verb, []).append(os.path.basename(parts[-1]))
+        groups.setdefault(verb, []).append(parts[-1])
         total += 1
     if total == 0:
         return ""

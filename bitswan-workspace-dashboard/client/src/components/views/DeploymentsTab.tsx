@@ -951,6 +951,39 @@ const BACKUP_EVENT_LABEL: Record<string, string> = {
   retention: 'Retention changed',
 };
 
+const HISTORY_CHANGES_PREVIEW = 3;
+
+function HistoryChanges({ entry }: { entry: BpHistoryEntry }) {
+  const [expanded, setExpanded] = useState(false);
+  const changes = entry.changes ?? [];
+  if (changes.length === 0) return null;
+  const shown = expanded ? changes : changes.slice(0, HISTORY_CHANGES_PREVIEW);
+  const hidden = changes.length - shown.length;
+  return (
+    <ul className="flex flex-col gap-0.5 text-[12px] text-muted-foreground">
+      {shown.map((c) => (
+        <li key={c.sha} className="flex items-baseline gap-2" title={`${c.author} · ${c.at}`}>
+          <span className="shrink-0 font-mono text-[11px]">{c.sha.slice(0, 7)}</span>
+          <span className="min-w-0 truncate text-foreground/80">{c.subject}</span>
+        </li>
+      ))}
+      {(hidden > 0 || entry.changes_truncated || expanded) && changes.length > HISTORY_CHANGES_PREVIEW && (
+        <li>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="text-[12px] font-medium text-primary hover:underline"
+          >
+            {expanded
+              ? 'Show fewer'
+              : `… ${hidden} more commit${hidden === 1 ? '' : 's'}${entry.changes_truncated ? ' (and older ones not listed)' : ''}`}
+          </button>
+        </li>
+      )}
+    </ul>
+  );
+}
+
 function entryTone(e: BpHistoryEntry, isCurrent: boolean) {
   if (e.source === 'firewall')
     return { dot: 'bg-violet-500', label: 'Firewall change', cls: 'bg-violet-100 text-violet-700' };
@@ -1731,6 +1764,15 @@ function DeploymentCard({
           )}
         </div>
       </div>
+      {entry.summary && (
+        <div
+          className="text-[13px] font-medium leading-snug text-foreground"
+          title={entry.subject ?? undefined}
+        >
+          {entry.summary}
+        </div>
+      )}
+      <HistoryChanges entry={entry} />
       <div className="flex flex-wrap items-center gap-3.5 text-[12px] text-muted-foreground">
         {entry.deployed_by && (
           <span className="inline-flex items-center gap-1.5">

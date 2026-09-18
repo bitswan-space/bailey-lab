@@ -1995,6 +1995,151 @@ class AutomationService:
             released.insert(0, csha)
         rec["released_shas"] = released[: self.RELEASED_SHAS_KEPT]
 
+    HISTORY_STAGE_LABEL = {"dev": "Development", "staging": "Staging"}
+    FIREWALL_SUMMARY_HOSTS = 3
+
+    @classmethod
+    def _firewall_change_summary(cls, before: tuple | None, after: tuple) -> str:
+        prev = dict(before or ())
+        cur = dict(after)
+        allowed = sorted(
+            h for h, st in cur.items() if st == "allowed" and prev.get(h) != "allowed"
+        )
+        denied = sorted(
+            h for h, st in cur.items() if st == "denied" and prev.get(h) != "denied"
+        )
+        removed = sorted(h for h in prev if h not in cur)
+
+        def hosts(names: list[str]) -> str:
+            shown = names[: cls.FIREWALL_SUMMARY_HOSTS]
+            extra = len(names) - len(shown)
+            return ", ".join(shown) + (f" (+{extra} more)" if extra > 0 else "")
+
+        parts = []
+        if allowed:
+            parts.append(f"allowed {hosts(allowed)}")
+        if denied:
+            parts.append(f"denied {hosts(denied)}")
+        if removed:
+            parts.append(f"removed {hosts(removed)}")
+        return "; ".join(parts) or "rules changed"
+
+    async def _source_subjects(self, bp: str, shas: list[str]) -> dict[str, str]:
+        if not shas:
+            return {}
+        try:
+            bare = bp_bare_repo_path(bp)
+        except ValueError:
+            return {}
+        if not os.path.isdir(bare):
+            return {}
+        out, _, rc = await call_git_command_with_output(
+            "git",
+            "-C",
+            bare,
+            "log",
+            "--no-walk=unsorted",
+            "--format=%H%x1f%s",
+            *shas,
+        )
+        subjects: dict[str, str] = {}
+        if rc != 0:
+            return subjects
+        for line in out.splitlines():
+            sha, _, subject = line.partition("\x1f")
+            if sha and subject:
+                subjects[sha] = subject
+        return subjects
+
+    HISTORY_CHANGES_KEPT = 50
+
+    async def _source_commits(
+        self, bp: str, base: str | None, tip: str
+    ) -> list[dict] | None:
+        try:
+            bare = bp_bare_repo_path(bp)
+        except ValueError:
+            return None
+        if not os.path.isdir(bare):
+            return None
+        fmt = "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%s"
+        spec = f"{base}..{tip}" if base and base != tip else tip
+        out, _, rc = await call_git_command_with_output(
+            "git", "-C", bare, "log", f"-{self.HISTORY_CHANGES_KEPT + 1}", fmt, spec
+        )
+        if rc != 0 or not out.strip():
+            if spec == tip:
+                return None
+            out, _, rc = await call_git_command_with_output(
+                "git", "-C", bare, "log", "-1", fmt, tip
+            )
+            if rc != 0 or not out.strip():
+                return None
+        rows: list[dict] = []
+        for line in out.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 5:
+                continue
+            sha, name, email, at, subject = parts
+            if subject.endswith(f" ({bp})"):
+                subject = subject[: -len(f" ({bp})")]
+            rows.append(
+                {"sha": sha, "author": email or name, "at": at, "subject": subject}
+            )
+        return rows
+
+    async def _describe_history(self, bp: str, entries: list[dict]) -> None:
+        previous_version: str | None = None
+        for e in reversed(entries):
+            kind = e.get("source")
+            if kind in ("firewall", "backup", "secret"):
+                e["changes"] = []
+                continue
+            src = e.get("source_commit")
+            if not src:
+                e["changes"] = []
+                continue
+            rows = await self._source_commits(bp, previous_version, src)
+            truncated = rows is not None and len(rows) > self.HISTORY_CHANGES_KEPT
+            if truncated:
+                rows = rows[: self.HISTORY_CHANGES_KEPT]
+            e["changes"] = rows or []
+            e["changes_truncated"] = truncated
+            e["since"] = previous_version
+            previous_version = src
+
+        for e in entries:
+            kind = e.get("source")
+            changes = e.get("changes") or []
+            e["source_subject"] = changes[0]["subject"] if changes else None
+            if kind == "firewall":
+                fw = e.get("firewall") or {}
+                realm = fw.get("realm") or ""
+                e["summary"] = (
+                    f"Firewall ({realm}): {fw.get('summary') or 'rules changed'}"
+                )
+            elif kind == "backup":
+                bk = e.get("backup") or {}
+                e["summary"] = bk.get("detail") or bk.get("summary") or "Backup event"
+            elif kind == "secret":
+                realm = (e.get("secret") or {}).get("realm") or ""
+                e["summary"] = (
+                    f"Secrets changed ({realm})" if realm else "Secrets changed"
+                )
+            else:
+                short = (e.get("source_commit") or "")[:8]
+                if kind == "rollback":
+                    head = f"Rolled back to {short}"
+                elif kind in self.HISTORY_STAGE_LABEL:
+                    head = f"Promoted from {self.HISTORY_STAGE_LABEL[kind]}"
+                else:
+                    head = f"Deployed {short}"
+                count = len(changes) + (1 if e.get("changes_truncated") else 0)
+                if kind != "rollback" and count > 1:
+                    more = "+" if e.get("changes_truncated") else ""
+                    head += f" · {len(changes)}{more} commits"
+                e["summary"] = head
+
     async def bp_history(self, bp: str, stage: str, limit: int = 200) -> dict:
         """Deployment + firewall history for one BP stage, derived from the GIT
         LOG of bitswan.yaml (no history is stored in the file). Two interleaved
@@ -2100,6 +2245,7 @@ class AutomationService:
                         "source_commit": src,  # the deployed source version
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": status,
                         "source": source,
                         "members": members,
@@ -2140,12 +2286,15 @@ class AutomationService:
                         "source_commit": None,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "firewall",
                         "source": "firewall",
                         "members": {},
                         "firewall": {
                             "realm": realm,
-                            "summary": subject,
+                            "summary": self._firewall_change_summary(
+                                prev_fw_key, fw_key
+                            ),
                             "allowed": sum(
                                 1
                                 for r in fw_rules.values()
@@ -2183,6 +2332,7 @@ class AutomationService:
                         "source_commit": None,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "backup",
                         "source": "backup",
                         "members": {},
@@ -2216,6 +2366,7 @@ class AutomationService:
                         "source_commit": src,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "secret",
                         "source": "secret",
                         "members": members,
@@ -2224,6 +2375,7 @@ class AutomationService:
                 )
             prev_sec_key = sec_key
         entries.reverse()  # newest-first
+        await self._describe_history(bp, entries)
         # The current deployment is the newest APPLIED state. On dev/staging a
         # secret change applies immediately (it redeploys the single-slot
         # members), so it counts. On PRODUCTION a secret change is PENDING — it
