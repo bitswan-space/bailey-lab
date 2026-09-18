@@ -5,36 +5,38 @@ import { isValidBpId, isValidCopyName } from './workspace.js';
 
 /**
  * Per-BP "testable requirements" stored in the BP directory as
- * `testable-requirements.toml`. Schema is intentionally identical to the
- * one used by `bitswan-coding-agent requirements …` (see
- * `bitswan-coding-agent/cmd/requirements.go`) so the dashboard, the
- * editor, and the agent CLI can all write to the same file without
- * losing data.
+ * `testable-requirements.toml`. Schema is intentionally identical to the one
+ * used by `bitswan-coding-agent requirements …` (see
+ * `bitswan-coding-agent/cmd/requirements.go`) so the dashboard, the editor and
+ * the agent CLI can all write the same file without losing data.
+ *
+ * The file is the CONTRACT ONLY. It carries no pass/fail state: verdicts are
+ * produced by actually running the tests, are held by gitops for the current
+ * commit, and reach the dashboard over the `test_state` SSE event. A `status`
+ * key left behind by an older version of the file is ignored on read and
+ * disappears the next time anything writes it — nothing migrates it, because a
+ * hand-editable verdict is precisely what this design removes.
  */
 
-export type ReqStatus = 'pending' | 'pass' | 'fail' | 'retest' | 'proposed';
-
-const VALID_STATUSES: readonly ReqStatus[] = [
-  'pending',
-  'pass',
-  'fail',
-  'retest',
-  'proposed',
-];
-
-export function isReqStatus(value: unknown): value is ReqStatus {
-  return (
-    typeof value === 'string' && (VALID_STATUSES as readonly string[]).includes(value)
-  );
-}
+/** Where a requirement came from. Empty = a human wrote it. */
+export type ReqOrigin = '' | 'proposed';
 
 export interface Requirement {
-  /** REQ-### for human-authored, AI-### for AI-proposed. */
+  /** REQ-#### for human-authored, AI-#### for agent-proposed. */
   id: string;
   description: string;
-  status: ReqStatus;
   /** Parent id (`""` = root). */
   parent: string;
+  /**
+   * `proposed` while an agent suggestion is waiting for a human to accept it.
+   * This is contract data, not a verdict: it says where the requirement came
+   * from, not whether it holds. Keeping it separate from the id is what lets
+   * acceptance leave the id alone, so tests naming it keep working.
+   */
+  origin: ReqOrigin;
+  /** Optional per-requirement override of the BP's `[testing]` defaults. */
+  automation: string;
+  runner: string;
 }
 
 /** A requirement annotated with whether a matching test exists in the BP. */
@@ -43,6 +45,14 @@ export interface RequirementWithTest extends Requirement {
 }
 
 const REQUIREMENTS_FILENAME = 'testable-requirements.toml';
+
+/**
+ * Requirement ids are `REQ-####` / `AI-####` style. Checked before an id is
+ * handed to gitops, which interpolates it into a shell command.
+ */
+export function isSafeRequirementId(id: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(id);
+}
 
 /**
  * Copy-scoped path resolution. We deliberately don't read main-repo
@@ -66,16 +76,24 @@ function resolveFilePath(opts: {
 interface RawRequirement {
   id?: unknown;
   description?: unknown;
-  status?: unknown;
   parent?: unknown;
+  origin?: unknown;
+  automation?: unknown;
+  runner?: unknown;
 }
 
 function normaliseRequirement(raw: RawRequirement): Requirement | null {
   if (typeof raw.id !== 'string' || raw.id === '') return null;
-  const description = typeof raw.description === 'string' ? raw.description : '';
-  const parent = typeof raw.parent === 'string' ? raw.parent : '';
-  const status: ReqStatus = isReqStatus(raw.status) ? raw.status : 'pending';
-  return { id: raw.id, description, status, parent };
+  const str = (value: unknown): string => (typeof value === 'string' ? value : '');
+  // NOTE: `status` is deliberately not read — see the module comment.
+  return {
+    id: raw.id,
+    description: str(raw.description),
+    parent: str(raw.parent),
+    origin: raw.origin === 'proposed' ? 'proposed' : '',
+    automation: str(raw.automation),
+    runner: str(raw.runner),
+  };
 }
 
 /**
@@ -201,7 +219,11 @@ export async function findTestedRequirementIds(opts: {
         continue;
       }
       for (const [token, id] of tokens) {
-        if (!found.has(id) && content.includes(token)) found.add(id);
+        // Anchored on the right, exactly like gitops' verdict matcher: without
+        // it a test for REQ_1000 would make REQ_100 look tested.
+        if (!found.has(id) && new RegExp(`${token}(?![A-Za-z0-9])`).test(content)) {
+          found.add(id);
+        }
       }
     }
   };
@@ -236,14 +258,16 @@ async function writeRequirements(
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   // @iarna/toml stringifies an object with a `requirement` array of objects
   // into the `[[requirement]]` array-of-tables format the agent CLI expects.
-  // Order keys to match the CLI's serialiser (id, parent, description, status)
-  // for cleaner diffs when both write the file.
+  // Order keys to match the CLI's serialiser (id, parent, description, then
+  // the optional keys) for cleaner diffs when both write the file.
   const payload = {
     requirement: reqs.map((r) => ({
       id: r.id,
       parent: r.parent,
       description: r.description,
-      status: r.status,
+      ...(r.origin ? { origin: r.origin } : {}),
+      ...(r.automation ? { automation: r.automation } : {}),
+      ...(r.runner ? { runner: r.runner } : {}),
     })),
   };
   const tmp = `${filePath}.tmp`;
@@ -251,21 +275,30 @@ async function writeRequirements(
   await fs.rename(tmp, filePath);
 }
 
+// Crockford base32 minus the letters it excludes (I, L, O, U): no pair a human
+// can confuse when reading an id out of a test name.
+const ID_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+
 /**
- * Generate the next `REQ-NNN` / `AI-NNN` id. Picks the global max numeric
- * suffix across both prefixes and increments — same rule as the agent
- * CLI's `nextReqID` in `requirements.go:176`.
+ * Mint an id no other copy can mint at the same time.
+ *
+ * This used to be `max(numeric suffix) + 1`, which is deterministic and
+ * therefore collides by construction: two copies of the same BP both mint
+ * `REQ-004`, and merging them silently fuses two different requirements.
+ * A random suffix makes ids independent of each other's history. Matches
+ * `nextReqID` in the agent CLI and `next_requirement_id` in gitops.
  */
 function nextId(reqs: readonly Requirement[], prefix: 'REQ-' | 'AI-'): string {
-  let max = 0;
-  for (const r of reqs) {
-    const m = r.id.match(/(\d+)$/);
-    if (!m) continue;
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > max) max = n;
+  const taken = new Set(reqs.map((r) => r.id));
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    let suffix = '';
+    for (let i = 0; i < 4; i += 1) {
+      suffix += ID_ALPHABET[Math.floor(Math.random() * ID_ALPHABET.length)];
+    }
+    const candidate = `${prefix}${suffix}`;
+    if (!taken.has(candidate)) return candidate;
   }
-  const next = (max + 1).toString().padStart(3, '0');
-  return `${prefix}${next}`;
+  throw new Error('could not mint a unique requirement id');
 }
 
 export async function addRequirement(opts: {
@@ -275,16 +308,18 @@ export async function addRequirement(opts: {
   /** May be empty — the dashboard creates a blank row and edits inline. */
   text: string;
   parent?: string;
-  status?: ReqStatus;
+  /** An agent suggestion awaiting acceptance, rather than a human's own. */
+  proposed?: boolean;
 }): Promise<Requirement> {
   const reqs = await listRequirements(opts);
-  const status: ReqStatus = opts.status && isReqStatus(opts.status) ? opts.status : 'pending';
-  const prefix = status === 'proposed' ? 'AI-' : 'REQ-';
+  const origin: ReqOrigin = opts.proposed ? 'proposed' : '';
   const created: Requirement = {
-    id: nextId(reqs, prefix),
+    id: nextId(reqs, origin === 'proposed' ? 'AI-' : 'REQ-'),
     description: opts.text,
-    status,
     parent: opts.parent ?? '',
+    origin,
+    automation: '',
+    runner: '',
   };
   // Validate parent (if given) exists, to avoid orphans introduced via the API.
   if (created.parent && !reqs.some((r) => r.id === created.parent)) {
@@ -295,12 +330,18 @@ export async function addRequirement(opts: {
   return created;
 }
 
+/**
+ * Edit a requirement's text, or accept an agent's proposal.
+ *
+ * There is no status to set. Accepting clears `origin` and deliberately keeps
+ * the id, so a test already named after an `AI-` id keeps matching it.
+ */
 export async function updateRequirement(opts: {
   workspaceRoot: string;
   copy: string;
   bp: string;
   id: string;
-  patch: { description?: string; status?: ReqStatus };
+  patch: { description?: string; accept?: boolean };
 }): Promise<Requirement> {
   const reqs = await listRequirements(opts);
   const idx = reqs.findIndex((r) => r.id === opts.id);
@@ -308,13 +349,12 @@ export async function updateRequirement(opts: {
     throw new Error(`requirement '${opts.id}' not found`);
   }
   const cur = reqs[idx]!;
-  if (opts.patch.status !== undefined && !isReqStatus(opts.patch.status)) {
-    throw new Error('invalid status');
-  }
   const next: Requirement = {
     ...cur,
-    ...(opts.patch.description !== undefined ? { description: opts.patch.description } : {}),
-    ...(opts.patch.status !== undefined ? { status: opts.patch.status } : {}),
+    ...(opts.patch.description !== undefined
+      ? { description: opts.patch.description }
+      : {}),
+    ...(opts.patch.accept ? { origin: '' as ReqOrigin } : {}),
   };
   reqs[idx] = next;
   await writeRequirements(opts, reqs);

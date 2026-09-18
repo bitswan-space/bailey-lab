@@ -55,6 +55,10 @@ export class GitopsClient {
   // reload mid-deploy still shows the live deploy instead of nothing until
   // the next progress event happens to arrive.
   private readonly activeDeployTasks = new Map<string, unknown>();
+  // Latest requirement-test state per `<copy>:<bp>`. Keyed rather than kept as
+  // one "latest payload" because every BP has its own run — a single slot would
+  // let whichever BP reported last erase the others from a fresh page load.
+  private readonly testStates = new Map<string, unknown>();
   private readonly listeners = new Set<Listener>();
 
   constructor(baseUrl: string, secret: string) {
@@ -86,6 +90,11 @@ export class GitopsClient {
       // running without waiting for the next progress event.
       ...[...this.activeDeployTasks.values()].map(
         (d): [string, unknown] => ['deploy_progress', d],
+      ),
+      // One frame per BP that has test state, so a reload renders verdicts
+      // immediately instead of blank until the next run reports.
+      ...[...this.testStates.values()].map(
+        (s): [string, unknown] => ['test_state', s],
       ),
     ];
   }
@@ -877,6 +886,75 @@ export class GitopsClient {
       },
       body: JSON.stringify(input),
     });
+    let body: unknown = null;
+    try {
+      body = await r.json();
+    } catch {
+      // upstream may return non-JSON on error
+    }
+    return { ok: r.ok, status: r.status, body };
+  }
+
+  /**
+   * `GET /processes/{bp}/tests` — the BP's current requirement-test state, or
+   * `null` when nothing has run yet. gitops owns running the tests and holds
+   * the verdicts in memory for the current commit; the dashboard never
+   * computes one itself.
+   */
+  async requirementTests(
+    bp: string,
+    copy: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/processes/${encodeURIComponent(bp)}/tests` +
+        `?copy=${encodeURIComponent(copy)}`,
+      { headers: this.authHeaders() },
+    );
+    return this.readJson(r);
+  }
+
+  /**
+   * `POST /processes/{bp}/tests/run` — start a run and return immediately.
+   * A suite can take minutes, so the result arrives over the `test_state`
+   * event rather than on this response.
+   */
+  async runRequirementTests(
+    bp: string,
+    copy: string,
+    input: { ids?: string[]; failed_only?: boolean } = {},
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/processes/${encodeURIComponent(bp)}/tests/run` +
+        `?copy=${encodeURIComponent(copy)}`,
+      {
+        method: 'POST',
+        headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+    );
+    return this.readJson(r);
+  }
+
+  /**
+   * `GET /processes/{bp}/tests/gate` — whether the BP's tests permit a deploy,
+   * with a human-readable reason when they do not. The Deploy tab shows that
+   * reason verbatim.
+   */
+  async requirementTestsGate(
+    bp: string,
+    copy: string,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
+    const r = await fetch(
+      `${this.baseUrl}/processes/${encodeURIComponent(bp)}/tests/gate` +
+        `?copy=${encodeURIComponent(copy)}`,
+      { headers: this.authHeaders() },
+    );
+    return this.readJson(r);
+  }
+
+  private async readJson(
+    r: Response,
+  ): Promise<{ ok: boolean; status: number; body: unknown }> {
     let body: unknown = null;
     try {
       body = await r.json();
@@ -2054,6 +2132,11 @@ export class GitopsClient {
         } else {
           this.activeDeployTasks.set(t.task_id, ev.data);
         }
+      }
+    } else if (ev.event === 'test_state') {
+      const s = ev.data as { copy?: unknown; bp?: unknown };
+      if (s && typeof s === 'object' && typeof s.bp === 'string') {
+        this.testStates.set(`${s.copy ?? 'main'}:${s.bp}`, ev.data);
       }
     } else if (ev.event === 'task_queue') {
       // Fold per-task upserts into the cached snapshot. gitops sends

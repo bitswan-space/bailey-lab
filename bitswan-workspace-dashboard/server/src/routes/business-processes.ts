@@ -7,16 +7,11 @@ import {
 import {
   addRequirement,
   annotateHasTest,
-  isReqStatus,
+  isSafeRequirementId,
   listRequirements,
   removeRequirement,
   updateRequirement,
-  type ReqStatus,
 } from '../services/requirements.js';
-import {
-  isSafeRequirementId,
-  runRequirementTests,
-} from '../services/agent-exec.js';
 import { emailFromRequest } from '../lib/user.js';
 import { bufferedUploadLimit, tooLargeMessage } from '../services/upload-limits.js';
 import type { GitopsClient } from '../services/gitops.js';
@@ -289,44 +284,38 @@ export function registerBusinessProcessRoutes(
     }
   });
 
-  // Run the deterministic tests for one requirement (`{ id }`) or every
-  // non-proposed requirement (empty body). Drives
-  // `bitswan-coding-agent requirements test` inside the BP's live-dev
-  // container over SSH — the CLI writes pass/fail back to the TOML, which we
-  // re-read and return so the UI reflects the new statuses immediately.
+  // Start a test run. gitops owns running tests and their verdicts — it holds
+  // the docker socket, the live-dev deployment map and the copies checkout —
+  // so this is a hand-off, not an execution. It returns immediately: results
+  // arrive over the `test_state` SSE event, because a suite can take minutes.
   app.post<{
     Params: { id: string };
     Querystring: { copy?: string };
-    Body: { id?: string };
+    Body: { id?: string; failed_only?: boolean };
   }>('/api/business-processes/:id/requirements/run-tests', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     const bp = req.params.id;
     const copy = req.query.copy;
     const err = validateBpCopy(bp, copy);
     if (err) return reply.code(400).send({ error: err });
+    if (!gitops) {
+      return reply.code(503).send({ error: 'gitops not configured' });
+    }
     const reqId = req.body?.id;
     if (reqId !== undefined && (typeof reqId !== 'string' || !isSafeRequirementId(reqId))) {
       return reply.code(400).send({ error: 'invalid requirement id' });
     }
-    const email = await emailFromRequest(req, app.log);
-    if (!email) return reply.code(401).send({ error: 'not authenticated' });
     try {
-      const result = await runRequirementTests({
-        copy: copy!,
-        bp,
-        email,
-        ...(reqId ? { id: reqId } : {}),
+      const r = await gitops.runRequirementTests(bp, copy!, {
+        ...(reqId ? { ids: [reqId] } : {}),
+        ...(req.body?.failed_only ? { failed_only: true } : {}),
       });
-      // The CLI wrote the verdicts into the TOML; hand back the canonical list
-      // alongside the run output so the client doesn't need a second fetch.
-      const scope = { workspaceRoot, copy: copy!, bp };
-      const requirements = await annotateHasTest(scope, await listRequirements(scope));
-      return {
-        ok: result.exitCode === 0,
-        exitCode: result.exitCode,
-        output: result.output,
-        requirements,
-      };
+      if (!r.ok) {
+        return reply
+          .code(r.status >= 400 && r.status < 500 ? r.status : 502)
+          .send({ error: 'gitops error', status: r.status, body: r.body });
+      }
+      return r.body;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       app.log.warn({ err: e, id: bp }, 'requirements run-tests failed');
@@ -334,20 +323,57 @@ export function registerBusinessProcessRoutes(
     }
   });
 
+  // Current verdicts for a BP. The SSE feed is the live path; this exists so a
+  // freshly-opened tab can render before the next event arrives.
+  app.get<{
+    Params: { id: string };
+    Querystring: { copy?: string };
+  }>('/api/business-processes/:id/requirements/tests', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const err = validateBpCopy(req.params.id, req.query.copy);
+    if (err) return reply.code(400).send({ error: err });
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const r = await gitops.requirementTests(req.params.id, req.query.copy!);
+    if (!r.ok) {
+      return reply.code(r.status >= 400 && r.status < 500 ? r.status : 502).send({
+        error: 'gitops error',
+        status: r.status,
+      });
+    }
+    return r.body;
+  });
+
+  // Whether the BP's tests permit a deploy, with the reason when they do not.
+  // The Deploy tab shows that reason verbatim rather than inventing its own.
+  app.get<{
+    Params: { id: string };
+    Querystring: { copy?: string };
+  }>('/api/business-processes/:id/requirements/gate', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const err = validateBpCopy(req.params.id, req.query.copy);
+    if (err) return reply.code(400).send({ error: err });
+    if (!gitops) return reply.code(503).send({ error: 'gitops not configured' });
+    const r = await gitops.requirementTestsGate(req.params.id, req.query.copy!);
+    if (!r.ok) {
+      return reply.code(r.status >= 400 && r.status < 500 ? r.status : 502).send({
+        error: 'gitops error',
+        status: r.status,
+      });
+    }
+    return r.body;
+  });
+
   app.post<{
     Params: { id: string };
     Querystring: { copy?: string };
-    Body: { text?: string; parent?: string; status?: string };
+    Body: { text?: string; parent?: string; proposed?: boolean };
   }>('/api/business-processes/:id/requirements', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     const err = validateBpCopy(req.params.id, req.query.copy);
     if (err) return reply.code(400).send({ error: err });
-    const { text, parent, status } = req.body ?? {};
+    const { text, parent, proposed } = req.body ?? {};
     if (text !== undefined && typeof text !== 'string') {
       return reply.code(400).send({ error: 'text must be a string' });
-    }
-    if (status !== undefined && !isReqStatus(status)) {
-      return reply.code(400).send({ error: 'invalid status' });
     }
     try {
       return await addRequirement({
@@ -356,7 +382,7 @@ export function registerBusinessProcessRoutes(
         bp: req.params.id,
         text: text ?? '',
         ...(parent ? { parent } : {}),
-        ...(status ? { status: status as ReqStatus } : {}),
+        ...(proposed ? { proposed: true } : {}),
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -368,17 +394,14 @@ export function registerBusinessProcessRoutes(
   app.patch<{
     Params: { id: string; reqId: string };
     Querystring: { copy?: string };
-    Body: { description?: string; status?: string };
+    Body: { description?: string; accept?: boolean };
   }>('/api/business-processes/:id/requirements/:reqId', async (req, reply) => {
     reply.header('Cache-Control', 'no-store');
     const err = validateBpCopy(req.params.id, req.query.copy);
     if (err) return reply.code(400).send({ error: err });
-    const { description, status } = req.body ?? {};
-    if (status !== undefined && !isReqStatus(status)) {
-      return reply.code(400).send({ error: 'invalid status' });
-    }
-    if (description === undefined && status === undefined) {
-      return reply.code(400).send({ error: 'description or status required' });
+    const { description, accept } = req.body ?? {};
+    if (description === undefined && accept === undefined) {
+      return reply.code(400).send({ error: 'description or accept required' });
     }
     try {
       return await updateRequirement({
@@ -388,7 +411,7 @@ export function registerBusinessProcessRoutes(
         id: req.params.reqId,
         patch: {
           ...(description !== undefined ? { description } : {}),
-          ...(status !== undefined ? { status: status as ReqStatus } : {}),
+          ...(accept ? { accept: true } : {}),
         },
       });
     } catch (e) {
