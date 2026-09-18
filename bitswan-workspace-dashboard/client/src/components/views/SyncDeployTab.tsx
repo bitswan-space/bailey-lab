@@ -3,6 +3,8 @@ import {
   Rocket,
   ArrowDownToLine,
   CheckCircle2,
+  CheckSquare,
+  Loader2,
   RotateCcw,
   SlidersHorizontal,
   Terminal,
@@ -11,6 +13,8 @@ import {
 import { toast } from '@/lib/notify';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
 import { useLastDeploy } from '@/hooks/useLastDeploy';
+import { useBpTestState } from '@/components/workspace/WorkspaceProvider';
+import { useRequirements } from '@/hooks/useRequirements';
 import { DiffTab } from '@/components/diff/DiffTab';
 import { CopyHistoryView } from '@/components/views/CopyHistoryView';
 import { SupplyChainPanel } from '@/components/supply-chain/SupplyChainPanel';
@@ -57,6 +61,9 @@ interface SyncDeployTabProps {
    *  the copy in view (the user's own copy) — on a colleague's copy the
    *  "behind main" note stands on its own. */
   onGoToSync?: () => void;
+  /** Switches the shell to the Requirements & tests tab — where a deploy
+   *  blocked by failing tests is actually resolved. */
+  onGoToRequirements?: () => void;
   /** True when the copy in view is the signed-in user's own — the only case in
    *  which publishing over main is even offered (it publishes YOUR version). */
   isMyCopy?: boolean;
@@ -95,6 +102,7 @@ export function SyncDeployTab({
   onDeployed,
   onManageDeployments,
   onGoToSync,
+  onGoToRequirements,
   isMyCopy,
 }: SyncDeployTabProps) {
   // `editNonce` is bumped by the shell on every editor save, because a save
@@ -142,12 +150,22 @@ export function SyncDeployTab({
   // lives in `deployReadiness` so the rule it encodes ("never say up to date
   // from a reading you have not taken") is unit-tested rather than buried in
   // a render.
+  // The deploy gate's two inputs. The verdicts come from the live SSE feed, so
+  // the button unblocks itself the moment a run goes green — no refresh. The
+  // contract is read to tell "no requirements" (nothing to gate on) apart from
+  // "requirements exist but nothing has run", which must block.
+  const testState = useBpTestState(bp.name);
+  const { requirements } = useRequirements(wt.name, bp.name);
+  const hasRequirements = requirements.length > 0;
+
   const readiness = deployReadiness({
     divergence: divergenceStale ? null : divergence,
     changed,
     changedUnknown: changedLoading || !!changedError,
     bpDir: bp.name,
     lastDeploy,
+    tests: testState,
+    hasRequirements,
   });
   const bpChanged = readiness.bpChanged as typeof changed;
   const adds = bpChanged.reduce((a, c) => a + c.adds, 0);
@@ -388,7 +406,36 @@ export function SyncDeployTab({
             )}
           </div>
         </div>
-        {actionable && blockedByBehind ? (
+        {actionable && readiness.blockedByTests ? (
+          // Same shape as blocked-by-behind: say what is in the way and point
+          // at the one screen that can clear it, rather than greying out a
+          // button and leaving the user to guess why.
+          <div className="flex max-w-72 shrink-0 flex-col items-end gap-2 text-right">
+            <span
+              className={cn(
+                'text-[13px] font-medium',
+                readiness.testsRunning ? 'text-amber-700' : 'text-red-700',
+              )}
+            >
+              {readiness.testsReason}
+            </span>
+            {onGoToRequirements && (
+              <Button
+                size="lg"
+                variant="outline"
+                className="shrink-0"
+                onClick={onGoToRequirements}
+              >
+                {readiness.testsRunning ? (
+                  <Loader2 className="size-4 animate-spin" aria-hidden />
+                ) : (
+                  <CheckSquare className="size-4" aria-hidden />
+                )}
+                Requirements &amp; tests
+              </Button>
+            )}
+          </div>
+        ) : actionable && blockedByBehind ? (
           // Fast-forward only: there is nothing to decide here, so no dead
           // greyed-out button — point at the one action that unblocks it.
           <div className="flex max-w-64 shrink-0 flex-col items-end gap-2 text-right">

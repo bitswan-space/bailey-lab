@@ -21,6 +21,7 @@ import { RenameBusinessProcessDialog } from '@/components/workspace/RenameBusine
 import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { cn } from '@/lib/utils';
+import { useBpTestState } from './WorkspaceProvider';
 import type { BusinessProcess, Copy, EnterCopy, FlowTab } from '@/types';
 
 type Role = 'admin' | 'auditor' | 'member';
@@ -84,12 +85,50 @@ interface TopNavProps {
   onNewBpOpenChange: (open: boolean) => void;
 }
 
+/**
+ * CI-style status dot beside the Requirements & tests step: amber while a run
+ * is in flight, green when everything passed, red when anything failed.
+ *
+ * It reads the live SSE state rather than anything this tab owns, so the dot is
+ * correct even when the user is nowhere near the Requirements tab — which is
+ * the entire point of putting it in the nav.
+ */
+function TestStatusDot({ bp }: { bp: string | null }) {
+  const state = useBpTestState(bp);
+  if (!state) return null;
+  const failing = state.counts.fail + state.counts.blocked > 0;
+  const running = state.status === 'running';
+  const tone = running
+    ? 'bg-amber-500'
+    : failing
+      ? 'bg-red-500'
+      : state.green
+        ? 'bg-green-500'
+        : 'bg-slate-300';
+  const label = running
+    ? 'Tests are running'
+    : failing
+      ? `${state.counts.fail + state.counts.blocked} test(s) not passing`
+      : state.green
+        ? 'All tests passing'
+        : 'Tests are out of date';
+  return (
+    <span
+      title={label}
+      aria-label={label}
+      className={cn('ml-0.5 size-2 shrink-0 rounded-full', tone, running && 'animate-pulse')}
+    />
+  );
+}
+
 interface FlowStep {
   id: FlowTab;
   label: string;
   Icon: LucideIcon;
   /** Requires a selected copy to be usable. */
   needsCopy: boolean;
+  /** Show a CI-style status dot for the active BP's requirement tests. */
+  showTestStatus?: boolean;
 }
 
 // Pulling main's changes INTO the copy. Only ever the first step of the
@@ -112,6 +151,7 @@ const IN_COPY_STEPS: FlowStep[] = [
     label: 'Requirements & tests',
     Icon: CheckSquare,
     needsCopy: true,
+    showTestStatus: true,
   },
 ];
 
@@ -335,6 +375,7 @@ export function TopNav({
       >
         <step.Icon className="size-3.5" aria-hidden />
         {step.label}
+        {step.showTestStatus && <TestStatusDot bp={activeBpId} />}
       </button>
     );
   };

@@ -242,6 +242,7 @@ export function WorkspaceView({
             editNonce={editNonce}
             onDeployed={() => onTab('deployments')}
             onManageDeployments={() => onTab('deployments')}
+            onGoToRequirements={() => onTab('requirements')}
             {...(isMyCopy ? { onGoToSync: () => onTab('sync'), isMyCopy: true } : {})}
           />
         ) : (

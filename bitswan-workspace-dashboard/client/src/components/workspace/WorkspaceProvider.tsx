@@ -8,6 +8,7 @@ import {
 } from 'react';
 import { api } from '@/lib/api';
 import { observePending } from '@/lib/pendingActions';
+import type { TestState } from '@/lib/api';
 import type {
   BusinessProcess,
   DeployedAutomation,
@@ -49,6 +50,13 @@ interface WorkspaceContextValue {
    *  can tell "loading" from "empty". */
   // eslint-disable-next-line no-restricted-syntax -- nullable until first delivery
   tasks: GitTask[] | null;
+  /**
+   * Requirement-test state per business process, keyed by BP id, as gitops
+   * reports it. Verdicts are runtime state — gitops holds them for the current
+   * commit only — so this map IS the source of truth for them; nothing is read
+   * out of the requirements file.
+   */
+  testStates: Record<string, TestState>;
   /** Monotonic counter bumped each time a supply-chain scan finishes (SSE
    *  `supply_chain` event). The Supply Chain Security / Supply chain panel watches it to
    *  refresh itself the moment results exist — no manual "check back". */
@@ -127,6 +135,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [copies, setCopies] = useState<Copy[] | null>(null);
   const [tasks, setTasks] = useState<GitTask[] | null>(null);
   const [supplyChainTick, setSupplyChainTick] = useState(0);
+  const [testStates, setTestStates] = useState<Record<string, TestState>>({});
   const [deployDone, setDeployDone] = useState<
     { seq: number; bp: string | null; deploymentId: string } | null
   >(null);
@@ -320,6 +329,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
       setStatus('live');
     });
+    src.addEventListener('test_state', (e) => {
+      // One frame per BP per verdict change. Keyed by BP so a run in one
+      // business process never clears another's results.
+      try {
+        // eslint-disable-next-line no-restricted-syntax -- SSE payload boundary
+        const state = JSON.parse((e as MessageEvent).data) as TestState;
+        if (state && typeof state.bp === 'string') {
+          setTestStates((prev) => ({ ...prev, [state.bp]: state }));
+        }
+      } catch {
+        // ignore non-JSON event data
+      }
+      setStatus('live');
+    });
     src.addEventListener('supply_chain', () => {
       // A scan finished — bump the counter so any open Supply Chain Security / Supply chain
       // panel refetches and shows the result without a manual refresh.
@@ -375,6 +398,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         processes,
         copies,
         tasks,
+        testStates,
         supplyChainTick,
         deployDone,
         copyRefsMoved,
@@ -456,6 +480,19 @@ export function useTaskQueue(): {
   const v = useContext(WorkspaceContext);
   if (!v) throw new Error('useTaskQueue must be used inside <WorkspaceProvider>');
   return { tasks: v.tasks, status: v.status };
+}
+
+/**
+ * The requirement-test state for one business process, or null when nothing
+ * has run for it. Components re-render as verdicts land, with no polling: this
+ * is the live feed the Requirements tab, the tab indicator and the deploy gate
+ * all read.
+ */
+export function useBpTestState(bp: string | null | undefined): TestState | null {
+  const v = useContext(WorkspaceContext);
+  if (!v) throw new Error('useBpTestState must be used inside <WorkspaceProvider>');
+  if (!bp) return null;
+  return v.testStates[bp] ?? null;
 }
 
 /**

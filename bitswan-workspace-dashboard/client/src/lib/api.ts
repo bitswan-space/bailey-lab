@@ -1975,15 +1975,31 @@ export const api = {
         `/api/business-processes/${encodeURIComponent(bpId)}/requirements/${encodeURIComponent(id)}?copy=${encodeURIComponent(copy)}`,
       ),
     /**
-     * Run the deterministic tests in the BP's live-dev container. Omit `id`
-     * to run every non-proposed requirement. The server returns the updated
-     * requirement list (the CLI writes pass/fail into the TOML) plus the run
-     * output so the caller can show detail/errors.
+     * Ask gitops to run the tests. Returns as soon as the run has started —
+     * verdicts arrive over the `test_state` SSE event, because a suite can
+     * take minutes. Omit `id` to run the whole contract.
      */
-    runTests: (bpId: string, copy: string, id?: string) =>
-      postJson<RunTestsResponse>(
+    runTests: (
+      bpId: string,
+      copy: string,
+      opts: { id?: string; failedOnly?: boolean } = {},
+    ) =>
+      postJson<TestState | null>(
         `/api/business-processes/${encodeURIComponent(bpId)}/requirements/run-tests?copy=${encodeURIComponent(copy)}`,
-        id ? { id } : {},
+        {
+          ...(opts.id ? { id: opts.id } : {}),
+          ...(opts.failedOnly ? { failed_only: true } : {}),
+        },
+      ),
+    /** Current verdicts, for a tab opened before the next event arrives. */
+    tests: (bpId: string, copy: string) =>
+      getJson<TestState | null>(
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/tests?copy=${encodeURIComponent(copy)}`,
+      ),
+    /** Whether the tests permit a deploy. */
+    gate: (bpId: string, copy: string) =>
+      getJson<TestGate>(
+        `/api/business-processes/${encodeURIComponent(bpId)}/requirements/gate?copy=${encodeURIComponent(copy)}`,
       ),
   },
 
@@ -2116,18 +2132,38 @@ export interface FileUploadResponse {
   written: { name: string; size: number }[];
 }
 
-export type ReqStatus = 'pending' | 'pass' | 'fail' | 'retest' | 'proposed';
+/**
+ * A requirement's run state. These come from actually running the test — the
+ * contract file carries none of them.
+ *
+ * `blocked` means a parent requirement is failing, so this one was not run: a
+ * parent is a precondition, and a child's result would be meaningless while it
+ * is broken. `no_test` means nobody has written a test carrying this id yet.
+ */
+export type ReqVerdict =
+  | 'queued'
+  | 'running'
+  | 'pass'
+  | 'fail'
+  | 'no_test'
+  | 'blocked';
+
+/** Where a requirement came from. Empty = a human wrote it. */
+export type ReqOrigin = '' | 'proposed';
 
 export interface Requirement {
   id: string;
   description: string;
-  status: ReqStatus;
   parent: string;
+  /** `proposed` while an agent's suggestion awaits a human's acceptance. */
+  origin: ReqOrigin;
+  /** Per-requirement overrides of the BP's `[testing]` defaults. */
+  automation: string;
+  runner: string;
   /**
    * True when a test file in the BP mentions this requirement's underscore
-   * token (REQ-003 → REQ_003) — the same convention the test runner matches
-   * on. Absent on add/update responses (only list/run-tests annotate); the
-   * hook preserves the previous value across those.
+   * token (REQ-7QX4 → REQ_7QX4). Absent on add/update responses (only the list
+   * endpoint annotates); the hook preserves the previous value across those.
    */
   hasTest?: boolean;
 }
@@ -2135,22 +2171,63 @@ export interface Requirement {
 export interface AddRequirementRequest {
   text: string;
   parent?: string;
-  status?: ReqStatus;
+  /** Add it as an agent proposal awaiting acceptance, not as a plain entry. */
+  proposed?: boolean;
 }
 
 export interface UpdateRequirementRequest {
   description?: string;
-  status?: ReqStatus;
+  /** Accept a proposal: clears `origin`, keeps the id. */
+  accept?: boolean;
 }
 
-export interface RunTestsResponse {
-  /** True when the run itself completed (exit 0); individual pass/fail is in
-   *  the per-requirement statuses + `output`. False means the run errored
-   *  (e.g. no live-dev container, or an SSH-level failure). */
-  ok: boolean;
-  exitCode: number;
-  /** Combined stdout+stderr from `bitswan-coding-agent requirements test`. */
+/** One requirement's state within a run. */
+export interface RequirementTestResult {
+  id: string;
+  description: string;
+  origin: ReqOrigin;
+  verdict: ReqVerdict;
+  /** Failure detail from the test report; empty unless the verdict is `fail`. */
   output: string;
-  /** The requirement list after the CLI wrote its verdicts. */
-  requirements: Requirement[];
+  deployment_id: string;
+  automation: string;
+  /**
+   * The verdict from the previous commit, shown greyed while this run is still
+   * queued or running, so the table does not go blank on every commit.
+   */
+  previous_verdict: ReqVerdict | '';
+  previous_sha: string;
+}
+
+/**
+ * A BP's test run, as gitops reports it over the `test_state` SSE event.
+ * `null` when nothing has run for this BP yet.
+ */
+export interface TestState {
+  run_id: string;
+  copy: string;
+  bp: string;
+  head_sha: string;
+  head_subject: string;
+  status: 'running' | 'completed' | 'cancelled' | 'failed';
+  /** The code changed after this run — the verdicts no longer describe it. */
+  stale: boolean;
+  /** Every judgeable requirement came back clean, and the run is not stale. */
+  green: boolean;
+  error: string | null;
+  counts: Record<ReqVerdict, number>;
+  requirements: RequirementTestResult[];
+  started_at: string;
+  completed_at: string | null;
+}
+
+/** Whether a BP's tests permit a deploy, and why not when they don't. */
+export interface TestGate {
+  green: boolean;
+  /** False when no run exists yet at all. */
+  known: boolean;
+  running: boolean;
+  /** Written for a human — the Deploy tab shows it verbatim. */
+  reason: string;
+  state: TestState | null;
 }

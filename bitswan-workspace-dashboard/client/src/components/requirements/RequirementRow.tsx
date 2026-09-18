@@ -7,12 +7,10 @@ import {
   Pencil,
   Play,
   Plus,
-  RotateCcw,
   Trash2,
-  Undo2,
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import type { Requirement } from '@/lib/api';
+import type { Requirement, RequirementTestResult } from '@/lib/api';
 import { StatusBadge } from './StatusBadge';
 
 interface Props {
@@ -26,21 +24,17 @@ interface Props {
    */
   editOnMount?: boolean;
   onEditDone?: () => void;
-  /** Accept an AI- proposal into the contract (`proposed` → `pending`). */
+  /** This requirement's state in the current run, or null if it has none. */
+  result: RequirementTestResult | null;
+  /** The whole run is stale — the code moved on since these verdicts. */
+  stale: boolean;
+  /** Accept an agent proposal into the contract (clears `origin`). */
   onAcceptProposal: () => void;
-  /** Put a passing requirement back in front of the agent (`pass` → `retest`). */
-  onSendBack: () => void;
-  /** Revert a send-back this person just made (`retest` → `pass`). */
-  onUndoSendBack: () => void;
-  /** True only while this row is still `retest` AND this person sent it back. */
-  canUndoSendBack: boolean;
   onUpdateDescription: (text: string) => void;
   onAddChild: () => void;
   onDelete: () => void;
-  /** Run the deterministic test for this requirement in the live-dev container. */
+  /** Re-run this one requirement's test. */
   onRunTest: () => void;
-  /** True while this row's test (or an all-run that includes it) is executing. */
-  running?: boolean;
   /** True when this row holds the treegrid's single tab stop (#268). */
   active: boolean;
   /** True when this row has children in the tree, collapsed or not. */
@@ -73,15 +67,13 @@ export function RequirementRow({
   depth,
   editOnMount,
   onEditDone,
+  result,
+  stale,
   onAcceptProposal,
-  onSendBack,
-  onUndoSendBack,
-  canUndoSendBack,
   onUpdateDescription,
   onAddChild,
   onDelete,
   onRunTest,
-  running = false,
   active,
   hasChildren,
   expanded,
@@ -91,6 +83,7 @@ export function RequirementRow({
 }: Props) {
   const [editing, setEditing] = useState(!!editOnMount);
   const [draft, setDraft] = useState(req.description);
+  const [showOutput, setShowOutput] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
@@ -138,6 +131,14 @@ export function RequirementRow({
     }
   };
 
+  const running = result?.verdict === 'running';
+  const pending = result?.verdict === 'queued' || running;
+  // While a run is pending, show the previous commit's answer greyed out rather
+  // than nothing — the table would otherwise blank itself on every commit.
+  const shownVerdict =
+    pending && result?.previous_verdict ? result.previous_verdict : result?.verdict;
+  const shownStale = stale || (pending && !!result?.previous_verdict);
+  const failureOutput = result?.verdict === 'fail' ? result.output : '';
   const paddingLeft = 14 + depth * 18;
 
   return (
@@ -178,29 +179,17 @@ export function RequirementRow({
         )}
         <span className="font-mono text-[11px] font-semibold text-foreground">{req.id}</span>
       </div>
-      {/* Undo sits beside the badge because it belongs to the row whose state it
-          would change, and it disappears on its own the moment that state moves
-          on (a test ran, someone else touched it). */}
       <div role="gridcell" className="flex w-24 shrink-0 items-center gap-1 pt-0.5">
-        <StatusBadge status={req.status} />
-        {canUndoSendBack && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                tabIndex={-1}
-                onClick={onUndoSendBack}
-                aria-label="Undo send-back"
-                className="inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-              >
-                <Undo2 className="size-3" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="top">
-              Undo — put it back to <b>pass</b> as the tests left it
-            </TooltipContent>
-          </Tooltip>
+        {req.origin === 'proposed' ? (
+          <span className="inline-flex items-center rounded-[3px] bg-violet-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-violet-700">
+            proposed
+          </span>
+        ) : shownVerdict ? (
+          <StatusBadge verdict={shownVerdict} stale={shownStale} />
+        ) : (
+          <StatusBadge verdict="queued" />
         )}
+        {running && <Loader2 className="size-3 animate-spin text-blue-700" />}
       </div>
       <div role="gridcell" className="min-w-0 flex-1 pt-0.5">
         {editing ? (
@@ -236,30 +225,52 @@ export function RequirementRow({
             )}
           </button>
         )}
+        {failureOutput && (
+          <>
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={() => setShowOutput((v) => !v)}
+              className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+            >
+              {showOutput ? (
+                <ChevronDown className="size-3" />
+              ) : (
+                <ChevronRight className="size-3" />
+              )}
+              {showOutput ? 'Hide failure' : 'Why it failed'}
+            </button>
+            {showOutput && (
+              <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-words rounded bg-red-50 px-2 py-1.5 text-[11px] leading-relaxed text-red-900">
+                {failureOutput}
+              </pre>
+            )}
+          </>
+        )}
+      </div>
+      {/* Which container this requirement's test runs in. Worth showing per
+          row: a BP can have several, and "it passes" means little without
+          knowing where. */}
+      <div role="gridcell" className="hidden w-24 shrink-0 items-center pt-0.5 sm:flex">
+        {result?.automation && (
+          <span className="truncate font-mono text-[10px] text-muted-foreground">
+            {result.automation}
+          </span>
+        )}
       </div>
       <div
         role="gridcell"
         className="flex w-[140px] shrink-0 items-center justify-end gap-0.5 pt-0.5 opacity-70 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
       >
-        {/* The two status changes a person can honestly make (#448). Neither is
-            shown where it would not apply: a proposal is accepted, a passing
-            requirement is sent back to be re-checked. `pass` and `fail` are the
-            last test run's verdict and are no longer settable by hand. */}
-        {req.status === 'proposed' && (
+        {/* A verdict is produced by running a test, so nothing here sets one.
+            Accepting a proposal is the one state change a person still makes. */}
+        {req.origin === 'proposed' && (
           <IconButton
             title="Accept this proposal — it joins the contract and gets tested"
             onClick={onAcceptProposal}
             className="hover:text-green-700"
           >
             <Check className="size-3.5" />
-          </IconButton>
-        )}
-        {req.status === 'pass' && (
-          <IconButton
-            title="Send back to be re-checked — the agent picks it up again"
-            onClick={onSendBack}
-          >
-            <RotateCcw className="size-3.5" />
           </IconButton>
         )}
         <IconButton title="Edit description" onClick={() => setEditing(true)}>
@@ -295,10 +306,10 @@ export function RequirementRow({
           </TooltipTrigger>
           <TooltipContent side="top">
             {running
-              ? 'Running test…'
+              ? 'Running…'
               : req.hasTest
-                ? 'Run this requirement’s test'
-                : 'No test written for this requirement yet — write one first (the “Write tests” agent can do it)'}
+                ? 'Re-run this requirement’s test'
+                : 'No test carries this requirement’s id yet — write one first (the “Write tests” agent can do it)'}
           </TooltipContent>
         </Tooltip>
         <IconButton

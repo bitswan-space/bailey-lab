@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FlaskConical, Loader2, Play, Search, X } from 'lucide-react';
+import { useCallback, useMemo, useState } from 'react';
+import {
+  ChevronDown,
+  ChevronRight,
+  FlaskConical,
+  Loader2,
+  Play,
+  Plus,
+  RotateCw,
+  Search,
+  X,
+} from 'lucide-react';
 import { toast } from '@/lib/notify';
 import {
   AlertDialog,
@@ -19,11 +29,12 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useRequirements } from '@/hooks/useRequirements';
+import { useBpTestState } from '@/components/workspace/WorkspaceProvider';
 import { RequirementsTable } from './RequirementsTable';
 import { TreegridLegend } from './TreegridLegend';
-import { useUrlEnum, useUrlParam } from '@/lib/urlState';
+import { useUrlParam } from '@/lib/urlState';
 import { cn } from '@/lib/utils';
-import { api, type Requirement, type ReqStatus } from '@/lib/api';
+import { api, type Requirement, type RequirementTestResult } from '@/lib/api';
 
 interface Props {
   copy: string;
@@ -32,168 +43,97 @@ interface Props {
   onShowAgents: () => void;
 }
 
-type Filter = 'all' | ReqStatus;
-
-const FILTERS: Filter[] = ['all', 'pending', 'pass', 'fail', 'retest', 'proposed'];
-
-// Per-filter colour for the count digit shown in an inactive pill (matches
-// the status-badge tones; the active pill inverts to its own foreground).
-const COUNT_COLOR: Record<Filter, string> = {
-  all: 'text-muted-foreground',
-  pending: 'text-slate-600',
-  pass: 'text-green-700',
-  fail: 'text-red-700',
-  retest: 'text-amber-700',
-  proposed: 'text-violet-700',
-};
-
 /**
- * Per-(copy, bp) testable requirements view. Reads/writes the same
- * `testable-requirements.toml` the agent CLI uses, so flipping a status
- * here is visible from `bitswan-coding-agent requirements list` and
- * vice-versa.
+ * Per-(copy, bp) requirements view.
+ *
+ * Two sources, deliberately separate: the CONTRACT (what the requirements are)
+ * comes from `testable-requirements.toml` via `useRequirements`, and the
+ * VERDICTS come from gitops over SSE via `useBpTestState`. Nothing in this tab
+ * can set a verdict — tests run on every commit and their reports are the only
+ * thing that produces one.
+ *
+ * Rows are grouped by verdict rather than filtered by it: what a person opens
+ * this tab to see is what is broken, and a filter makes that a click away
+ * instead of the first thing on screen.
  */
 export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
-  const {
-    requirements,
-    loading,
-    add,
-    update,
-    remove,
-    runTests,
-  } = useRequirements(copy, bp);
-  // Ids this person sent back, per (copy, bp). The row offers Undo only for
-  // these: any other `retest` row was put there by a test run, the agent, or
-  // somebody else, and offering to mark it `pass` would be the hand-set verdict
-  // this control exists to avoid — not an undo.
-  //
-  // Persisted, because component state made the button vanish on reload — which
-  // silently restored the dead end it exists to remove. No expiry: the row's own
-  // status is the lifetime. While it is still `retest` the send-back stands and
-  // undoing it is still meaningful; the moment a test run or anyone else moves
-  // it, `canUndoSendBack` goes false and the stored id is pruned on next read.
-  // localStorage, so it is this browser's memory of its own action — a colleague
-  // does not see an Undo for something they did not do.
-  const sentBackKey = `dashboard.requirements.sentBack.${copy}.${bp}`;
-  const [sentBack, setSentBack] = useState<ReadonlySet<string>>(() => readSentBack(sentBackKey));
-  const rememberSentBack = useCallback(
-    (next: ReadonlySet<string>) => {
-      setSentBack(next);
-      writeSentBack(sentBackKey, next);
-    },
-    [sentBackKey],
+  const { requirements, loading, add, update, remove, runTests } = useRequirements(
+    copy,
+    bp,
   );
-  // Prune ids that have moved off `retest` — a test ran, or somebody else
-  // changed it — so the store doesn't grow for the life of the browser and a
-  // requirement sent back, re-passed and sent back again isn't offered a stale
-  // Undo. Runs on every list refresh; a no-op when nothing needs dropping.
-  useEffect(() => {
-    if (sentBack.size === 0 || requirements.length === 0) return;
-    const live = new Set(
-      requirements.filter((r) => r.status === 'retest').map((r) => r.id),
-    );
-    const kept = [...sentBack].filter((id) => live.has(id));
-    if (kept.length === sentBack.size) return;
-    const next = new Set(kept);
-    setSentBack(next);
-    writeSentBack(sentBackKey, next);
-  }, [requirements, sentBack, sentBackKey]);
+  const testState = useBpTestState(bp);
 
-  // Search term and status filter live in the URL so a filtered view is
-  // deep-linkable (?filter=fail&q=auth).
   const [searchRaw, setSearchRaw] = useUrlParam('q');
   const search = searchRaw ?? '';
   const setSearch = useCallback(
     (v: string) => setSearchRaw(v || null),
     [setSearchRaw],
   );
-  const [filter, setFilter] = useUrlEnum('filter', FILTERS, 'all');
   const [pendingEditId, setPendingEditId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Requirement | null>(null);
-  // Ids whose test is in flight (drives per-row spinners). An all-run marks
-  // every non-proposed id at once; a per-row run marks just that one.
-  const [runningIds, setRunningIds] = useState<ReadonlySet<string>>(new Set());
-  const [runningAll, setRunningAll] = useState(false);
-  // Last run's combined output, shown in a dismissible panel under the toolbar
-  // (the row badges already reflect pass/fail; this is for detail + errors).
-  const [runResult, setRunResult] = useState<{ ok: boolean; output: string } | null>(
-    null,
-  );
-  const anyRunning = runningAll || runningIds.size > 0;
+  const [showPassed, setShowPassed] = useState(false);
+  const [starting, setStarting] = useState(false);
 
-  // Run-all only makes sense once at least one testable (non-proposed)
-  // requirement actually has a test written for it.
-  const hasAnyTest = useMemo(
-    () => requirements.some((r) => r.status !== 'proposed' && r.hasTest),
-    [requirements],
-  );
+  const results = useMemo(() => {
+    const map = new Map<string, RequirementTestResult>();
+    for (const r of testState?.requirements ?? []) map.set(r.id, r);
+    return map;
+  }, [testState]);
 
-  const counts = useMemo(() => {
-    const c = { total: 0, pass: 0, fail: 0, pending: 0, retest: 0, proposed: 0 };
-    for (const r of requirements) {
-      c.total += 1;
-      c[r.status] += 1;
-    }
-    return c;
-  }, [requirements]);
+  const stale = testState?.stale ?? false;
+  const runInFlight = testState?.status === 'running';
 
-  const visible = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return requirements.filter((r) => {
-      if (filter !== 'all' && r.status !== filter) return false;
+  const matches = useCallback(
+    (r: Requirement) => {
+      const term = search.trim().toLowerCase();
       if (!term) return true;
       return (
         r.id.toLowerCase().includes(term) ||
         r.description.toLowerCase().includes(term)
       );
-    });
-  }, [requirements, filter, search]);
+    },
+    [search],
+  );
+
+  /**
+   * Requirements split into the groups the tab renders, in the order a person
+   * needs them: what is broken, what is still being checked, what has no test,
+   * what passed, and what the agent has proposed.
+   */
+  const groups = useMemo(() => {
+    const visible = requirements.filter(matches);
+    const verdictOf = (r: Requirement) => results.get(r.id)?.verdict;
+    const proposed = visible.filter((r) => r.origin === 'proposed');
+    const rest = visible.filter((r) => r.origin !== 'proposed');
+    return {
+      failed: rest.filter((r) => verdictOf(r) === 'fail'),
+      blocked: rest.filter((r) => verdictOf(r) === 'blocked'),
+      running: rest.filter(
+        (r) => verdictOf(r) === 'running' || verdictOf(r) === 'queued',
+      ),
+      noTest: rest.filter((r) => verdictOf(r) === 'no_test' || !verdictOf(r)),
+      passed: rest.filter((r) => verdictOf(r) === 'pass'),
+      proposed,
+    };
+  }, [requirements, results, matches]);
+
+  const counts = testState?.counts;
 
   const onNew = async (parent?: Requirement) => {
     try {
-      const created = await add({
-        text: '',
-        ...(parent ? { parent: parent.id } : {}),
-      });
+      const created = await add('', parent?.id);
       setPendingEditId(created.id);
     } catch (err) {
       toast.error(`Failed to add requirement: ${String(err)}`);
     }
   };
 
-  // #448: two intent-named actions instead of cycling the badge through all
-  // five states. `pass` and `fail` are the last test run's verdict and are not
-  // settable by hand here; `proposed` is the agent's and is accepted or
-  // deleted, not cycled.
-  // Returns false when the write failed, so callers don't record a send-back
-  // (or forget one) on the strength of a status change that never landed.
-  const setStatus = async (r: Requirement, status: ReqStatus, what: string): Promise<boolean> => {
+  const onAcceptProposal = async (r: Requirement) => {
     try {
-      await update(r.id, { status });
-      return true;
+      await update(r.id, { accept: true });
     } catch (err) {
-      toast.error(`Failed to ${what}: ${String(err)}`);
-      return false;
+      toast.error(`Failed to accept the proposal: ${String(err)}`);
     }
-  };
-  const onAcceptProposal = (r: Requirement) => setStatus(r, 'pending', 'accept the proposal');
-  const onSendBack = async (r: Requirement) => {
-    if (!(await setStatus(r, 'retest', 'send it back to be re-checked'))) return;
-    // Why remember it at all: without an Undo this would be a one-way door.
-    // `retest` has no action of its own, and Run test — the only other route
-    // back to `pass` — is disabled for a requirement that has no test yet. So
-    // the row carries an Undo for as long as it is still `retest`, rather than
-    // a dialog guarding the way in: a confirm would tax every deliberate use
-    // to catch a rare misclick, and would do nothing for the person who
-    // changes their mind a minute later.
-    rememberSentBack(new Set(sentBack).add(r.id));
-  };
-
-  const onUndoSendBack = async (r: Requirement) => {
-    if (!(await setStatus(r, 'pass', 'undo'))) return;
-    const next = new Set(sentBack);
-    next.delete(r.id);
-    rememberSentBack(next);
   };
 
   const onUpdateDescription = async (r: Requirement, text: string) => {
@@ -215,57 +155,28 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     }
   };
 
-  // Run the deterministic test(s) in the BP's live-dev container via the
-  // server, which drives `bitswan-coding-agent requirements test`. The hook
-  // adopts the canonical statuses the CLI wrote, so badges flip on resolve.
-  const onRunTest = async (r: Requirement) => {
-    // The row's button is disabled without a test, but guard anyway — running
-    // a test that doesn't exist can only record a bogus verdict.
-    if (anyRunning || !r.hasTest) return;
-    setRunningIds(new Set([r.id]));
+  /**
+   * Starting a run only starts it: gitops runs the tests in the background and
+   * the verdicts arrive over SSE, so there is nothing to await here beyond the
+   * hand-off. Tests also start on their own with every commit — these buttons
+   * are for re-running without one.
+   */
+  const startRun = async (opts: { id?: string; failedOnly?: boolean } = {}) => {
+    if (starting || runInFlight) return;
+    setStarting(true);
     try {
-      const res = await runTests(r.id);
-      setRunResult({ ok: res.ok, output: res.output });
-      if (!res.ok) {
-        toast.error(`Test run for ${r.id} did not complete — see output below`);
-      }
+      await runTests(opts);
     } catch (err) {
-      toast.error(`Failed to run test for ${r.id}: ${String(err)}`);
+      toast.error(`Failed to start the tests: ${String(err)}`);
     } finally {
-      setRunningIds(new Set());
+      setStarting(false);
     }
   };
 
-  const onRunAll = async () => {
-    if (anyRunning) return;
-    // The CLI skips `proposed` requirements; mirror that in the spinners so we
-    // don't imply we're running rows the server will ignore.
-    const ids = requirements.filter((r) => r.status !== 'proposed').map((r) => r.id);
-    if (ids.length === 0) {
-      toast.info('No testable requirements (all are still proposed).');
-      return;
-    }
-    setRunningAll(true);
-    setRunningIds(new Set(ids));
-    try {
-      const res = await runTests();
-      setRunResult({ ok: res.ok, output: res.output });
-      if (!res.ok) {
-        toast.error('Test run did not complete — see output below');
-      }
-    } catch (err) {
-      toast.error(`Failed to run tests: ${String(err)}`);
-    } finally {
-      setRunningAll(false);
-      setRunningIds(new Set());
-    }
-  };
-
-  // "Write tests" / "Build automation" give the agent the job, then show it.
-  // The prompt lands in the panel's composer for the user to send — see
-  // api.codingAgent.handOffTask. Navigating is not conditional on the
-  // hand-off: a panel with an empty box is recoverable, being left on this
-  // tab wondering what happened is not.
+  // "Write tests" gives the agent the job, then shows it. The prompt lands in
+  // the panel's composer for the user to send. Navigating is not conditional
+  // on the hand-off: a panel with an empty box is recoverable, being left on
+  // this tab wondering what happened is not.
   const onStartCanned = (kind: 'write-tests' | 'automation') => {
     api.codingAgent.handOffTask(copy, bp, kind).catch((err: unknown) => {
       toast.error(`Could not hand the task to the agent: ${String(err)}`);
@@ -273,209 +184,310 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
     onShowAgents();
   };
 
+  const tableProps = {
+    results,
+    stale,
+    loading,
+    pendingEditId,
+    onEditDone: () => setPendingEditId(null),
+    onAcceptProposal: (r: Requirement) => void onAcceptProposal(r),
+    onUpdateDescription: (r: Requirement, text: string) =>
+      void onUpdateDescription(r, text),
+    onAddChild: (parent: Requirement) => void onNew(parent),
+    onDelete: (r: Requirement) => setDeleteTarget(r),
+    onRunTest: (r: Requirement) => void startRun({ id: r.id }),
+  };
+
   return (
     <TooltipProvider delayDuration={300}>
-    <div className="flex h-full flex-col overflow-hidden bg-background">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-6 py-3">
-        {/* Search */}
-        <div className="flex h-8 w-full max-w-[380px] items-center gap-2 rounded-md border border-border bg-white px-2.5">
-          <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search requirements by id or description…"
-            className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-muted-foreground"
-          />
-          {search && (
-            <button
-              type="button"
-              onClick={() => setSearch('')}
-              aria-label="Clear search"
-              className="shrink-0 text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-3.5" aria-hidden />
-            </button>
-          )}
-        </div>
-
-        {/* Status filter pills with counts */}
-        <div className="flex items-center gap-1">
-          {FILTERS.map((f) => {
-            const active = filter === f;
-            const n = f === 'all' ? counts.total : counts[f];
-            return (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setFilter(f)}
-                className={cn(
-                  'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium capitalize transition-colors',
-                  active
-                    ? 'border-foreground bg-foreground text-background'
-                    : 'border-border bg-white text-muted-foreground hover:bg-muted/60',
-                )}
-              >
-                {f}
-                <span
-                  className={cn(
-                    'text-[10px] font-bold',
-                    active ? 'text-background/80' : COUNT_COLOR[f],
-                  )}
-                >
-                  {loading ? '·' : n}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="ml-auto flex items-center gap-2">
-          {/* The disabled Button has pointer-events: none, so the span
-              wrapper is what keeps the tooltip hoverable in that state. */}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="inline-flex">
-                <Button
-                  onClick={() => void onRunAll()}
-                  size="sm"
-                  variant="outline"
-                  disabled={anyRunning || !hasAnyTest}
-                >
-                  {runningAll ? (
-                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                  ) : (
-                    <Play className="size-3.5" aria-hidden />
-                  )}
-                  Run tests
-                </Button>
-              </span>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              {hasAnyTest
-                ? "Run every requirement's test in the live-dev container and record pass/fail"
-                : 'No tests written yet — write them first (the “Write tests” agent can do it)'}
-            </TooltipContent>
-          </Tooltip>
-          <Button
-            onClick={() => void onStartCanned('write-tests')}
-            size="sm"
-            variant="outline"
-            title="Start an agent session that writes tests for these requirements"
-          >
-            <FlaskConical className="size-3.5" aria-hidden />
-            Write tests
-          </Button>
-        </div>
-      </div>
-
-      {runResult && (
-        <div
-          className={cn(
-            'shrink-0 border-b px-6 py-2.5',
-            runResult.ok
-              ? 'border-border bg-muted/40'
-              : 'border-red-200 bg-red-50',
-          )}
-        >
-          <div className="mb-1 flex items-center justify-between">
-            <span
-              className={cn(
-                'text-[11px] font-semibold uppercase tracking-wide',
-                runResult.ok ? 'text-muted-foreground' : 'text-red-700',
+      <div className="flex h-full flex-col overflow-hidden bg-background">
+        {/* Summary: the state of the suite for the commit it ran against. */}
+        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-background px-6 py-2.5">
+          {counts ? (
+            <div className="flex items-center gap-3 text-[12px]">
+              <Stat n={counts.fail + counts.blocked} label="failing" tone="text-red-700" />
+              <Stat
+                n={counts.running + counts.queued}
+                label="running"
+                tone="text-blue-700"
+              />
+              <Stat n={counts.pass} label="passing" tone="text-green-700" />
+              {counts.no_test > 0 && (
+                <Stat n={counts.no_test} label="without a test" tone="text-slate-600" />
               )}
-            >
-              {runResult.ok ? 'Test run output' : 'Test run failed'}
+            </div>
+          ) : (
+            <span className="text-[12px] text-muted-foreground">
+              {loading ? 'Loading…' : 'No test run yet — tests run on every commit.'}
             </span>
-            <button
-              type="button"
-              onClick={() => setRunResult(null)}
-              aria-label="Dismiss test output"
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <X className="size-3.5" aria-hidden />
-            </button>
-          </div>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
-            {runResult.output.trim() || '(no output)'}
-          </pre>
+          )}
+          {testState && (
+            <span className="truncate text-[11px] text-muted-foreground">
+              {testState.head_subject || 'no commit message'}{' '}
+              <span className="font-mono">{testState.head_sha.slice(0, 7)}</span>
+            </span>
+          )}
+          {stale && (
+            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+              out of date — the code changed since
+            </span>
+          )}
         </div>
-      )}
 
-      <div className="flex-1 overflow-auto px-6 py-4">
-        <RequirementsTable
-          requirements={visible}
-          loading={loading}
-          pendingEditId={pendingEditId}
-          onEditDone={() => setPendingEditId(null)}
-          onAcceptProposal={onAcceptProposal}
-          onSendBack={onSendBack}
-          onUndoSendBack={onUndoSendBack}
-          sentBack={sentBack}
-          onUpdateDescription={onUpdateDescription}
-          onAddChild={(parent) => void onNew(parent)}
-          onAddRoot={() => void onNew()}
-          onDelete={(r) => setDeleteTarget(r)}
-          onRunTest={(r) => void onRunTest(r)}
-          runningIds={runningIds}
-        />
-      </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-background px-6 py-3">
+          <div className="flex h-8 w-full max-w-[380px] items-center gap-2 rounded-md border border-border bg-white px-2.5">
+            <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search requirements by id or description…"
+              className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-muted-foreground"
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch('')}
+                aria-label="Clear search"
+                className="shrink-0 text-muted-foreground hover:text-foreground"
+              >
+                <X className="size-3.5" aria-hidden />
+              </button>
+            )}
+          </div>
 
-      {/* Outside the scroller above, so the key map is pinned to the bottom of
-          the tab and cannot scroll out of sight on a long list. */}
-      <TreegridLegend />
-
-      <AlertDialog
-        open={deleteTarget !== null}
-        onOpenChange={(open) => !open && setDeleteTarget(null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Delete requirement &quot;{deleteTarget?.id}&quot;?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              This requirement will be deleted. Its sub-requirements are
-              kept and will move to the top level of the list.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={(e) => {
-                e.preventDefault();
-                void onDelete();
-              }}
+          <div className="ml-auto flex items-center gap-2">
+            <Button onClick={() => void onNew()} size="sm" variant="outline">
+              <Plus className="size-3.5" aria-hidden />
+              New requirement
+            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex">
+                  <Button
+                    onClick={() => void startRun({ failedOnly: true })}
+                    size="sm"
+                    variant="outline"
+                    disabled={starting || runInFlight || !counts?.fail}
+                  >
+                    <RotateCw className="size-3.5" aria-hidden />
+                    Re-run failed
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                Re-run only the requirements that failed, against the current code
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex">
+                  <Button
+                    onClick={() => void startRun()}
+                    size="sm"
+                    variant="outline"
+                    disabled={starting || runInFlight}
+                  >
+                    {starting || runInFlight ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <Play className="size-3.5" aria-hidden />
+                    )}
+                    Run tests
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                Tests run automatically on every commit — this re-runs them all now
+              </TooltipContent>
+            </Tooltip>
+            <Button
+              onClick={() => void onStartCanned('write-tests')}
+              size="sm"
+              variant="outline"
+              title="Start an agent session that writes tests for these requirements"
             >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </div>
+              <FlaskConical className="size-3.5" aria-hidden />
+              Write tests
+            </Button>
+          </div>
+        </div>
+
+        <div className="flex-1 space-y-4 overflow-auto px-6 py-4">
+          {testState?.error && (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-800">
+              The last test run could not complete: {testState.error}
+            </div>
+          )}
+
+          <Group
+            title="Failing"
+            n={groups.failed.length}
+            tone="text-red-700"
+            hidden={groups.failed.length === 0}
+          >
+            <RequirementsTable {...tableProps} requirements={groups.failed} />
+          </Group>
+
+          <Group
+            title="Blocked"
+            n={groups.blocked.length}
+            tone="text-amber-700"
+            hidden={groups.blocked.length === 0}
+            note="Not run — a parent requirement is failing. Fix the parent first."
+          >
+            <RequirementsTable {...tableProps} requirements={groups.blocked} />
+          </Group>
+
+          <Group
+            title="Running"
+            n={groups.running.length}
+            tone="text-blue-700"
+            hidden={groups.running.length === 0}
+          >
+            <RequirementsTable {...tableProps} requirements={groups.running} />
+          </Group>
+
+          <Group
+            title="No test yet"
+            n={groups.noTest.length}
+            tone="text-slate-600"
+            hidden={groups.noTest.length === 0}
+            note="No test carries these ids. They do not block a deploy, but nothing verifies them either."
+          >
+            <RequirementsTable {...tableProps} requirements={groups.noTest} />
+          </Group>
+
+          <Group
+            title="Passing"
+            n={groups.passed.length}
+            tone="text-green-700"
+            hidden={groups.passed.length === 0}
+            collapsible
+            open={showPassed}
+            onToggle={() => setShowPassed((v) => !v)}
+          >
+            <RequirementsTable {...tableProps} requirements={groups.passed} />
+          </Group>
+
+          <Group
+            title="Proposed by the agent"
+            n={groups.proposed.length}
+            tone="text-violet-700"
+            hidden={groups.proposed.length === 0}
+            note="Accept one to add it to the contract, or delete it."
+          >
+            <RequirementsTable {...tableProps} requirements={groups.proposed} />
+          </Group>
+
+          {requirements.length === 0 && (
+            <RequirementsTable
+              {...tableProps}
+              requirements={[]}
+              onAddRoot={() => void onNew()}
+              emptyText="No requirements yet. Add one to describe what this automation must do."
+            />
+          )}
+        </div>
+
+        {/* Outside the scroller above, so the key map is pinned to the bottom
+            of the tab and cannot scroll out of sight on a long list. */}
+        <TreegridLegend />
+
+        <AlertDialog
+          open={deleteTarget !== null}
+          onOpenChange={(open) => !open && setDeleteTarget(null)}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                Delete requirement &quot;{deleteTarget?.id}&quot;?
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                This requirement will be deleted. Its sub-requirements are kept
+                and will move to the top level of the list.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                onClick={(e) => {
+                  e.preventDefault();
+                  void onDelete();
+                }}
+              >
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
     </TooltipProvider>
   );
 }
 
-
-// eslint-disable-next-line no-restricted-syntax -- localStorage parse boundary
-function readSentBack(key: string): ReadonlySet<string> {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return new Set();
-    const parsed: unknown = JSON.parse(raw);
-    return new Set(Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []);
-  } catch {
-    return new Set();
-  }
+function Stat({ n, label, tone }: { n: number; label: string; tone: string }) {
+  return (
+    <span className="inline-flex items-baseline gap-1">
+      <span className={cn('text-[13px] font-bold', n > 0 ? tone : 'text-muted-foreground')}>
+        {n}
+      </span>
+      <span className="text-muted-foreground">{label}</span>
+    </span>
+  );
 }
 
-// eslint-disable-next-line no-restricted-syntax -- localStorage write boundary
-function writeSentBack(key: string, ids: ReadonlySet<string>): void {
-  try {
-    if (ids.size === 0) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify([...ids]));
-  } catch {
-    // ignore quota / unavailable — Undo is a convenience, not state of record
-  }
+function Group({
+  title,
+  n,
+  tone,
+  hidden,
+  note,
+  collapsible = false,
+  open = true,
+  onToggle,
+  children,
+}: {
+  title: string;
+  n: number;
+  tone: string;
+  hidden: boolean;
+  note?: string;
+  collapsible?: boolean;
+  open?: boolean;
+  onToggle?: () => void;
+  children: React.ReactNode;
+}) {
+  if (hidden) return null;
+  const header = (
+    <div className="flex items-center gap-2">
+      {collapsible &&
+        (open ? (
+          <ChevronDown className="size-3.5 text-muted-foreground" aria-hidden />
+        ) : (
+          <ChevronRight className="size-3.5 text-muted-foreground" aria-hidden />
+        ))}
+      <span className={cn('text-[12px] font-semibold uppercase tracking-wide', tone)}>
+        {title}
+      </span>
+      <span className="text-[11px] font-semibold text-muted-foreground">{n}</span>
+    </div>
+  );
+  return (
+    <section>
+      <div className="mb-1.5">
+        {collapsible ? (
+          <button type="button" onClick={onToggle} className="w-full text-left">
+            {header}
+          </button>
+        ) : (
+          header
+        )}
+        {note && open && (
+          <p className="mt-0.5 text-[11px] text-muted-foreground">{note}</p>
+        )}
+      </div>
+      {open && children}
+    </section>
+  );
 }

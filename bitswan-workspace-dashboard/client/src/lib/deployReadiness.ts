@@ -20,6 +20,8 @@
  */
 
 /** One uncommitted file, as `GET /copies/{name}/status` returns it. */
+import type { TestState } from '@/lib/api';
+
 export interface ChangedPath {
   /** Copy-root-relative: `<business process dir>/…`. */
   path: string;
@@ -51,6 +53,15 @@ export interface DeployReadinessInput {
   changedUnknown: boolean;
   /** The business process's directory slug. */
   bpDir: string;
+  /**
+   * The BP's requirement-test state, or null when nothing has run (or the BP
+   * has no requirements at all). Deploy is gated on it: publishing code whose
+   * tests are failing is the thing this whole surface exists to prevent.
+   */
+  // eslint-disable-next-line no-restricted-syntax -- null = no run / no contract
+  tests?: TestState | null;
+  /** True when the BP has no requirements, so there is nothing to gate on. */
+  hasRequirements?: boolean;
   // eslint-disable-next-line no-restricted-syntax
   lastDeploy?: LastDeployReading | null;
 }
@@ -71,6 +82,12 @@ export interface DeployReadiness {
   blockedByBehind: boolean;
   lastDeployFailed: boolean;
   retryOnly: boolean;
+  /** A test run is in flight for this BP — deploy waits for it. */
+  testsRunning: boolean;
+  /** Tests failed, or their verdicts no longer describe the current code. */
+  blockedByTests: boolean;
+  /** Why the tests block, written for a human. Empty when they don't. */
+  testsReason: string;
 }
 
 /**
@@ -84,12 +101,69 @@ export function changedForBp(changed: ChangedPath[], bpDir: string): ChangedPath
   );
 }
 
+/**
+ * How the requirement tests bear on deploying this BP.
+ *
+ * A BP with no requirements is NOT gated: "no tests" is not "failing tests",
+ * and gating it would stop every business process that has not adopted the
+ * feature from ever deploying. `no_test` requirements are likewise not
+ * blocking — they are an unfinished contract, and the count is surfaced
+ * elsewhere rather than used to bar the door.
+ */
+function testGate(
+  tests: TestState | null | undefined,
+  hasRequirements: boolean | undefined,
+): { running: boolean; blocked: boolean; reason: string } {
+  if (hasRequirements === false) return { running: false, blocked: false, reason: '' };
+  if (!tests) {
+    return {
+      running: false,
+      blocked: true,
+      reason: 'Tests have not run for this business process yet.',
+    };
+  }
+  if (tests.status === 'running') {
+    const pending = tests.counts.queued + tests.counts.running;
+    return {
+      running: true,
+      blocked: true,
+      reason: `${pending} test(s) still running. Deploy is available once they pass.`,
+    };
+  }
+  if (tests.stale) {
+    return {
+      running: false,
+      blocked: true,
+      reason:
+        'The code changed after the last test run, so its results no longer describe it. Commit to start a new run.',
+    };
+  }
+  const failing = tests.counts.fail + tests.counts.blocked;
+  if (failing > 0) {
+    return {
+      running: false,
+      blocked: true,
+      reason: `${failing} test(s) are not passing. All tests must pass before this can be deployed.`,
+    };
+  }
+  if (!tests.green) {
+    return {
+      running: false,
+      blocked: true,
+      reason: 'The last test run did not complete.',
+    };
+  }
+  return { running: false, blocked: false, reason: '' };
+}
+
 export function deployReadiness({
   divergence,
   changed,
   changedUnknown,
   bpDir,
   lastDeploy,
+  tests,
+  hasRequirements,
 }: DeployReadinessInput): DeployReadiness {
   const bpChanged = changedForBp(changed, bpDir);
   const dirty = bpChanged.length > 0;
@@ -104,6 +178,7 @@ export function deployReadiness({
   // existence.
   const nothingToPublish = known && aheadBp === 0 && behindBp === 0 && !dirty;
   const upToDate = nothingToPublish && !lastDeployFailed;
+  const gate = testGate(tests, hasRequirements);
   return {
     bpChanged,
     dirty,
@@ -113,5 +188,11 @@ export function deployReadiness({
     blockedByBehind: behindBp > 0,
     lastDeployFailed,
     retryOnly: lastDeployFailed && nothingToPublish,
+    testsRunning: gate.running,
+    // Nothing to publish cannot be blocked by tests: there is no deploy to
+    // stop, and saying "tests are failing" on an up-to-date screen would be
+    // noise about work that already shipped.
+    blockedByTests: gate.blocked && !upToDate,
+    testsReason: gate.blocked && !upToDate ? gate.reason : '',
   };
 }

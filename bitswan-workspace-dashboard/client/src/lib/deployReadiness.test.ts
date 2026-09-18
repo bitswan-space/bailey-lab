@@ -162,3 +162,142 @@ test('a business process with no recorded deploy outcome is neither failed nor b
     assert.equal(r.upToDate, true, String(lastDeploy));
   }
 });
+
+// --- the requirement-test gate ----------------------------------------------
+//
+// Deploy is blocked until the tests for the code being published pass. The
+// rules that matter most are the ones about what does NOT block: a BP with no
+// requirements, and a requirement nobody has written a test for.
+
+const ahead = { ahead_bp: 1, behind_bp: 0 };
+
+function testState(over: Partial<import('./api').TestState> = {}) {
+  return {
+    run_id: 'r1',
+    copy: 'dev1',
+    bp: BP,
+    head_sha: 'abc1234',
+    head_subject: 'wip',
+    status: 'completed' as const,
+    stale: false,
+    green: true,
+    error: null,
+    counts: {
+      queued: 0,
+      running: 0,
+      pass: 1,
+      fail: 0,
+      no_test: 0,
+      blocked: 0,
+    },
+    requirements: [],
+    started_at: '',
+    completed_at: null,
+    ...over,
+  };
+}
+
+test('a business process with no requirements is never gated on tests', () => {
+  // "No tests" is not "failing tests". Gating here would stop every BP that
+  // has not adopted the feature from ever deploying again.
+  const r = deployReadiness({
+    divergence: ahead,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    tests: null,
+    hasRequirements: false,
+  });
+  assert.equal(r.blockedByTests, false);
+  assert.equal(r.actionable, true);
+});
+
+test('requirements that exist but have never been run block the deploy', () => {
+  const r = deployReadiness({
+    divergence: ahead,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    tests: null,
+    hasRequirements: true,
+  });
+  assert.equal(r.blockedByTests, true);
+  assert.match(r.testsReason, /have not run/i);
+});
+
+test('a failing run blocks, and says how many', () => {
+  const r = deployReadiness({
+    divergence: ahead,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    hasRequirements: true,
+    tests: testState({
+      green: false,
+      counts: { queued: 0, running: 0, pass: 1, fail: 2, no_test: 0, blocked: 1 },
+    }),
+  });
+  assert.equal(r.blockedByTests, true);
+  assert.match(r.testsReason, /3 test\(s\) are not passing/);
+});
+
+test('a run in flight blocks, and is reported as running rather than failing', () => {
+  const r = deployReadiness({
+    divergence: ahead,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    hasRequirements: true,
+    tests: testState({
+      status: 'running',
+      green: false,
+      counts: { queued: 2, running: 1, pass: 0, fail: 0, no_test: 0, blocked: 0 },
+    }),
+  });
+  assert.equal(r.testsRunning, true);
+  assert.equal(r.blockedByTests, true);
+  assert.match(r.testsReason, /3 test\(s\) still running/);
+});
+
+test('a stale green run blocks — its verdicts describe code that changed since', () => {
+  const r = deployReadiness({
+    divergence: ahead,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    hasRequirements: true,
+    tests: testState({ stale: true, green: false }),
+  });
+  assert.equal(r.blockedByTests, true);
+  assert.match(r.testsReason, /code changed/i);
+});
+
+test('requirements with no test do not block a green run', () => {
+  const r = deployReadiness({
+    divergence: ahead,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    hasRequirements: true,
+    tests: testState({
+      counts: { queued: 0, running: 0, pass: 1, fail: 0, no_test: 4, blocked: 0 },
+    }),
+  });
+  assert.equal(r.blockedByTests, false);
+});
+
+test('nothing to publish is never "blocked by tests"', () => {
+  // There is no deploy to stop, so complaining about tests would be noise
+  // about work that already shipped.
+  const r = deployReadiness({
+    divergence: level,
+    changed: [],
+    changedUnknown: false,
+    bpDir: BP,
+    hasRequirements: true,
+    tests: null,
+  });
+  assert.equal(r.upToDate, true);
+  assert.equal(r.blockedByTests, false);
+  assert.equal(r.testsReason, '');
+});

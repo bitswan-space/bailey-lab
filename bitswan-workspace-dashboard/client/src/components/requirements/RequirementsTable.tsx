@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Plus } from 'lucide-react';
-import type { Requirement } from '@/lib/api';
+import type { Requirement, RequirementTestResult } from '@/lib/api';
 import { descendantIds, navigate, visibleRows } from '@/lib/treegridNav';
 import { RequirementRow } from './RequirementRow';
 
@@ -11,19 +11,20 @@ interface Props {
   /** Newly created requirement id that should mount in edit mode. */
   pendingEditId: string | null;
   onEditDone: () => void;
+  /** Verdicts for the current run, keyed by requirement id. */
+  results: Map<string, RequirementTestResult>;
+  /** The run as a whole is stale — the code moved on since these verdicts. */
+  stale: boolean;
+  /** Message for an empty table — differs per group. */
+  emptyText?: string;
   onAcceptProposal: (req: Requirement) => void;
-  onSendBack: (req: Requirement) => void;
-  onUndoSendBack: (req: Requirement) => void;
-  /** Ids this person sent back in this tab — the only rows offered Undo. */
-  sentBack: ReadonlySet<string>;
   onUpdateDescription: (req: Requirement, text: string) => void;
   onAddChild: (parent: Requirement) => void;
-  /** Create a new root-level requirement (the dashed add-row at the bottom). */
-  onAddRoot: () => void;
+  /** Create a new root-level requirement (the dashed add-row at the bottom).
+   *  Omitted by the per-verdict group tables, which are not where you add. */
+  onAddRoot?: () => void;
   onDelete: (req: Requirement) => void;
   onRunTest: (req: Requirement) => void;
-  /** Ids whose test is currently running (per-row or part of an all-run). */
-  runningIds: ReadonlySet<string>;
 }
 
 /**
@@ -37,8 +38,6 @@ function flatten(reqs: Requirement[]): Array<{ req: Requirement; depth: number }
   const byParent = new Map<string, Requirement[]>();
   const ids = new Set(reqs.map((r) => r.id));
   for (const r of reqs) {
-    // Treat a parent pointing at a missing id as root, so orphans don't
-    // disappear from the view.
     const key = r.parent && ids.has(r.parent) ? r.parent : '';
     const arr = byParent.get(key) ?? [];
     arr.push(r);
@@ -101,16 +100,15 @@ export function RequirementsTable({
   loading = false,
   pendingEditId,
   onEditDone,
+  results,
+  stale,
+  emptyText,
   onAcceptProposal,
-  onSendBack,
-  onUndoSendBack,
-  sentBack,
   onUpdateDescription,
   onAddChild,
   onAddRoot,
   onDelete,
   onRunTest,
-  runningIds,
 }: Props) {
   const flat = useMemo(() => flatten(requirements), [requirements]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -127,8 +125,11 @@ export function RequirementsTable({
   const byId = useMemo(() => new Map(flat.map(({ req }) => [req.id, req])), [flat]);
   // What the keyboard navigates: every visible requirement, then the add-row.
   const navRows = useMemo(
-    () => [...rows, { id: ADD_ROW_ID, depth: 0, hasChildren: false, expanded: false }],
-    [rows],
+    () =>
+      onAddRoot
+        ? [...rows, { id: ADD_ROW_ID, depth: 0, hasChildren: false, expanded: false }]
+        : rows,
+    [rows, onAddRoot],
   );
 
   const rowEls = useRef(new Map<string, HTMLDivElement>());
@@ -264,11 +265,11 @@ export function RequirementsTable({
         controlsOf(rowEl)[0]?.focus();
         break;
       case 'activate':
-        if (result.id === ADD_ROW_ID) onAddRoot();
+        if (result.id === ADD_ROW_ID) onAddRoot?.();
         else setKeyboardEditId(result.id);
         break;
       case 'addRoot':
-        onAddRoot();
+        onAddRoot?.();
         break;
     }
   };
@@ -285,7 +286,7 @@ export function RequirementsTable({
       <div
         role="treegrid"
         aria-label="Testable requirements"
-        aria-colcount={4}
+        aria-colcount={5}
         onKeyDown={onKeyDown}
       >
         {/* Column header — mirrors the design's requirements table chrome. */}
@@ -296,11 +297,14 @@ export function RequirementsTable({
           <span role="columnheader" className="w-[70px] shrink-0">
             ID
           </span>
-          <span role="columnheader" className="w-16 shrink-0">
-            Status
+          <span role="columnheader" className="w-24 shrink-0">
+            Result
           </span>
           <span role="columnheader" className="flex-1">
             Description
+          </span>
+          <span role="columnheader" className="hidden w-24 shrink-0 sm:block">
+            Container
           </span>
           <span role="columnheader" className="w-[140px] shrink-0">
             <span className="sr-only">Actions</span>
@@ -326,15 +330,13 @@ export function RequirementsTable({
               onFocusRow={() => setActiveId(req.id)}
               editOnMount={pendingEditId === req.id || keyboardEditId === req.id}
               onEditDone={() => handleEditDone(req.id)}
+              result={results.get(req.id) ?? null}
+              stale={stale}
               onAcceptProposal={() => onAcceptProposal(req)}
-              onSendBack={() => onSendBack(req)}
-              onUndoSendBack={() => onUndoSendBack(req)}
-              canUndoSendBack={req.status === 'retest' && sentBack.has(req.id)}
               onUpdateDescription={(text) => onUpdateDescription(req, text)}
               onAddChild={() => onAddChild(req)}
               onDelete={() => onDelete(req)}
               onRunTest={() => onRunTest(req)}
-              running={runningIds.has(req.id)}
             />
           );
         })}
@@ -342,31 +344,34 @@ export function RequirementsTable({
         {/* Inline add-row — create a new root requirement (design's dashed
             skeleton row at the foot of the table). A row of the treegrid, so
             End lands on it and Enter creates: the shortest keyboard path to a
-            new requirement. */}
-        <div
-          role="row"
-          data-req-id={ADD_ROW_ID}
-          aria-level={1}
-          tabIndex={tabStopId === ADD_ROW_ID ? 0 : -1}
-          onFocus={() => setActiveId(ADD_ROW_ID)}
-          ref={(el) => {
-            if (el) rowEls.current.set(ADD_ROW_ID, el);
-            else rowEls.current.delete(ADD_ROW_ID);
-          }}
-          className="border-t border-dashed border-border focus:outline-none focus-visible:bg-muted/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground/40"
-        >
-          <div role="gridcell">
-            <button
-              type="button"
-              tabIndex={-1}
-              onClick={onAddRoot}
-              className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/40"
-            >
-              <Plus className="size-3.5" aria-hidden />
-              New requirement
-            </button>
+            new requirement. Only where adding is offered: the per-verdict
+            group tables are not where you add one. */}
+        {onAddRoot && (
+          <div
+            role="row"
+            data-req-id={ADD_ROW_ID}
+            aria-level={1}
+            tabIndex={tabStopId === ADD_ROW_ID ? 0 : -1}
+            onFocus={() => setActiveId(ADD_ROW_ID)}
+            ref={(el) => {
+              if (el) rowEls.current.set(ADD_ROW_ID, el);
+              else rowEls.current.delete(ADD_ROW_ID);
+            }}
+            className="border-t border-dashed border-border focus:outline-none focus-visible:bg-muted/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground/40"
+          >
+            <div role="gridcell">
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={onAddRoot}
+                className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/40"
+              >
+                <Plus className="size-3.5" aria-hidden />
+                New requirement
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {placeholder && (
