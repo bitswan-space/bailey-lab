@@ -39,8 +39,12 @@ const focused = () =>
     };
   });
 
+const ADD_ROW = '__add-root__';
+/** Requirement rows only — the add-row is a row too, but not a requirement. */
 const visibleRowIds = () =>
-  page.$$eval('[data-req-id]', (els) => els.map((e) => e.getAttribute('data-req-id')));
+  page
+    .$$eval('[data-req-id]', (els) => els.map((e) => e.getAttribute('data-req-id')))
+    .then((ids) => ids.filter((id) => id !== ADD_ROW));
 
 const ariaOf = (reqId) =>
   page.$eval(`[data-req-id="${reqId}"]`, (el) => ({
@@ -68,7 +72,11 @@ console.log('\n--- semantics ---');
 await check('the grid exposes treegrid + rows + gridcells', async () => {
   eq(await page.locator('[role="treegrid"]').count(), 1, 'treegrid count');
   eq(await page.locator('[role="columnheader"]').count(), 4, 'columnheader count');
-  eq(await page.locator('[role="gridcell"]').count(), 24, 'gridcell count (6 rows x 4)');
+  eq(
+    await page.locator('[role="gridcell"]').count(),
+    25,
+    'gridcell count (6 requirement rows x 4, plus the add-row)',
+  );
 });
 
 await check('aria-level carries the depth that padding only draws', async () => {
@@ -103,10 +111,10 @@ await check('one Tab reaches the grid, one more leaves it', async () => {
   eq((await focused()).self, 'REQ-1', 'after 1st Tab');
   await page.keyboard.press('Tab');
   const f = await focused();
+  // The add-row lives inside the grid now, so one Tab clears the entire table
+  // — requirements and the add-row together.
   if (f.inRow !== null) throw new Error(`Tab did not escape the grid, landed in ${f.inRow}`);
-  eq(f.label, 'New requirement', 'after 2nd Tab');
-  await page.keyboard.press('Tab');
-  eq((await focused()).id, 'after', 'after 3rd Tab');
+  eq(f.id, 'after', 'after 2nd Tab');
 });
 
 console.log('\n--- navigation ---');
@@ -122,7 +130,7 @@ await check('down and up step between rows', async () => {
 
 await check('home and end jump to the ends', async () => {
   await page.keyboard.press('End');
-  eq((await focused()).self, 'REQ-3', 'End');
+  eq((await focused()).self, ADD_ROW, 'End lands on the add-row, the grid\'s last row');
   await page.keyboard.press('Home');
   eq((await focused()).self, 'REQ-1', 'Home');
 });
@@ -230,6 +238,63 @@ await check('collapsing elsewhere leaves unrelated focus alone', async () => {
   await page.waitForTimeout(50);
   eq((await focused()).self, 'REQ-3', 'focus must not be stolen');
   await page.click('[aria-label="Expand REQ-1"]');
+});
+
+
+console.log('\n--- the add-row is part of the grid ---');
+await check('down from the last requirement reaches "New requirement"', async () => {
+  await page.focus('[data-req-id="REQ-3"]');
+  await page.keyboard.press('ArrowDown');
+  eq((await focused()).self, '__add-root__', 'ArrowDown past the last requirement');
+  await page.keyboard.press('ArrowUp');
+  eq((await focused()).self, 'REQ-3', 'ArrowUp back off it');
+});
+
+await check('End lands on it and Enter creates a requirement', async () => {
+  const before = (await visibleRowIds()).length;
+  await page.focus('[data-req-id="REQ-1"]');
+  await page.keyboard.press('End');
+  eq((await focused()).self, '__add-root__', 'End');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(50);
+  const after = (await visibleRowIds()).length;
+  if (after !== before + 1) throw new Error(`expected a new row, went ${before} -> ${after}`);
+  // It opens in edit mode, as RequirementsTab does; close it for later checks.
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(50);
+});
+
+await check('the grid is still a single tab stop with the add-row inside', async () => {
+  const tabbable = await page.$$eval('[data-req-id]', (els) =>
+    els.filter((e) => e.getAttribute('tabindex') === '0').length,
+  );
+  eq(tabbable, 1, 'rows with tabindex=0');
+  const leaked = await page.$$eval('[data-req-id] button', (els) =>
+    els.filter((e) => e.getAttribute('tabindex') !== '-1').length,
+  );
+  eq(leaked, 0, 'controls left in the tab order');
+});
+
+console.log('\n--- vertical movement from inside a row ---');
+await check('up and down move rows even when focus is on a control', async () => {
+  await page.focus('[data-req-id="REQ-1.2"]');
+  await page.keyboard.press('ArrowRight'); // step into the row's controls
+  eq((await focused()).tag, 'button', 'inside the row');
+  await page.keyboard.press('ArrowDown');
+  eq((await focused()).self, 'REQ-2', 'ArrowDown from a control');
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowUp');
+  eq((await focused()).self, 'REQ-1.2', 'ArrowUp from a control');
+});
+
+await check('left and right still move between controls, not rows', async () => {
+  await page.focus('[data-req-id="REQ-3"]');
+  await page.keyboard.press('ArrowRight');
+  const first = await focused();
+  await page.keyboard.press('ArrowRight');
+  const second = await focused();
+  eq(second.inRow, 'REQ-3', 'still in the same row');
+  if (first.label === second.label) throw new Error('ArrowRight did not move between controls');
 });
 
 console.log(`\n${checks - failures.length}/${checks} checks passed`);

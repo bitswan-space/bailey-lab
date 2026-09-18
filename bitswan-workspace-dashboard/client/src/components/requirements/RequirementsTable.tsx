@@ -57,6 +57,14 @@ function flatten(reqs: Requirement[]): Array<{ req: Requirement; depth: number }
   return out;
 }
 
+/**
+ * Row id of the "New requirement" add-row. It is a real row of the treegrid
+ * rather than a button beside it, so ↑/↓/Home/End reach it like any other row
+ * — a treegrid may only contain rows, and the design already draws it as the
+ * table's last (dashed) row.
+ */
+const ADD_ROW_ID = '__add-root__';
+
 /** The controls inside a row, in visual order, that ←/→ step through. */
 function controlsOf(rowEl: HTMLElement): HTMLElement[] {
   return Array.from(rowEl.querySelectorAll<HTMLElement>('button')).filter(
@@ -111,6 +119,11 @@ export function RequirementsTable({
     [flat, collapsed],
   );
   const byId = useMemo(() => new Map(flat.map(({ req }) => [req.id, req])), [flat]);
+  // What the keyboard navigates: every visible requirement, then the add-row.
+  const navRows = useMemo(
+    () => [...rows, { id: ADD_ROW_ID, depth: 0, hasChildren: false, expanded: false }],
+    [rows],
+  );
 
   const rowEls = useRef(new Map<string, HTMLDivElement>());
   const focusRow = (id: string) => rowEls.current.get(id)?.focus();
@@ -118,7 +131,9 @@ export function RequirementsTable({
   // Exactly one row is tabbable. If the active row was filtered, deleted or
   // collapsed away, the tab stop falls back to the first visible row so the
   // grid is never unreachable by keyboard.
-  const tabStopId = rows.some((r) => r.id === activeId) ? activeId : (rows[0]?.id ?? null);
+  const tabStopId = navRows.some((r) => r.id === activeId)
+    ? activeId
+    : (navRows[0]?.id ?? null);
 
   /**
    * Collapsing unmounts every row in the subtree. If focus is sitting in one
@@ -207,12 +222,16 @@ export function RequirementsTable({
     const id = rowEl.dataset.reqId;
     if (!id) return;
 
-    if (target !== rowEl) {
+    // Vertical movement works from inside a row too — it is how you leave a
+    // row's controls without first stepping back out to the row. ←/→ and Esc
+    // stay control-local.
+    const VERTICAL = e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Home' || e.key === 'End';
+    if (target !== rowEl && !VERTICAL) {
       onControlKey(e, rowEl, target);
       return;
     }
 
-    const result = navigate(rows, id, e.key);
+    const result = navigate(navRows, id, e.key);
     if (!result) return; // not ours — Tab in particular must still escape
     e.preventDefault();
     switch (result.kind) {
@@ -230,7 +249,8 @@ export function RequirementsTable({
         controlsOf(rowEl)[0]?.focus();
         break;
       case 'activate':
-        setKeyboardEditId(result.id);
+        if (result.id === ADD_ROW_ID) onAddRoot();
+        else setKeyboardEditId(result.id);
         break;
     }
   };
@@ -300,24 +320,40 @@ export function RequirementsTable({
             />
           );
         })}
+
+        {/* Inline add-row — create a new root requirement (design's dashed
+            skeleton row at the foot of the table). A row of the treegrid, so
+            End lands on it and Enter creates: the shortest keyboard path to a
+            new requirement. */}
+        <div
+          role="row"
+          data-req-id={ADD_ROW_ID}
+          aria-level={1}
+          tabIndex={tabStopId === ADD_ROW_ID ? 0 : -1}
+          onFocus={() => setActiveId(ADD_ROW_ID)}
+          ref={(el) => {
+            if (el) rowEls.current.set(ADD_ROW_ID, el);
+            else rowEls.current.delete(ADD_ROW_ID);
+          }}
+          className="border-t border-dashed border-border focus:outline-none focus-visible:bg-muted/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-foreground/40"
+        >
+          <div role="gridcell">
+            <button
+              type="button"
+              tabIndex={-1}
+              onClick={onAddRoot}
+              className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/40"
+            >
+              <Plus className="size-3.5" aria-hidden />
+              New requirement
+            </button>
+          </div>
+        </div>
       </div>
 
       {placeholder && (
         <div className="px-5 py-10 text-center text-xs text-muted-foreground">{placeholder}</div>
       )}
-
-      {/* Inline add-row — create a new root requirement (design's dashed
-          skeleton row at the foot of the table). Deliberately outside the
-          treegrid: it is not a row, and it stays an ordinary tab stop so the
-          keyboard path out of the grid lands on it. */}
-      <button
-        type="button"
-        onClick={onAddRoot}
-        className="flex w-full items-center gap-2 border-t border-dashed border-border px-3.5 py-2.5 text-left text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/40"
-      >
-        <Plus className="size-3.5" aria-hidden />
-        New requirement
-      </button>
     </div>
   );
 }

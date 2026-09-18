@@ -26,6 +26,13 @@ const SEED: Requirement[] = [
 function Harness() {
   const [reqs, setReqs] = useState<Requirement[]>(SEED);
   const [pendingEditId, setPendingEditId] = useState<string | null>(null);
+  // Mirrors RequirementsTab: a new requirement is appended and opens in edit
+  // mode. Stubbing this out would make the add-row's Enter untestable.
+  const addRoot = () => {
+    const id = `REQ-NEW-${reqs.length}`;
+    setReqs((prev) => [...prev, { id, description: '', status: 'pending', parent: '' }]);
+    setPendingEditId(id);
+  };
   return (
     <TooltipProvider>
       {/* A control before and after the grid, to prove Tab enters and leaves. */}
@@ -42,7 +49,7 @@ function Harness() {
           setReqs((prev) => prev.map((r) => (r.id === req.id ? { ...r, description: text } : r)))
         }
         onAddChild={() => {}}
-        onAddRoot={() => {}}
+        onAddRoot={addRoot}
         onDelete={() => {}}
         onRunTest={() => {}}
         runningIds={new Set()}
