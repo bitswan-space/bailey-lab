@@ -25,6 +25,7 @@ export interface DeployedAutomation {
   // containers split. Optional for back-compat with older gitops payloads.
   expose?: boolean;
   restart_count?: number | null;
+  started_at?: string | null;
   // Memory governance (Containers tab): live usage vs the declared reservation.
   mem_usage_bytes?: number | null;
   mem_reservation_mb?: number | null;

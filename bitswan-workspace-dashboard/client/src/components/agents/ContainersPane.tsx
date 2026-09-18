@@ -10,13 +10,20 @@ import {
   RotateCcw,
   Square,
 } from 'lucide-react';
-import { toast } from '@/lib/notify';
 import { api } from '@/lib/api';
 import { deployBpWithToast } from '@/lib/deployBp';
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { useBpLabel } from '@/hooks/useBpLabel';
 import { bpContainers, type BpContainer } from '@/lib/bpContainers';
 import { isUpStatus, STATUS_META } from '@/lib/status';
+import {
+  beginPending,
+  pendingFailed,
+  pendingIssued,
+  usePendingActions,
+  type PendingKind,
+} from '@/lib/pendingActions';
+import { PendingActionMark } from '@/components/shared/PendingActionMark';
 import { OverviewPane } from '@/components/automations/inspect/OverviewPane';
 import { LogsPane } from '@/components/automations/inspect/LogsPane';
 import { BuildLogsPane } from '@/components/automations/inspect/BuildLogsPane';
@@ -74,7 +81,7 @@ export function ContainersPane({ bp, copy, active }: Props) {
     setUrlParams({ ct: name, ...EXPLORER_PARAMS });
   const isPseudo = selectedName === PSEUDO_OBJECTS || selectedName === PSEUDO_SQL;
   const [detail, setDetail] = useState<Detail>('overview');
-  const [busy, setBusy] = useState(false);
+  const pending = usePendingActions();
   const [deploying, setDeploying] = useState(false);
 
   // Rebuild every image in this business process and redeploy the copy's
@@ -109,6 +116,12 @@ export function ContainersPane({ bp, copy, active }: Props) {
   }, [containers, selectedName, isPseudo, active]);
 
   const selected = containers.find((c) => c.name === selectedName) ?? null;
+  const selectedPending = selected?.deploymentId
+    ? pending.get(selected.deploymentId)
+    : undefined;
+  const actingUp = selectedPending
+    ? selectedPending.kind === 'restart' || selectedPending.kind === 'stop'
+    : selected !== null && isUpStatus(selected.status);
 
   // The image build checksum lives in the automation's `automation.toml` as
   // image = "internal/<root>:sha<checksum>" (gitops writes the BUILT base image
@@ -137,19 +150,22 @@ export function ContainersPane({ bp, copy, active }: Props) {
     };
   }, [selected?.name, bp, copy, detail, active]);
 
-  const lifecycle = async (verb: 'restart' | 'stop' | 'start', c: BpContainer) => {
-    if (!c.deploymentId) return;
-    setBusy(true);
+  const lifecycle = async (verb: PendingKind, c: BpContainer) => {
+    const id = c.deploymentId;
+    if (!id) return;
+    beginPending({
+      deploymentId: id,
+      kind: verb,
+      name: c.name,
+      baseline: { startedAt: c.startedAt, containerId: c.containerId, status: c.status },
+    });
     try {
-      if (verb === 'restart') await api.restartAutomation(c.deploymentId);
-      else if (verb === 'stop') await api.stopAutomation(c.deploymentId);
-      else await api.startAutomation(c.deploymentId);
+      if (verb === 'restart') await api.restartAutomation(id);
+      else if (verb === 'stop') await api.stopAutomation(id);
+      else await api.startAutomation(id);
+      pendingIssued(id);
     } catch (e) {
-      toast.error(`${verb} failed`, {
-        description: e instanceof Error ? e.message : String(e),
-      });
-    } finally {
-      setBusy(false);
+      pendingFailed(id, e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -214,6 +230,10 @@ export function ContainersPane({ bp, copy, active }: Props) {
                 <span className="flex-1 truncate font-mono text-xs text-foreground">
                   {c.name}
                 </span>
+                <PendingActionMark
+                  pending={c.deploymentId ? pending.get(c.deploymentId) : undefined}
+                  density="dot"
+                />
                 <RestartChip count={c.restartCount} />
                 <StatusDot status={c.status} />
               </button>
@@ -270,26 +290,24 @@ export function ContainersPane({ bp, copy, active }: Props) {
                       · restarted {selected.restartCount.toLocaleString()} times
                     </span>
                   )}
+                  <PendingActionMark pending={selectedPending} density="chip" />
                   <span>· logs &amp; details for this copy</span>
                 </div>
               </div>
               <div className="ml-auto flex items-center gap-2">
-                {busy && (
-                  <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-hidden />
-                )}
-                {isUpStatus(selected.status) ? (
+                {actingUp ? (
                   <>
                     <LifecycleBtn
                       icon={<RotateCcw className="size-3" aria-hidden />}
                       label="Restart"
-                      disabled={busy || !selected.deploymentId}
+                      disabled={!!selectedPending || !selected.deploymentId}
                       onClick={() => lifecycle('restart', selected)}
                     />
                     <LifecycleBtn
                       icon={<Square className="size-3" aria-hidden />}
                       label="Stop"
                       danger
-                      disabled={busy || !selected.deploymentId}
+                      disabled={!!selectedPending || !selected.deploymentId}
                       onClick={() => lifecycle('stop', selected)}
                     />
                   </>
@@ -297,7 +315,7 @@ export function ContainersPane({ bp, copy, active }: Props) {
                   <LifecycleBtn
                     icon={<Play className="size-3" aria-hidden />}
                     label="Start"
-                    disabled={busy || !selected.deploymentId}
+                    disabled={!!selectedPending || !selected.deploymentId}
                     onClick={() => lifecycle('start', selected)}
                   />
                 )}
