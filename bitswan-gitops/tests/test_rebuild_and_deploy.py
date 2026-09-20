@@ -194,9 +194,16 @@ async def test_live_dev_and_foreign_copies_are_ignored(svc, monkeypatch):
 
     out = await svc.resolve_missing_pinned_images()
 
-    # live-dev bakes no image at all, so it is not even a target. A non-main copy
-    # IS a target (it pins an image) but cannot be traced to the BP's repo, so it
-    # is reported rather than silently dropped.
+    # The service's own count of what it considered, not the stub's record of
+    # what it was asked to bake: live-dev pins no image, so exactly two of the
+    # three deployments are targets. The disjunction below tolerates an extra
+    # name turning up in `baked`; this does not.
+    assert out["missing"] == 2, "live-dev pins no image, so it is not a target"
+    # A non-main copy IS a target (it pins an image) but cannot be traced back to
+    # the BP's repo, so the real rebuild has nothing to build from. That check
+    # lives inside `_rebuild_pinned_image`, which is stubbed here — hence the
+    # either/or, and hence `_bp_repo_relative_source` being pinned on its own by
+    # the next test rather than through this one.
     assert calls["baked"] == ["d-ok"] or "d-copy" in calls["baked"]
     assert "d-live" not in calls["baked"]
 
