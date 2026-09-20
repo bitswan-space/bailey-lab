@@ -144,10 +144,19 @@ await check('left collapses, and down then skips the hidden subtree', async () =
   eq((await focused()).self, 'REQ-2', 'ArrowDown past a collapsed subtree');
 });
 
-await check('right expands it again', async () => {
+await check('right enters the folded row, and Enter on the chevron unfolds it', async () => {
   await page.focus('[data-req-id="REQ-1"]');
   await page.keyboard.press('ArrowRight');
-  eq((await ariaOf('REQ-1')).expanded, 'true', 'REQ-1 after expand');
+  // → is no longer spent on unfolding, so a folded parent's buttons are
+  // reachable without dumping its whole subtree on screen.
+  eq((await ariaOf('REQ-1')).expanded, 'false', 'REQ-1 still folded after ArrowRight');
+  eq(await visibleRowIds(), ['REQ-1', 'REQ-2', 'REQ-3'], 'subtree still hidden');
+  const f = await focused();
+  eq(f.inRow, 'REQ-1', 'focus stepped into REQ-1');
+  eq(f.label, 'Expand REQ-1', 'the chevron is the first control');
+  // Unfolding did not disappear — it moved onto that chevron.
+  await page.keyboard.press('Enter');
+  eq((await ariaOf('REQ-1')).expanded, 'true', 'REQ-1 after Enter on the chevron');
   eq((await visibleRowIds()).length, 6, 'all rows back');
 });
 
@@ -295,6 +304,60 @@ await check('left and right still move between controls, not rows', async () => 
   const second = await focused();
   eq(second.inRow, 'REQ-3', 'still in the same row');
   if (first.label === second.label) throw new Error('ArrowRight did not move between controls');
+});
+
+console.log('\n--- the three actions reported missing in review ---');
+
+/**
+ * → from a row until the control with this accessible name holds focus.
+ * Walking rather than seeking the button directly is the point: it proves the
+ * control is *reachable* by key, not merely that it exists in the DOM.
+ */
+async function walkTo(reqId, label, max = 12) {
+  await page.focus(`[data-req-id="${reqId}"]`);
+  for (let i = 0; i < max; i++) {
+    await page.keyboard.press('ArrowRight');
+    if ((await focused()).label === label) return i + 1;
+  }
+  throw new Error(`never reached "${label}" from ${reqId} in ${max} presses`);
+}
+const callsSince = async (fn) => {
+  await page.evaluate(() => { window.__calls.length = 0; });
+  await fn();
+  return page.evaluate(() => window.__calls);
+};
+
+await check('an individual test runs from the keyboard', async () => {
+  const calls = await callsSince(async () => {
+    await walkTo('REQ-3', 'Run test for REQ-3');
+    await page.keyboard.press('Enter');
+  });
+  eq(calls, ['runTest:REQ-3'], 'onRunTest after Enter');
+});
+
+await check('a child requirement is added from the keyboard', async () => {
+  const calls = await callsSince(async () => {
+    await walkTo('REQ-2', 'Add child requirement');
+    await page.keyboard.press('Enter');
+  });
+  eq(calls, ['addChild:REQ-2'], 'onAddChild after Enter');
+  // And it lands in the tree as a child, not a sibling.
+  if (!(await visibleRowIds()).includes('REQ-2.NEW')) throw new Error('the child row never appeared');
+  eq((await ariaOf('REQ-2.NEW')).level, '2', 'the new child sits one level deeper');
+});
+
+await check('a folded parent runs its test without being unfolded', async () => {
+  await page.focus('[data-req-id="REQ-1"]');
+  await page.keyboard.press('ArrowLeft');
+  eq((await ariaOf('REQ-1')).expanded, 'false', 'REQ-1 folded');
+  const before = (await visibleRowIds()).length;
+  const calls = await callsSince(async () => {
+    await walkTo('REQ-1', 'Run test for REQ-1');
+    await page.keyboard.press('Enter');
+  });
+  eq(calls, ['runTest:REQ-1'], 'onRunTest on a folded row');
+  eq((await ariaOf('REQ-1')).expanded, 'false', 'still folded afterwards');
+  eq((await visibleRowIds()).length, before, 'no subtree rows appeared');
 });
 
 console.log(`\n${checks - failures.length}/${checks} checks passed`);

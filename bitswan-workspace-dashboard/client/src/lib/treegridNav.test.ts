@@ -93,19 +93,28 @@ test('left closes an open parent, then climbs to the parent once closed', () => 
   assert.equal(navigate(open(), 'REQ-2', 'ArrowLeft'), null);
 });
 
-test('right opens a closed parent, then steps into the row once open', () => {
+test('right steps into the row whether or not it is folded', () => {
+  // The point of the rule: a folded parent's buttons are reachable without
+  // first dumping its whole subtree on screen. → never unfolds.
   assert.deepEqual(navigate(open('REQ-1'), 'REQ-1', 'ArrowRight'), {
-    kind: 'expand',
+    kind: 'enterRow',
     id: 'REQ-1',
   });
   assert.deepEqual(navigate(open(), 'REQ-1', 'ArrowRight'), {
     kind: 'enterRow',
     id: 'REQ-1',
   });
-  // A leaf has nothing to open, so it steps into its controls immediately.
+  // A leaf behaves identically, so there is only one rule to learn.
   assert.deepEqual(navigate(open(), 'REQ-3', 'ArrowRight'), {
     kind: 'enterRow',
     id: 'REQ-3',
+  });
+  // ← still folds straight from the row. The pair is deliberately not
+  // symmetric: unfolding moved to the chevron (the row's first control),
+  // collapsing stayed on the key because it never hides what you are on.
+  assert.deepEqual(navigate(open(), 'REQ-1', 'ArrowLeft'), {
+    kind: 'collapse',
+    id: 'REQ-1',
   });
 });
 

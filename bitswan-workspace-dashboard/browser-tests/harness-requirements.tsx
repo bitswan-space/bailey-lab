@@ -23,9 +23,32 @@ const SEED: Requirement[] = [
   { id: 'REQ-3', description: 'Audit log', status: 'pass', parent: '', hasTest: true },
 ];
 
+/**
+ * Every callback the table fires, in order, readable from Playwright as
+ * `window.__calls`. Reaching a control proves nothing on its own — the point
+ * is that pressing Enter on it actually invokes the action behind it.
+ */
+const calls: string[] = [];
+Object.assign(window, { __calls: calls });
+
 function Harness() {
   const [reqs, setReqs] = useState<Requirement[]>(SEED);
   const [pendingEditId, setPendingEditId] = useState<string | null>(null);
+  // A real insert, not a spy: the new child has to appear under its parent for
+  // "managing child requirements from the keyboard" to mean anything.
+  const addChild = (parent: Requirement) => {
+    calls.push(`addChild:${parent.id}`);
+    setReqs((prev) => {
+      const at = prev.findIndex((r) => r.id === parent.id);
+      const child: Requirement = {
+        id: `${parent.id}.NEW`,
+        description: 'new child',
+        status: 'pending',
+        parent: parent.id,
+      };
+      return [...prev.slice(0, at + 1), child, ...prev.slice(at + 1)];
+    });
+  };
   // Mirrors RequirementsTab: a new requirement is appended and opens in edit
   // mode. Stubbing this out would make the add-row's Enter untestable.
   const addRoot = () => {
@@ -48,10 +71,10 @@ function Harness() {
         onUpdateDescription={(req, text) =>
           setReqs((prev) => prev.map((r) => (r.id === req.id ? { ...r, description: text } : r)))
         }
-        onAddChild={() => {}}
+        onAddChild={addChild}
         onAddRoot={addRoot}
         onDelete={() => {}}
-        onRunTest={() => {}}
+        onRunTest={(req) => calls.push(`runTest:${req.id}`)}
         runningIds={new Set()}
       />
       <button id="after">after</button>

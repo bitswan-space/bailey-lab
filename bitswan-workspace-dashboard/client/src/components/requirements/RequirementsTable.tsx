@@ -82,10 +82,14 @@ function controlsOf(rowEl: HTMLElement): HTMLElement[] {
  *     `tabIndex={0}`; every other row and every control inside a row is
  *     `-1`. Tab therefore steps over the whole table instead of visiting
  *     ~5 controls per requirement, which is the complaint in #268.
- *   - ↑/↓ move between visible rows, ←/→ fold and unfold a subtree,
- *     Home/End jump to the ends, Enter opens the description editor.
- *   - → on an already-open row (or a leaf) steps *into* the row's controls,
- *     where ←/→ move between them and Escape returns to the row.
+ *   - ↑/↓ move between visible rows, Home/End jump to the ends, Enter opens
+ *     the description editor.
+ *   - → steps *into* the row's controls — always, whether the row is folded
+ *     or not — where ←/→ move between them and Escape returns to the row.
+ *     The disclosure chevron is the first of those controls, so → Enter is
+ *     how the keyboard unfolds a subtree.
+ *   - ← collapses an open row, and on an already-closed row climbs to the
+ *     parent.
  *
  * The decision logic lives in `lib/treegridNav.ts` so it can be unit-tested
  * without a DOM; this component only turns its results into real focus.
@@ -241,9 +245,6 @@ export function RequirementsTable({
         break;
       case 'collapse':
         setExpanded(result.id, false);
-        break;
-      case 'expand':
-        setExpanded(result.id, true);
         break;
       case 'enterRow':
         controlsOf(rowEl)[0]?.focus();

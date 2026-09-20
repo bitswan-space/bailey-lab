@@ -49,7 +49,6 @@ export interface VisibleRow extends TreeRow {
 export type NavResult =
   | { kind: 'move'; id: string }
   | { kind: 'collapse'; id: string }
-  | { kind: 'expand'; id: string }
   /** Move focus off the row and onto the first control inside it. */
   | { kind: 'enterRow'; id: string }
   /** Primary action for the row — here, open the description editor. */
@@ -181,9 +180,13 @@ export function navigate(
     case 'Enter':
       return { kind: 'activate', id: row.id };
     case 'ArrowRight':
-      // Expand first; on an already-open row (or a leaf) step into its
-      // controls, per the treegrid pattern's "move to the first cell".
-      if (row.hasChildren && !row.expanded) return { kind: 'expand', id: row.id };
+      // Always step into the row's controls. The APG row-focus rule spends →
+      // on unfolding a collapsed parent first, which means a row's buttons
+      // cannot be reached without dumping its whole subtree on screen — the
+      // complaint that prompted this. Unfolding is not lost: the disclosure
+      // chevron is the row's *first* control, so → Enter toggles it, and as a
+      // labelled button it announces itself to a screen reader in a way a
+      // bare key press never could. ← still collapses straight from the row.
       return { kind: 'enterRow', id: row.id };
     case 'ArrowLeft': {
       // Close first; on an already-closed row (or a leaf) climb to the parent.

@@ -156,8 +156,9 @@ export function RequirementRow({
     >
       <div role="gridcell" className="flex w-[70px] shrink-0 items-center gap-0.5 pt-0.5">
         {/* Disclosure triangle. Rendered as a fixed-width slot even for leaves
-            so ids stay aligned down the column. Mouse users get the same fold
-            the keyboard's ←/→ gives. */}
+            so ids stay aligned down the column. It is deliberately the row's
+            *first* control: → steps into the row and lands here, so → Enter
+            is the keyboard's unfold. (← still folds straight from the row.) */}
         {hasChildren ? (
           <button
             type="button"
