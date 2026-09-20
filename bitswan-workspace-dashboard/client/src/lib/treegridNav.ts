@@ -53,6 +53,8 @@ export type NavResult =
   | { kind: 'enterRow'; id: string }
   /** Primary action for the row — here, open the description editor. */
   | { kind: 'activate'; id: string }
+  /** Create a new root requirement. Grid-wide: it belongs to no row. */
+  | { kind: 'addRoot' }
   | null;
 
 /** True when `rows[i]` has at least one child in the *unfiltered* flat list. */
@@ -148,8 +150,17 @@ export function navigate(
     'Home',
     'End',
     'Enter',
+    // "+" means add. Unmodified on purpose: Ctrl/Cmd + "+" is how a low-vision
+    // user zooms the page, and WCAG 1.4.4 asks that it keep working — which
+    // matters more in this table than anywhere else in the app. "=" is taken
+    // as an alias so a US layout, where "+" is Shift+"=", need not reach for
+    // the modifier. Matching on `key` rather than `code` keeps both working on
+    // layouts that put "+" somewhere else entirely.
+    '+',
+    '=',
   ]);
   if (!NAV_KEYS.has(key)) return null;
+  if (key === '+' || key === '=') return { kind: 'addRoot' };
 
   const first = rows[0];
   const last = rows[rows.length - 1];

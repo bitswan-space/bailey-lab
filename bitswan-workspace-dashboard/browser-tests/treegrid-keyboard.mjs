@@ -360,6 +360,68 @@ await check('a folded parent runs its test without being unfolded', async () => 
   eq((await visibleRowIds()).length, before, 'no subtree rows appeared');
 });
 
+console.log('\n--- "+" adds a requirement ---');
+
+// Playwright reads "+" as its own modifier separator, so the literal key is
+// pressed by name: Shift+Equal yields key="+" and Equal yields key="=".
+const PLUS = 'Shift+Equal';
+const rowCount = async () => (await visibleRowIds()).length;
+/** Dismiss the editor the new requirement opens in, as RequirementsTab does. */
+const settle = async () => {
+  await page.waitForTimeout(50);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(50);
+};
+
+await check('+ on a row adds a requirement', async () => {
+  const before = await rowCount();
+  await page.focus('[data-req-id="REQ-2"]');
+  await page.keyboard.press(PLUS);
+  await page.waitForTimeout(50);
+  eq(await rowCount(), before + 1, 'rows after "+"');
+  await settle();
+});
+
+await check('= does the same, so a US layout need not hold Shift', async () => {
+  const before = await rowCount();
+  await page.focus('[data-req-id="REQ-2"]');
+  await page.keyboard.press('Equal');
+  await page.waitForTimeout(50);
+  eq(await rowCount(), before + 1, 'rows after "="');
+  await settle();
+});
+
+await check('+ works from inside a row as well as on it', async () => {
+  const before = await rowCount();
+  await page.focus('[data-req-id="REQ-2"]');
+  await page.keyboard.press('ArrowRight');
+  eq((await focused()).tag, 'button', 'focus is on a control');
+  await page.keyboard.press(PLUS);
+  await page.waitForTimeout(50);
+  eq(await rowCount(), before + 1, 'rows after "+" from a control');
+  await settle();
+});
+
+await check('Ctrl and + is left alone, so the browser can still zoom', async () => {
+  const before = await rowCount();
+  await page.focus('[data-req-id="REQ-2"]');
+  await page.keyboard.press('Control+Shift+Equal');
+  await page.waitForTimeout(50);
+  eq(await rowCount(), before, 'a modified "+" must add nothing');
+});
+
+await check('+ inside the description editor types a character', async () => {
+  const before = await rowCount();
+  await page.focus('[data-req-id="REQ-3"]');
+  await page.keyboard.press('Enter');
+  if (!(await page.$('textarea'))) throw new Error('the editor did not open');
+  await page.keyboard.type('a+b');
+  eq(await page.$eval('textarea', (el) => el.value.endsWith('a+b')), true, 'the + was typed');
+  eq(await rowCount(), before, 'no requirement added while editing');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(50);
+});
+
 console.log(`\n${checks - failures.length}/${checks} checks passed`);
 if (failures.length) {
   console.log('\nFAILURES:');

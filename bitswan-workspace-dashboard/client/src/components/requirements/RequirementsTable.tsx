@@ -90,6 +90,8 @@ function controlsOf(rowEl: HTMLElement): HTMLElement[] {
  *     how the keyboard unfolds a subtree.
  *   - ← collapses an open row, and on an already-closed row climbs to the
  *     parent.
+ *   - + (or =) adds a requirement from anywhere in the grid. The editor is
+ *     exempt: key handling stops at a textarea, so "+" still types a "+".
  *
  * The decision logic lives in `lib/treegridNav.ts` so it can be unit-tested
  * without a DOM; this component only turns its results into real focus.
@@ -221,16 +223,28 @@ export function RequirementsTable({
     if (!(target instanceof HTMLElement)) return;
     // Never touch keys meant for the inline editor.
     if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) return;
+    // Never claim a chord. `navigate()` is given only the key name, so without
+    // this Ctrl/Cmd + "+" would read as a bare "+" and we would preventDefault
+    // the browser's zoom — the one thing the unmodified binding exists to
+    // avoid. Nothing in this grid is bound to a modifier.
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     const rowEl = target.closest<HTMLElement>('[data-req-id]');
     if (!rowEl) return; // the column header, or anything else in the grid
     const id = rowEl.dataset.reqId;
     if (!id) return;
 
-    // Vertical movement works from inside a row too — it is how you leave a
-    // row's controls without first stepping back out to the row. ←/→ and Esc
-    // stay control-local.
-    const VERTICAL = e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Home' || e.key === 'End';
-    if (target !== rowEl && !VERTICAL) {
+    // These work from inside a row too. Vertical movement is how you leave a
+    // row's controls without stepping back out first; "+" is grid-wide because
+    // adding a requirement is not an action of whichever button happens to
+    // hold focus. ←/→ and Esc stay control-local.
+    const GRID_WIDE =
+      e.key === 'ArrowUp' ||
+      e.key === 'ArrowDown' ||
+      e.key === 'Home' ||
+      e.key === 'End' ||
+      e.key === '+' ||
+      e.key === '=';
+    if (target !== rowEl && !GRID_WIDE) {
       onControlKey(e, rowEl, target);
       return;
     }
@@ -252,6 +266,9 @@ export function RequirementsTable({
       case 'activate':
         if (result.id === ADD_ROW_ID) onAddRoot();
         else setKeyboardEditId(result.id);
+        break;
+      case 'addRoot':
+        onAddRoot();
         break;
     }
   };

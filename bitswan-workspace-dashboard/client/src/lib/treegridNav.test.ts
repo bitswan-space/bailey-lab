@@ -118,6 +118,21 @@ test('right steps into the row whether or not it is folded', () => {
   });
 });
 
+test('plus adds a requirement from anywhere in the grid', () => {
+  const rows = open();
+  assert.deepEqual(navigate(rows, 'REQ-2', '+'), { kind: 'addRoot' });
+  // "=" is "+" without Shift on a US layout.
+  assert.deepEqual(navigate(rows, 'REQ-2', '='), { kind: 'addRoot' });
+  // It belongs to the grid, not to a row: no active row, or one that has been
+  // filtered away, must not change the answer.
+  assert.deepEqual(navigate(rows, null, '+'), { kind: 'addRoot' });
+  assert.deepEqual(navigate(rows, 'filtered-away', '+'), { kind: 'addRoot' });
+  // Anything else is still not ours.
+  assert.equal(navigate(rows, 'REQ-2', 'p'), null);
+  // Ctrl/Cmd + "+" must stay with the browser's zoom. navigate() is given only
+  // the key name, so that guard lives in the component — see the browser tests.
+});
+
 test('home, end and enter address the grid and the row', () => {
   const rows = open();
   assert.deepEqual(navigate(rows, 'REQ-2', 'Home'), { kind: 'move', id: 'REQ-1' });

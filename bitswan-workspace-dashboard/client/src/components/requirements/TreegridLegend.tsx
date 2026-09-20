@@ -47,7 +47,7 @@ export function TreegridLegend() {
       <Hint keys={['→']}>Into the row’s buttons — add child, run test, delete</Hint>
       <Hint keys={['←']}>Fold, or out to the parent</Hint>
       <Hint keys={['Enter']}>Edit the description, or press the focused button</Hint>
-      <Hint keys={['End', 'Enter']}>New requirement</Hint>
+      <Hint keys={['+']}>New requirement</Hint>
       <Hint keys={['Esc']}>Back to the row</Hint>
       <Hint keys={['Tab']}>Leave the table</Hint>
     </div>
