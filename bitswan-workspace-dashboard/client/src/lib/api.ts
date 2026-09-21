@@ -1475,13 +1475,6 @@ export const api = {
       `/api/automations/business-processes/${encodeURIComponent(bp)}/backups/swap`,
       {},
     ),
-  /** Backups: zero-downtime promote — stage the new version on the idle slot
-   *  (current live db), repoint the ingress to it, retire the old slot. */
-  zeroDowntimePromote: (bp: string) =>
-    postJson<BackupState>(
-      `/api/automations/business-processes/${encodeURIComponent(bp)}/backups/promote`,
-      {},
-    ),
   /** Firewall: egress allow-list rules + blocked/observed attempts for a stage. */
   firewall: (bp: string, stage: string) =>
     getJson<FirewallReport>(
