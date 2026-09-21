@@ -42,7 +42,7 @@ export const MANUAL = {
 
   manifestoTitle: 'Why teams put Bitswan in front of what matters',
   promises: [
-    { title: 'Ship without holding your breath', body: 'Promote dev → staging → production across three blue-green slots over two persistent databases. The live slot never blinks; the standby is always one cutover away.' },
+    { title: 'Ship without holding your breath', body: 'Promote dev → staging → production, each stage on its own database and network. What ships is the image you reviewed, byte for byte — the whole business process at once, every hop recorded and any earlier version one click away.' },
     { title: 'Rehearse the disaster before it happens', body: 'Restore any production backup into an isolated DR slot, verify it by hand, mark it recovery-tested, then swap it live with a single ingress cutover. No data move. No downtime.' },
     { title: 'Know what’s inside before it runs', body: 'Every image is scanned for CVEs before deploy. Waivers live in your source tree, not buried in config. Auditors get a clean, signed story.' },
     { title: 'Trust the device, not just the password', body: 'The first operator claims the server; every device after is explicitly approved. Bailey practises defence in depth — your processes stay protected even if a password leaks or your identity provider is compromised.' },
@@ -278,25 +278,26 @@ export const MANUAL = {
     },
     {
       num: '11', eyebrow: 'Promote with confidence', title: 'Staged deployment',
-      lede: 'A change moves forward one stage at a time — dev → staging → production — and each hop is a blue-green cutover: the idle slot comes up on the live database, ingress repoints, the old slot retires. Three app slots over two persistent databases mean the live slot never blinks and the standby is always one cutover away.',
+      lede: 'A change moves forward one stage at a time — dev → staging → production — and each stage runs on its own database, file store and network. What moves is the image that was already built and reviewed, not a fresh build: a promotion re-deploys those exact bytes onto the next stage, with every container of the business process moving together as one unit.',
       slots: [
-        { id: 'promote-progress', label: 'Live capture', caption: 'Promotion in flight (dev → staging) · the idle slot coming up, the live step streaming, before the cutover' },
-        { id: 'promote-progress-prod', label: 'Live capture', caption: 'Promotion in flight (staging → production) · the standby slot building on the live database before the production cutover' },
-        { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · Production Healthy after promotion — every stage filled green (deployed) and ticked (its containers seen running)' },
+        { id: 'promote-progress', label: 'Live capture', caption: 'Deployments · Staging Healthy straight after the dev → staging promote — the history entry records “Promoted from Development”, the six commits it carries and who pressed it' },
+        { id: 'promote-progress-prod', label: 'Live capture', caption: 'Deployments · Production current on the promoted version — the same commits, now “Promoted from Staging” and carrying the sign-off that released it. Filled green (deployed) but not yet ticked: its containers had not been read back at this moment' },
+        { id: 'deployments-prod', label: 'Live capture', caption: 'Deployments · moments later, Production reads Healthy — Development, Staging and Production all filled green (deployed) and ticked (their containers seen running)' },
       ],
       sell: [
-        'Promote a stage and the idle slot comes up on that stage’s live database, ingress repoints to it, and the old slot retires. The pipeline streams its live step the whole way as the standby slot builds and starts, so a promotion is never a black box — and users never see a gap.',
+        'A promotion moves the <strong>whole business process at once</strong> — every automation that belongs to it, in a single write and a single apply — so a process can never end up half-promoted, with a new frontend talking to last week’s backend. The pipeline streams its live step the whole way, onto the stage card you are watching, so a promotion is never a black box.',
         'What promotes is the <strong>image, verbatim</strong>: promotion re-deploys the exact bytes that were built and reviewed, even if the workspace source has moved on since. So what runs in production is precisely what was exercised in staging, not a fresh rebuild that might drift.',
-        'Anyone on the team can promote <strong>dev → staging</strong>. Production is different: it is a <strong>gated</strong> step that opens only once staging has been frozen and audited — that is the next chapter. Either way, the pipeline is a state you can read at a glance: which slot is live, which is standby, what is <strong>Healthy</strong>, and the version each stage is current on.',
+        'Anyone on the team can promote <strong>dev → staging</strong>. Production is different: it is a <strong>gated</strong> step that opens only once staging has been frozen and audited — that is the next chapter — and until it is, that step of the pipeline reads <strong>Freeze to unlock</strong> rather than Promote. Either way the pipeline is a state you can read at a glance: the version each stage is current on, what is <strong>Healthy</strong>, and which step is open to you.',
+        'Every hop is written into the stage’s <strong>Deployment history</strong> — the version, where it came from (<em>Promoted from Development</em>, <em>Promoted from Staging</em>), the commits it carries, who pressed it and, for production, the audit sign-off that released it. Going back is that same list read the other way: <strong>Roll back</strong> on an earlier entry re-deploys that recorded version, again as one unit. (The blue-green slots that let production switch over with no downtime at all are a separate facility, driven by the Disaster Recovery swap — Ch&nbsp;17.)',
         'Each stage in the pipeline carries <strong>two separate marks, and they answer two different questions</strong>. The circle’s <strong>green fill</strong> says something is <em>deployed</em> to that stage. The small badge on its corner says what those containers are <em>actually doing</em>: a <strong>green tick</strong> only when every one of them was seen running, a <strong>violet ↻</strong> when one keeps restarting, a <strong>red warning</strong> when one is not running at all, a <strong>blue dot</strong> when the stage is asleep and will wake on access, and a plain <strong>grey dot</strong> when Bailey has not read that stage’s containers from here. So a stage can be filled green — deployed — and still not be ticked, and that combination is the one worth looking at: the code is live and it is not well. A tick is never given for “we did not look”.',
       ],
       steps: ['Open <b>Deployments</b>.', 'Press <b>Promote</b> — the pill on the pipeline step between <b>Development</b> and <b>Staging</b> — and watch Staging come up <b>Healthy</b>.', 'Exercise the app on staging — its own data, never production’s.', 'Production is gated — freeze &amp; audit it first (next chapter); the <b>Promote</b> between <b>Staging</b> and <b>Production</b> reads <b>Freeze to unlock</b> until then.'],
-      specs: [{ v: '3 slots', l: 'blue-green over 2 DBs' }, { v: '0 s', l: 'downtime on promote' }, { v: 'verbatim', l: 'the reviewed image ships' }],
-      callout: { kind: 'Why it matters', text: 'Every promotion is a zero-downtime blue-green cutover of the exact reviewed image. You can promote in the middle of the day and roll back to the standby slot just as fast — the live slot never blinks.' },
+      specs: [{ v: 'verbatim', l: 'the reviewed image ships' }, { v: '1 unit', l: 'the whole process moves at once' }, { v: 'Every hop', l: 'recorded, attributed, reversible' }],
+      callout: { kind: 'Why it matters', text: 'Nothing is rebuilt between staging and production. What you exercised on staging is bit-for-bit what serves your users — so “it worked in staging” is a statement about the same artefact, not about a build that merely looked like it. And because each hop is recorded with its source, its commits and its operator, the road a release took is still answerable a year later.' },
       standards: [
         { code: 'ISO/IEC 27001', clause: 'A.8.31', demand: '<b>Separation of development, test and production.</b> A change is deployed through isolated stages, each on its own database and network.' },
         { code: 'SOC 2', clause: 'CC8.1', demand: '<b>Change management.</b> Changes reach production only through a deliberate, observable promotion of the reviewed image.' },
-        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> Zero-downtime cutovers minimise the impact of changes on the availability of critical functions.' },
+        { code: 'DORA', clause: 'Art. 9', demand: '<b>Protection & prevention.</b> Production runs the exact artefact that was reviewed, and any earlier recorded version can be re-deployed, so the impact of a bad change is bounded.' },
       ],
     },
     {
@@ -698,7 +699,7 @@ export const MANUAL = {
         { control: 'A.8.24', req: 'Use of cryptography & secrets', status: 'provided', bailey: 'Stage secrets, injected not committed; TLS at edge', ch: '14', yours: 'Key-management policy' },
         { control: 'A.8.31', req: 'Separation of dev/test/production', status: 'provided', bailey: 'Isolated copies + dev / staging / production stages', ch: '05 · 09 · 11', yours: '—' },
         { control: 'A.8.3', req: 'Information access restriction', status: 'provided', bailey: 'Workspaces scope access per tenancy + role; per-endpoint owner-managed sharing', ch: '02 · 21', yours: 'Membership reviews' },
-        { control: 'A.8.32', req: 'Change management', status: 'provided', bailey: 'Reversible blue-green promotion + four-eyes freeze/audit gate + immutable history', ch: '11 · 12 · 13', yours: 'Change approval workflow' },
+        { control: 'A.8.32', req: 'Change management', status: 'provided', bailey: 'Reversible promotion of the reviewed image + four-eyes freeze/audit gate + immutable history', ch: '11 · 12 · 13', yours: 'Change approval workflow' },
         { control: 'A.5.30', req: 'ICT readiness for business continuity', status: 'provided', bailey: 'DR slot + rehearsed, recorded recovery tests', ch: '17', yours: 'BCP/DR plan & RTO/RPO targets' },
       ],
     },
@@ -723,7 +724,7 @@ export const MANUAL = {
       rows: [
         { control: 'Art. 8', req: 'Identification of ICT risk', status: 'provided', bailey: 'Pre-deploy supply-chain / CVE identification', ch: '19', yours: 'Risk register & classification' },
         { control: 'Art. 9(3)', req: 'Strong authentication & protection', status: 'provided', bailey: 'Device-trust gate', ch: '01', yours: 'Identity governance' },
-        { control: 'Art. 9', req: 'Protection & prevention (change impact)', status: 'provided', bailey: 'Zero-downtime blue-green change path + independent sign-off gate', ch: '11 · 12', yours: 'Segregation policy' },
+        { control: 'Art. 9', req: 'Protection & prevention (change impact)', status: 'provided', bailey: 'Staged promotion of the reviewed image + independent sign-off gate', ch: '11 · 12', yours: 'Segregation policy' },
         { control: 'Art. 10', req: 'Detection of anomalous activity', status: 'provided', bailey: 'Container health + deploy/event history + real-time SIEM export', ch: '13 · 15 · 22', yours: 'Detection thresholds & alerting' },
         { control: 'Art. 11', req: 'Response & recovery', status: 'provided', bailey: 'One-cutover DR swap, no data move', ch: '17', yours: 'Crisis-management plan' },
         { control: 'Art. 12', req: 'Backup, restoration & testing', status: 'provided', bailey: 'Snapshots + rehearsed DR restores', ch: '16 · 17', yours: 'RTO/RPO & offsite policy' },
