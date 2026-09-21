@@ -110,7 +110,15 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
       running: rest.filter(
         (r) => verdictOf(r) === 'running' || verdictOf(r) === 'queued',
       ),
-      noTest: rest.filter((r) => verdictOf(r) === 'no_test' || !verdictOf(r)),
+      // A requirement no run has judged splits by whether a test for it exists:
+      // one nobody has written a test for belongs with the other untested ones,
+      // and one that HAS a test is simply waiting for its first run. Lumping
+      // them together is what made a freshly-added requirement claim to be
+      // queued for a run nobody had started.
+      noTest: rest.filter(
+        (r) => verdictOf(r) === 'no_test' || (!verdictOf(r) && !r.hasTest),
+      ),
+      notRun: rest.filter((r) => !verdictOf(r) && r.hasTest),
       passed: rest.filter((r) => verdictOf(r) === 'pass'),
       proposed,
     };
@@ -344,6 +352,16 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
             hidden={groups.running.length === 0}
           >
             <RequirementsTable {...tableProps} requirements={groups.running} />
+          </Group>
+
+          <Group
+            title="Not run yet"
+            n={groups.notRun.length}
+            tone={VERDICT_TONES.unknown.fg}
+            hidden={groups.notRun.length === 0}
+            note="These have tests, but no run has judged them yet — the next commit starts one."
+          >
+            <RequirementsTable {...tableProps} requirements={groups.notRun} />
           </Group>
 
           <Group

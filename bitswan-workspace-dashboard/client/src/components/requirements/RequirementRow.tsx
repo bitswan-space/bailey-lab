@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Requirement, RequirementTestResult } from '@/lib/api';
+import { rowVerdict } from '@/lib/testStatus';
 import { StatusBadge } from './StatusBadge';
 
 interface Props {
@@ -132,12 +133,7 @@ export function RequirementRow({
   };
 
   const running = result?.verdict === 'running';
-  const pending = result?.verdict === 'queued' || running;
-  // While a run is pending, show the previous commit's answer greyed out rather
-  // than nothing — the table would otherwise blank itself on every commit.
-  const shownVerdict =
-    pending && result?.previous_verdict ? result.previous_verdict : result?.verdict;
-  const shownStale = stale || (pending && !!result?.previous_verdict);
+  const shown = rowVerdict(result, req.hasTest, stale);
   const failureOutput = result?.verdict === 'fail' ? result.output : '';
   const paddingLeft = 14 + depth * 18;
 
@@ -184,10 +180,8 @@ export function RequirementRow({
           <span className="inline-flex items-center rounded-[3px] bg-violet-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-violet-700">
             proposed
           </span>
-        ) : shownVerdict ? (
-          <StatusBadge verdict={shownVerdict} stale={shownStale} />
         ) : (
-          <StatusBadge verdict="queued" />
+          <StatusBadge verdict={shown.verdict} stale={shown.stale} />
         )}
         {running && <Loader2 className="size-3 animate-spin text-blue-700" />}
       </div>

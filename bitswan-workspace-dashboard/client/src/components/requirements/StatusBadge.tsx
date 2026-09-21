@@ -1,8 +1,7 @@
-import type { ReqVerdict } from '@/lib/api';
-import { STALE_TONE, VERDICT_TONES } from '@/lib/testStatus';
+import { STALE_TONE, VERDICT_TONES, type DisplayVerdict } from '@/lib/testStatus';
 
 interface Props {
-  verdict: ReqVerdict;
+  verdict: DisplayVerdict;
   /**
    * True when this verdict belongs to an earlier commit than the code on disk.
    * Rendered muted rather than hidden: knowing what was true last time is

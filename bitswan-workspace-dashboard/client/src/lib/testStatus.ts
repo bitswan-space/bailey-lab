@@ -9,6 +9,16 @@ import type { ReqVerdict, TestState } from '@/lib/api';
  * someone is relying on it.
  */
 
+/**
+ * What a row can show, which is one more thing than a run can produce:
+ * `unknown` means no run has judged this requirement yet.
+ *
+ * It is display-only and deliberately NOT part of `ReqVerdict` — that is the
+ * wire type, and its `counts` record would then demand a key gitops never
+ * sends.
+ */
+export type DisplayVerdict = ReqVerdict | 'unknown';
+
 export interface VerdictTone {
   /** Badge background + text, for the pill form. */
   badge: string;
@@ -17,7 +27,14 @@ export interface VerdictTone {
   label: string;
 }
 
-export const VERDICT_TONES: Record<ReqVerdict, VerdictTone> = {
+export const VERDICT_TONES: Record<DisplayVerdict, VerdictTone> = {
+  // Not "queued": nothing is waiting to run. This is a requirement no run has
+  // reached yet — after a restart, or before the first one.
+  unknown: {
+    badge: 'bg-slate-100 text-slate-600',
+    fg: 'text-slate-600',
+    label: 'not run',
+  },
   pass: { badge: 'bg-green-100 text-green-700', fg: 'text-green-700', label: 'pass' },
   fail: { badge: 'bg-red-100 text-red-700', fg: 'text-red-700', label: 'fail' },
   // Amber, not red: a blocked child has not failed — it was never run, because
@@ -80,4 +97,36 @@ export function summarizeTests(state: TestState | null | undefined): TestSummary
   if (state.status === 'running') return 'running';
   if (state.green) return 'passing';
   return 'unknown';
+}
+
+/**
+ * What one row shows: the verdict and whether it is stale.
+ *
+ * Three cases, and the point is that none of them overstates what is known:
+ *
+ *  - a run has judged it → its verdict, unless the run is still working on
+ *    this row and the previous commit had an answer, which is shown greyed
+ *    rather than blanking the table on every commit;
+ *  - no run has judged it and no test carries its id → `no_test`;
+ *  - no run has judged it but a test exists → `unknown`, i.e. "not run".
+ *
+ * That last split is why a freshly added requirement no longer claims to be
+ * `queued` for a run nobody started.
+ */
+export function rowVerdict(
+  result:
+    | { verdict: ReqVerdict; previous_verdict: ReqVerdict | '' }
+    | null
+    | undefined,
+  hasTest: boolean | undefined,
+  runIsStale: boolean,
+): { verdict: DisplayVerdict; stale: boolean } {
+  if (!result) {
+    return { verdict: hasTest ? 'unknown' : 'no_test', stale: false };
+  }
+  const pending = result.verdict === 'queued' || result.verdict === 'running';
+  if (pending && result.previous_verdict) {
+    return { verdict: result.previous_verdict, stale: true };
+  }
+  return { verdict: result.verdict, stale: runIsStale };
 }
