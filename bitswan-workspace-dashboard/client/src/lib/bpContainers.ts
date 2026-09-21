@@ -1,4 +1,3 @@
-
 import type { DeployedAutomation } from '@/types';
 import { displayFor, worstStatus, type DisplayStatus } from '@/lib/status';
 
@@ -8,6 +7,8 @@ export interface BpContainer {
   url?: string;
   status: DisplayStatus;
   restartCount?: number;
+  containerId?: string;
+  startedAt?: string;
   expose: boolean;
 }
 
@@ -38,6 +39,8 @@ export function bpContainers(
         restartCount === undefined
           ? prev?.restartCount
           : Math.max(restartCount, prev?.restartCount ?? 0),
+      containerId: (keep === 'new' ? a.container_id : prev?.containerId) ?? undefined,
+      startedAt: (keep === 'new' ? a.started_at : prev?.startedAt) ?? undefined,
       expose: !!a.expose || !!prev?.expose,
     });
   }

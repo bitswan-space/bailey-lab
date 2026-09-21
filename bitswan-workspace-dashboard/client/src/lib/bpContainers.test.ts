@@ -225,3 +225,34 @@ test('a container created and never started is not "running"', () => {
   );
   assert.equal(stateToDisplay('starting'), 'running');
 });
+
+test('the baseline a restart is measured against comes from the record the dot describes', () => {
+  const c = only(
+    bpContainers(
+      [
+        rec({
+          deployment_id: 'backend-live-dev',
+          container_id: 'healthy',
+          state: 'running',
+          started_at: '2026-09-11T16:50:12Z',
+        }),
+        rec({
+          deployment_id: 'backend-live-dev@green',
+          container_id: 'sick',
+          state: 'restarting',
+          started_at: '2026-09-10T18:26:13Z',
+        }),
+      ],
+      COPY,
+      BP,
+    ),
+  );
+  assert.equal(c.status, 'restarting');
+  assert.equal(c.containerId, 'sick');
+  assert.equal(c.startedAt, '2026-09-10T18:26:13Z');
+});
+
+test('a record with no start time contributes none, never a zero or an epoch', () => {
+  assert.equal(only(bpContainers([rec({ started_at: null })], COPY, BP)).startedAt, undefined);
+  assert.equal(only(bpContainers([rec()], COPY, BP)).startedAt, undefined);
+});

@@ -192,20 +192,21 @@ type Image struct {
 }
 
 type ContainerFilter struct {
-	Labels map[string]string `json:"labels,omitempty"`
-	WithRestartCounts bool `json:"with_restart_counts,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty"`
+	WithRestartCounts bool              `json:"with_restart_counts,omitempty"`
 }
 
 // Container is one realized container.
 type Container struct {
-	ID      string            `json:"id"`
-	Name    string            `json:"name"`
-	State   string            `json:"state"`  // "running" | "exited" | "created" | ...
-	Health  string            `json:"health"` // "healthy" | "starting" | "unhealthy" | "" (no healthcheck)
-	Image   string            `json:"image"`
-	Created int64             `json:"created"` // unix seconds (gitops overlays created_at from this)
-	Labels  map[string]string `json:"labels,omitempty"`
-	RestartCount *int `json:"restart_count,omitempty"`
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	State        string            `json:"state"`  // "running" | "exited" | "created" | ...
+	Health       string            `json:"health"` // "healthy" | "starting" | "unhealthy" | "" (no healthcheck)
+	Image        string            `json:"image"`
+	Created      int64             `json:"created"` // unix seconds (gitops overlays created_at from this)
+	Labels       map[string]string `json:"labels,omitempty"`
+	RestartCount *int              `json:"restart_count,omitempty"`
+	StartedAt    *int64            `json:"started_at,omitempty"`
 }
 
 // ContainerStat is one container's live memory usage (from `docker stats`). Only
