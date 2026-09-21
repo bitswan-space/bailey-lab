@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/tooltip';
 import { useRequirements } from '@/hooks/useRequirements';
 import { RequirementsTable } from './RequirementsTable';
+import { TreegridLegend } from './TreegridLegend';
 import { useUrlEnum, useUrlParam } from '@/lib/urlState';
 import { cn } from '@/lib/utils';
 import { api, type Requirement, type ReqStatus } from '@/lib/api';
@@ -418,6 +419,10 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
           runningIds={runningIds}
         />
       </div>
+
+      {/* Outside the scroller above, so the key map is pinned to the bottom of
+          the tab and cannot scroll out of sight on a long list. */}
+      <TreegridLegend />
 
       <AlertDialog
         open={deleteTarget !== null}
