@@ -14,8 +14,29 @@ export const WORDMARK = `<svg viewBox="0 0 663.4 154.8" fill="none" xmlns="http:
 
 export const GLYPH = `<svg viewBox="0 0 123 154.8" xmlns="http://www.w3.org/2000/svg" fill="currentColor"><path d="M0,104.5V5l59.9,50L10.3,92.8C6,96,2.5,100,0,104.5z M90.7,80.6l-21.3,18c-7.1,6.2-10.9,14.5-10.9,24c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5s16.7-3.4,22.8-9.5c6.1-6.1,9.4-14.2,9.4-22.8s-3.3-16.7-9.4-22.7L90.7,80.6z M118.5,15.8l-25,19.5l0,0L13.1,96.6C4.9,102.6,0,112.3,0,122.5c0,8.6,3.4,16.7,9.4,22.8c6.1,6.1,14.2,9.5,22.8,9.5h40.4c-2.9-1.6-5.6-3.7-8.1-6.1c-7-7-10.8-16.3-10.8-26.1c0-10.7,4.4-20.5,12.5-27.6l46-38.7c6.8-5.8,10.8-14.9,10.8-24C123,26.4,121.5,20.8,118.5,15.8z M57.5,0l36.1,29.3L115.7,12c-0.5-0.6-1.3-1.5-2.3-2.7C107,1.6,97.5,0,90.8,0H57.5z"/></svg>`;
 
-const esc = (s) =>
-  String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// Fields rendered through `esc` are LABELS: their markup would be printed at
+// the reader rather than rendered. That is how ch.10 came to read
+// "both about &lt;b&gt;one business process&lt;/b&gt;" — the lede carried
+// emphasis and was grouped with the labels. The fix moved the lede to the prose
+// side; this stops the next one, because the failure is invisible downstream:
+// escaped markup is valid HTML, the page renders, and CI stays green.
+//
+// Only real inline tag names count, so an angle-bracket placeholder in a
+// caption ("<your-domain>") is still ordinary text. If this fires, either drop
+// the markup or render that field raw, like `sell`, `steps` and `lede`.
+const MARKUP_IN_LABEL = /<\/?(?:b|strong|em|i|u|code|small|sub|sup|span|a|br)(?:\s[^>]*)?>/i;
+
+const esc = (s) => {
+  const str = String(s ?? '');
+  const hit = str.match(MARKUP_IN_LABEL);
+  if (hit) {
+    throw new Error(
+      `markup in a field the handbook escapes: ${hit[0]} in ${JSON.stringify(str.slice(0, 80))}` +
+        ' — it would be printed at the reader as tags. Drop it, or render that field raw.',
+    );
+  }
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+};
 
 const glyph = (color) => `<span class="glyph" style="color:${color}">${GLYPH}</span>`;
 
@@ -239,6 +260,12 @@ body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,A
      header stays with its first rows) so a long chapter fills the foot of its
      page and continues, rather than jumping the whole card to a half-empty page. */
   .shot, .two, .howto, .callout, .specs, .scorecard, .std li, .std-h, .guide table tr{ break-inside:avoid }
+  /* A caption is part of the picture, not a paragraph that happens to follow
+     it: break-inside on .shot alone kept the image whole and still let the
+     sheet end between it and its .shotcap, stranding the caption at the top
+     of the next page under someone else's screenshot. Same pair the guide
+     headings and .runfoot already use. */
+  .shot{ break-after:avoid } .shotcap{ break-before:avoid }
   /* ...except the prose/How-to row. It is routinely taller than a sheet, and an
      avoid that cannot be honoured is simply ignored, so the break lands wherever
      it falls — which cut ch5's box mid-list. Letting the CONTAINER break while
@@ -479,7 +506,12 @@ function renderChapter(ch, idx) {
   return `<section class="page chapter" id="${chapterAnchor(ch, idx)}"><div class="pad">
     <div class="chapter-head"><span class="chapter-num">CH ${esc(num)}</span><span class="chapter-eyebrow">${esc(ch.eyebrow || '')}</span></div>
     <h2>${esc(ch.title)}</h2>
-    ${ch.lede ? `<p class="lede">${esc(ch.lede)}</p>` : ''}
+    ${/* Prose, so it carries markup like the other prose fields (sell, steps,
+         callout.text) rather than being escaped like the short labels around
+         it. Ch.10's lede has emphasised "one business process" / "Deploy" /
+         "Sync" since it was written, and escaping printed the tags at the
+         reader instead. */ ''}
+    ${ch.lede ? `<p class="lede">${ch.lede}</p>` : ''}
     ${leadShot}
     ${two}
     ${callout}
