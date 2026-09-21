@@ -81,8 +81,12 @@ TYPICAL WORKFLOW
      own key in testable-requirements.toml. Naming the framework is enough; the
      built-in runner for it is then correct.
 
-     The test tooling must be installed in that automation's own image (e.g.
-     pytest in its image/requirements.txt), then rebuilt with
+     The test tooling has to be in that automation's own image — tests run by
+     docker exec inside it, so nothing installs them at test time. Automations
+     scaffolded from the built-in templates already have it (the Go templates
+     are built on the golang image; the Python template installs pytest and
+     httpx from image/requirements-test.txt). In an older automation, add them
+     and rebuild with
      "bitswan-coding-agent deployments build-and-restart <deployment-id>".
 
   8. Commit. THE TESTS RUN THEMSELVES — every commit starts a run, the way CI

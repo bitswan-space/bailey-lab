@@ -103,11 +103,20 @@ automation = "new-worker"
 framework = "pytest"
 ```
 
-**The test tooling must be installed in the automation's own image.** Nothing
-installs it for you at test time. For a Python automation that means adding
-`pytest` (and `httpx` if you use FastAPI's `TestClient`) to its
-`image/requirements.txt` and rebuilding:
-`bitswan-coding-agent deployments build-and-restart <deployment-id>`.
+**The test tooling has to be in the automation's own image.** Tests run by
+`docker exec` inside that container, so nothing can install them at test time.
+
+Automations scaffolded from the built-in templates already have it: the Go
+templates are built on the `golang` image, and the Python template installs
+`pytest` and `httpx` from `image/requirements-test.txt`. If you are working in
+an older automation that predates that, add them there yourself and rebuild:
+
+```
+bitswan-coding-agent deployments build-and-restart <deployment-id>
+```
+
+A missing test dependency shows up as a `fail` whose output is the import
+error — read it rather than assuming the test is wrong.
 
 You do not need a `pytest.ini` to keep pytest off the read-only mount — the
 built-in runner already passes `-p no:cacheprovider` and writes its report to

@@ -1,0 +1,13 @@
+# Test-only dependencies, installed into the image alongside the runtime ones.
+#
+# They have to be IN THE IMAGE because requirement tests run by `docker exec`
+# inside this automation's own container — there is no build step at test time
+# that could install them, and /app is mounted read-only so a test run cannot
+# install them either.
+#
+# pytest also produces the JUnit XML report the verdict is read from
+# (--junitxml), so nothing extra is needed for that. httpx is what FastAPI's
+# TestClient is built on: without it `from fastapi.testclient import TestClient`
+# raises at import time.
+pytest==8.3.4
+httpx==0.28.1

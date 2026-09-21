@@ -92,8 +92,9 @@ export const WRITE_TESTS_PROMPT =
   'set framework on the requirement itself) — the BP-wide framework applies to ' +
   'every automation otherwise, and a pytest suite parsed as go test output ' +
   'reports "no test" for tests that ran and passed. ' +
-  'The test tooling has to be in that automation\'s own image (pytest in its ' +
-  'image/requirements.txt, say), then rebuilt with ' +
+  'The test tooling has to be in that automation\'s own image — automations ' +
+  'scaffolded from the built-in templates already have it; in an older one, ' +
+  'add it to image/requirements-test.txt and rebuild with ' +
   '`bitswan-coding-agent deployments build-and-restart <deployment-id>`. ' +
   'Then commit: the tests run automatically on every commit and the verdicts ' +
   'appear in Requirements & tests. Read them with ' +
