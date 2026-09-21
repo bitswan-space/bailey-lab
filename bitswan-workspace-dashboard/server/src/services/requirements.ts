@@ -34,9 +34,16 @@ export interface Requirement {
    * acceptance leave the id alone, so tests naming it keep working.
    */
   origin: ReqOrigin;
-  /** Optional per-requirement override of the BP's `[testing]` defaults. */
+  /** Optional per-requirement overrides of the BP's `[testing]` defaults. */
   automation: string;
   runner: string;
+  /**
+   * `go` or `pytest`. Needed per requirement (or per automation in
+   * process.toml) when a BP mixes languages — the BP-wide framework would
+   * otherwise be applied to every automation, and a pytest suite parsed as
+   * `go test -json` output reports "no test" for tests that ran and passed.
+   */
+  framework: string;
 }
 
 /** A requirement annotated with whether a matching test exists in the BP. */
@@ -80,6 +87,7 @@ interface RawRequirement {
   origin?: unknown;
   automation?: unknown;
   runner?: unknown;
+  framework?: unknown;
 }
 
 function normaliseRequirement(raw: RawRequirement): Requirement | null {
@@ -93,6 +101,7 @@ function normaliseRequirement(raw: RawRequirement): Requirement | null {
     origin: raw.origin === 'proposed' ? 'proposed' : '',
     automation: str(raw.automation),
     runner: str(raw.runner),
+    framework: str(raw.framework),
   };
 }
 
@@ -268,6 +277,7 @@ async function writeRequirements(
       ...(r.origin ? { origin: r.origin } : {}),
       ...(r.automation ? { automation: r.automation } : {}),
       ...(r.runner ? { runner: r.runner } : {}),
+      ...(r.framework ? { framework: r.framework } : {}),
     })),
   };
   const tmp = `${filePath}.tmp`;
@@ -320,6 +330,7 @@ export async function addRequirement(opts: {
     origin,
     automation: '',
     runner: '',
+    framework: '',
   };
   // Validate parent (if given) exists, to avoid orphans introduced via the API.
   if (created.parent && !reqs.some((r) => r.id === created.parent)) {

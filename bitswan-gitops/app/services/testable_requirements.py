@@ -27,6 +27,7 @@ import secrets
 import toml
 
 from app.services.bp_git import bp_clone_path
+from app.utils import sanitize_automation_name
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,15 @@ class Requirement:
     point individual requirements at different containers.
     """
 
-    __slots__ = ("id", "parent", "description", "origin", "automation", "runner")
+    __slots__ = (
+        "id",
+        "parent",
+        "description",
+        "origin",
+        "automation",
+        "runner",
+        "framework",
+    )
 
     def __init__(
         self,
@@ -59,6 +68,7 @@ class Requirement:
         origin: str = "",
         automation: str = "",
         runner: str = "",
+        framework: str = "",
     ):
         self.id = id
         self.parent = parent
@@ -71,6 +81,7 @@ class Requirement:
         self.origin = origin
         self.automation = automation
         self.runner = runner
+        self.framework = framework
 
     def to_dict(self) -> dict:
         return {
@@ -80,6 +91,7 @@ class Requirement:
             "origin": self.origin,
             "automation": self.automation,
             "runner": self.runner,
+            "framework": self.framework,
         }
 
     def __eq__(self, other) -> bool:
@@ -97,7 +109,7 @@ class BpTestingConfig:
     that file wholesale and would drop a foreign section.
     """
 
-    __slots__ = ("automation", "runner", "framework", "timeout")
+    __slots__ = ("automation", "runner", "framework", "timeout", "per_automation")
 
     def __init__(
         self,
@@ -105,6 +117,7 @@ class BpTestingConfig:
         runner: str = "",
         framework: str = "",
         timeout: int | None = None,
+        per_automation: "dict[str, BpTestingConfig] | None" = None,
     ):
         # Which automation's live-dev container runs the tests. Required for a
         # BP with more than one automation, where the deployment cannot be
@@ -116,6 +129,13 @@ class BpTestingConfig:
         self.framework = framework
         # Per-test timeout in seconds.
         self.timeout = timeout
+        # Per-automation overrides from `[testing.<automation>]`. A business
+        # process can mix languages — a Go backend and a Python worker — and
+        # each needs its own framework and runner. Without this the BP-wide
+        # framework is applied to every automation, and a pytest suite gets
+        # parsed as `go test -json` output, which reports "no test" for a test
+        # that ran perfectly well.
+        self.per_automation = per_automation or {}
 
     def to_dict(self) -> dict:
         return {
@@ -123,6 +143,9 @@ class BpTestingConfig:
             "runner": self.runner,
             "framework": self.framework,
             "timeout": self.timeout,
+            "per_automation": {
+                name: conf.to_dict() for name, conf in self.per_automation.items()
+            },
         }
 
 
@@ -198,6 +221,7 @@ def parse_testable_requirements(content: str) -> list[Requirement]:
                 origin=_str("origin"),
                 automation=_str("automation"),
                 runner=_str("runner"),
+                framework=_str("framework"),
             )
         )
     return out
@@ -219,6 +243,8 @@ def serialize_testable_requirements(requirements: list[Requirement]) -> str:
             row["automation"] = req.automation
         if req.runner:
             row["runner"] = req.runner
+        if req.framework:
+            row["framework"] = req.framework
         rows.append(row)
     return toml.dumps({"requirement": rows})
 
@@ -273,19 +299,8 @@ def next_requirement_id(
     raise RuntimeError("could not mint a unique requirement id")
 
 
-def parse_testing_config(process_toml_content: str) -> BpTestingConfig:
-    """Read `[testing]` out of a process.toml. A missing file or section is
-    the zero value — a single-automation BP needs no configuration at all."""
-    if not process_toml_content or not process_toml_content.strip():
-        return BpTestingConfig()
-    try:
-        data = toml.loads(process_toml_content)
-    except toml.TomlDecodeError as e:
-        raise ValueError(f"Syntax error in process.toml: {e}") from e
-
-    section = data.get("testing")
-    if not isinstance(section, dict):
-        return BpTestingConfig()
+def _testing_section(section: dict) -> BpTestingConfig:
+    """One `[testing]` (or `[testing.<automation>]`) table."""
 
     def _str(key: str) -> str:
         value = section.get(key)
@@ -301,6 +316,35 @@ def parse_testing_config(process_toml_content: str) -> BpTestingConfig:
         framework=_str("framework"),
         timeout=timeout,
     )
+
+
+def parse_testing_config(process_toml_content: str) -> BpTestingConfig:
+    """Read `[testing]` out of a process.toml.
+
+    A nested table — `[testing.new-worker]` — is a per-automation override,
+    which is how a business process that mixes languages says that its Python
+    worker is tested with pytest while its Go backend is tested with go test.
+    A missing file or section is the zero value: a single-automation BP needs
+    no configuration at all.
+    """
+    if not process_toml_content or not process_toml_content.strip():
+        return BpTestingConfig()
+    try:
+        data = toml.loads(process_toml_content)
+    except toml.TomlDecodeError as e:
+        raise ValueError(f"Syntax error in process.toml: {e}") from e
+
+    section = data.get("testing")
+    if not isinstance(section, dict):
+        return BpTestingConfig()
+
+    cfg = _testing_section(section)
+    for key, value in section.items():
+        # A nested table is an automation name; a scalar is one of the BP-wide
+        # keys handled above.
+        if isinstance(value, dict):
+            cfg.per_automation[sanitize_automation_name(key)] = _testing_section(value)
+    return cfg
 
 
 def read_testing_config(copy: str | None, bp: str) -> BpTestingConfig:

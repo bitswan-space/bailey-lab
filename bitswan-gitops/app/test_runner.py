@@ -57,8 +57,12 @@ logger = logging.getLogger(__name__)
 # stdout — pytest cannot write JUnit XML to stdout, so it is cat'd afterwards.
 DEFAULT_RUNNERS = {
     FRAMEWORK_GO: "cd /app && go test -run {id} -json ./...",
+    # `-p no:cacheprovider`: /app is mounted READ-ONLY, and pytest's default
+    # cache write lands there. Without it every BP has to carry a pytest.ini
+    # redirecting cache_dir, which is friction for something we can just not do.
     FRAMEWORK_PYTEST: (
-        "cd /app && pytest -k {id} --junitxml=/tmp/bs-{id}.xml -q; cat /tmp/bs-{id}.xml"
+        "cd /app && pytest -k {id} -q -p no:cacheprovider "
+        "--junitxml=/tmp/bs-{id}.xml; cat /tmp/bs-{id}.xml"
     ),
 }
 
@@ -140,6 +144,33 @@ def resolve_framework(runner: str, framework: str) -> str:
     if "pytest" in text:
         return FRAMEWORK_PYTEST
     return ""
+
+
+def framework_mismatch(runner: str, framework: str) -> str:
+    """'' unless the runner plainly belongs to a different framework.
+
+    Getting this wrong is silent and baffling: a pytest command whose output is
+    parsed as `go test -json` yields no matching events, so a test that ran and
+    passed is reported as "no test". Naming the mismatch turns a debugging
+    session into a one-line fix.
+    """
+    text = (runner or "").lower()
+    if not text:
+        return ""
+    looks_go = "go test" in text
+    looks_pytest = "pytest" in text
+    if framework == FRAMEWORK_GO and looks_pytest and not looks_go:
+        other = FRAMEWORK_PYTEST
+    elif framework == FRAMEWORK_PYTEST and looks_go and not looks_pytest:
+        other = FRAMEWORK_GO
+    else:
+        return ""
+    return (
+        f"the runner for this requirement looks like {other}, but the framework "
+        f"in force is {framework!r}, so its output cannot be parsed and every "
+        f"test will read as 'no test'. Set framework = \"{other}\" on the "
+        f"requirement, or under [testing.<automation>] in process.toml."
+    )
 
 
 def build_command(runner: str, framework: str, req_id: str) -> str:
@@ -227,15 +258,31 @@ def resolve_target(req: Requirement, cfg, members: list[dict]) -> _Target:
             )
         )
 
-    runner = req.runner or cfg.runner
-    framework = resolve_framework(runner, cfg.framework)
+    # Runner and framework resolve independently, each from the most specific
+    # layer that names it: the requirement, then `[testing.<automation>]`, then
+    # the BP-wide `[testing]`. Independently, because a BP whose default is Go
+    # can point one requirement at a Python worker by naming only the
+    # framework — the built-in runner for it is then correct without being
+    # spelled out.
+    auto_cfg = cfg.per_automation.get(match.get("automation_name", ""))
+    runner = req.runner or (auto_cfg.runner if auto_cfg else "") or cfg.runner
+    framework = (
+        req.framework
+        or (auto_cfg.framework if auto_cfg else "")
+        or resolve_framework(runner, cfg.framework)
+    )
     if not framework:
         return _Target(
             error=(
                 'no test framework configured. Set framework = "go" or '
-                'framework = "pytest" under [testing] in process.toml.'
+                'framework = "pytest" under [testing] in process.toml — or '
+                "under [testing.<automation>] when this business process mixes "
+                "languages."
             )
         )
+    mismatch = framework_mismatch(runner, framework)
+    if mismatch:
+        return _Target(error=mismatch)
     return _Target(
         deployment_id=match.get("deployment_id", ""),
         automation=match.get("automation_name", ""),

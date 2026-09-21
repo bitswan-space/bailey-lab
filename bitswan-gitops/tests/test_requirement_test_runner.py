@@ -370,3 +370,133 @@ async def test_a_broken_contract_fails_the_run_loudly(bp_dir, monkeypatch):
 
     assert run.status == "failed"
     assert "Syntax error" in (run.error or "")
+
+
+# ---- a business process that mixes languages --------------------------------
+#
+# The case that forced a real user to hand-write a translator: a BP whose
+# default is a Go backend, plus a Python worker. Before per-automation and
+# per-requirement framework overrides existed, the BP-wide framework was
+# applied to every automation, so the worker's pytest output was parsed as
+# `go test -json` and its passing tests reported as "no test".
+
+
+_PROCESS_MIXED = (
+    'process-id = "x"\n\n'
+    '[testing]\nautomation = "backend"\nframework = "go"\n\n'
+    '[testing.new-worker]\nframework = "pytest"\n'
+)
+
+
+def test_per_automation_framework_beats_the_bp_default():
+    from app.services.testable_requirements import parse_testing_config
+
+    cfg = parse_testing_config(_PROCESS_MIXED)
+    target = test_runner.resolve_target(
+        Requirement(id="REQ-S96X", automation="new-worker"),
+        cfg,
+        [_member("backend"), _member("new-worker")],
+    )
+    assert target.error == ""
+    assert target.framework == "pytest"
+    assert "pytest" in target.command
+    assert target.deployment_id == "new-worker-copy-dev1-shop-live-dev"
+
+
+def test_the_bp_default_still_applies_to_its_own_automation():
+    from app.services.testable_requirements import parse_testing_config
+
+    cfg = parse_testing_config(_PROCESS_MIXED)
+    target = test_runner.resolve_target(
+        Requirement(id="REQ-AAAA", automation="backend"),
+        cfg,
+        [_member("backend"), _member("new-worker")],
+    )
+    assert target.framework == "go"
+    assert "go test" in target.command
+
+
+def test_a_requirement_can_name_its_own_framework():
+    target = test_runner.resolve_target(
+        Requirement(id="REQ-S96X", automation="new-worker", framework="pytest"),
+        BpTestingConfig(automation="backend", framework="go"),
+        [_member("backend"), _member("new-worker")],
+    )
+    assert target.framework == "pytest"
+
+
+def test_naming_only_the_framework_gets_the_built_in_runner_for_it():
+    # No runner spelled out anywhere for the worker — the built-in pytest one
+    # is correct, and is what the requirement should not have to repeat.
+    from app.services.testable_requirements import parse_testing_config
+
+    cfg = parse_testing_config(_PROCESS_MIXED)
+    target = test_runner.resolve_target(
+        Requirement(id="REQ-S96X", automation="new-worker"),
+        cfg,
+        [_member("backend"), _member("new-worker")],
+    )
+    assert target.command == test_runner.DEFAULT_RUNNERS["pytest"].replace(
+        "{id}", "REQ_S96X"
+    )
+
+
+def test_a_runner_from_the_wrong_framework_is_named_not_silently_misparsed():
+    """The failure mode this guard exists for: pytest output parsed as go-test
+    output yields no matching events, so a test that passed reads as 'no test'."""
+    target = test_runner.resolve_target(
+        Requirement(id="REQ-S96X", automation="new-worker", runner="pytest -k {id}"),
+        BpTestingConfig(automation="backend", framework="go"),
+        [_member("backend"), _member("new-worker")],
+    )
+    assert "looks like pytest" in target.error
+    assert "framework" in target.error
+
+
+def test_a_deliberate_translator_runner_is_not_flagged():
+    # Emitting go-test JSON from something else is legitimate; only a runner
+    # that plainly belongs to the other framework is called out.
+    target = test_runner.resolve_target(
+        Requirement(
+            id="REQ-S96X",
+            automation="new-worker",
+            runner="python3 report_as_go_test_json.py",
+        ),
+        BpTestingConfig(automation="backend", framework="go"),
+        [_member("backend"), _member("new-worker")],
+    )
+    assert target.error == ""
+
+
+def test_the_pytest_runner_does_not_write_into_the_read_only_mount():
+    # /app is mounted read-only; pytest's cache write lands there by default,
+    # which otherwise forces every BP to carry a pytest.ini.
+    assert "-p no:cacheprovider" in test_runner.DEFAULT_RUNNERS["pytest"]
+    assert "/tmp/" in test_runner.DEFAULT_RUNNERS["pytest"]
+
+
+async def test_a_mixed_bp_runs_each_requirement_in_its_own_container(
+    bp_dir, monkeypatch
+):
+    _write(
+        bp_dir,
+        '[[requirement]]\nid = "REQ-AAAA"\nautomation = "backend"\n\n'
+        '[[requirement]]\nid = "REQ-S96X"\nautomation = "new-worker"\n',
+        _PROCESS_MIXED,
+    )
+    driver = FakeDriver(
+        {
+            "REQ_AAAA": _go_report("TestREQ_AAAA_Health", "pass"),
+            "REQ_S96X": (
+                "<testsuite><testcase name='test_REQ_S96X_health'/></testsuite>"
+            ),
+        }
+    )
+    _install(monkeypatch, [_member("backend"), _member("new-worker")], driver)
+
+    run = await test_runner.execute_run("dev1", "shop")
+
+    assert run.results["REQ-AAAA"].verdict == VERDICT_PASS
+    # The Python worker's JUnit report is parsed as JUnit, not as go-test JSON.
+    assert run.results["REQ-S96X"].verdict == VERDICT_PASS
+    assert run.results["REQ-S96X"].automation == "new-worker"

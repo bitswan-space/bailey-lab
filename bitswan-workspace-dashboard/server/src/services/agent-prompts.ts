@@ -87,7 +87,14 @@ export const WRITE_TESTS_PROMPT =
   'tests run in, so a test elsewhere in the BP cannot be found. That mount is ' +
   'read-only — write any temporary file to /tmp. ' +
   'If the BP has more than one automation, make sure process.toml says which ' +
-  'one runs the tests and which framework, under [testing]. ' +
+  'one runs the tests and which framework, under [testing]. If it mixes ' +
+  'languages, give each automation its own [testing.<automation>] section (or ' +
+  'set framework on the requirement itself) — the BP-wide framework applies to ' +
+  'every automation otherwise, and a pytest suite parsed as go test output ' +
+  'reports "no test" for tests that ran and passed. ' +
+  'The test tooling has to be in that automation\'s own image (pytest in its ' +
+  'image/requirements.txt, say), then rebuilt with ' +
+  '`bitswan-coding-agent deployments build-and-restart <deployment-id>`. ' +
   'Then commit: the tests run automatically on every commit and the verdicts ' +
   'appear in Requirements & tests. Read them with ' +
   '`bitswan-coding-agent requirements list` and fix whatever does not pass. ' +

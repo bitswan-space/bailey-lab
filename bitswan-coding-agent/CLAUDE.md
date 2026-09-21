@@ -76,8 +76,42 @@ automation = "backend"     # required when the BP has more than one automation
 framework  = "go"          # or "pytest"
 ```
 
-A single requirement can override `automation` or `runner` with its own key in
-`testable-requirements.toml`.
+**If the BP mixes languages, give each automation its own section.** The
+BP-wide `framework` applies to every automation otherwise, and a pytest suite
+whose output is parsed as `go test -json` reports `no_test` for tests that ran
+and passed — a confusing failure that looks like a missing test:
+
+```toml
+[testing]
+automation = "backend"     # the default for requirements that name no automation
+framework  = "go"
+
+[testing.new-worker]       # the Python worker in the same BP
+framework  = "pytest"
+```
+
+A requirement can override `automation`, `framework` or `runner` on its own row
+in `testable-requirements.toml`. Naming the framework is enough — the built-in
+runner for it is then correct, so do not write out a `runner` unless you need
+something the default cannot do:
+
+```toml
+[[requirement]]
+id = "REQ-S96X"
+description = "…"
+automation = "new-worker"
+framework = "pytest"
+```
+
+**The test tooling must be installed in the automation's own image.** Nothing
+installs it for you at test time. For a Python automation that means adding
+`pytest` (and `httpx` if you use FastAPI's `TestClient`) to its
+`image/requirements.txt` and rebuilding:
+`bitswan-coding-agent deployments build-and-restart <deployment-id>`.
+
+You do not need a `pytest.ini` to keep pytest off the read-only mount — the
+built-in runner already passes `-p no:cacheprovider` and writes its report to
+`/tmp`.
 
 ### Proposing requirements
 

@@ -70,8 +70,20 @@ TYPICAL WORKFLOW
        [testing]
        automation = "backend"     # required when there is more than one
        framework  = "go"          # or "pytest"
-     A single requirement can override either with its own automation/runner
-     key in testable-requirements.toml.
+
+     If it MIXES LANGUAGES, give each automation its own section — the BP-wide
+     framework applies to all of them otherwise, and a pytest suite parsed as
+     go test output reports "no test" for tests that ran and passed:
+       [testing.new-worker]
+       framework  = "pytest"
+
+     A single requirement can override automation, framework or runner with its
+     own key in testable-requirements.toml. Naming the framework is enough; the
+     built-in runner for it is then correct.
+
+     The test tooling must be installed in that automation's own image (e.g.
+     pytest in its image/requirements.txt), then rebuilt with
+     "bitswan-coding-agent deployments build-and-restart <deployment-id>".
 
   8. Commit. THE TESTS RUN THEMSELVES — every commit starts a run, the way CI
      does; you do not have to trigger one:

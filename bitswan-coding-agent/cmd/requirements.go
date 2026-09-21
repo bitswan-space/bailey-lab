@@ -30,6 +30,11 @@ type Requirement struct {
 	Origin     string `json:"origin,omitempty"`
 	Automation string `json:"automation,omitempty"`
 	Runner     string `json:"runner,omitempty"`
+	// Framework is "go" or "pytest". Needed per requirement (or per automation
+	// in process.toml) when a BP mixes languages: the BP-wide framework would
+	// otherwise be applied to every automation, and a pytest suite parsed as
+	// `go test -json` output reports "no test" for tests that ran and passed.
+	Framework string `json:"framework,omitempty"`
 }
 
 const requirementsFilename = "testable-requirements.toml"
@@ -124,6 +129,7 @@ func parseRequirementsToml(content string) []Requirement {
 		r.Origin = extractTomlString(block, "origin")
 		r.Automation = extractTomlString(block, "automation")
 		r.Runner = extractTomlString(block, "runner")
+		r.Framework = extractTomlString(block, "framework")
 		// A `status` key left over from before verdicts moved out of the file
 		// is read past and dropped on the next write. Nothing migrates it.
 		if r.ID != "" {
@@ -182,6 +188,9 @@ func serializeRequirementsToml(reqs []Requirement) string {
 		}
 		if r.Runner != "" {
 			b.WriteString(fmt.Sprintf("runner = %s\n", tomlQuote(r.Runner)))
+		}
+		if r.Framework != "" {
+			b.WriteString(fmt.Sprintf("framework = %s\n", tomlQuote(r.Framework)))
 		}
 		blocks = append(blocks, b.String())
 	}

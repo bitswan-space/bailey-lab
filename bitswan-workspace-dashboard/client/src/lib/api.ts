@@ -2160,6 +2160,8 @@ export interface Requirement {
   /** Per-requirement overrides of the BP's `[testing]` defaults. */
   automation: string;
   runner: string;
+  /** `go` or `pytest` — needed when a BP mixes languages. */
+  framework: string;
   /**
    * True when a test file in the BP mentions this requirement's underscore
    * token (REQ-7QX4 → REQ_7QX4). Absent on add/update responses (only the list
