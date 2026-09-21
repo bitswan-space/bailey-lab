@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Requirement, RequirementTestResult } from '@/lib/api';
-import { rowVerdict } from '@/lib/testStatus';
+import { containerFor, rowVerdict } from '@/lib/testStatus';
 import { StatusBadge } from './StatusBadge';
 
 interface Props {
@@ -47,6 +47,8 @@ interface Props {
   rowRef: (el: HTMLDivElement | null) => void;
   /** Fired whenever focus lands anywhere in this row, to sync the active row. */
   onFocusRow: () => void;
+  /** Whether this table renders a container column at all. */
+  showContainer?: boolean;
 }
 
 /**
@@ -81,6 +83,7 @@ export function RequirementRow({
   onToggleCollapse,
   rowRef,
   onFocusRow,
+  showContainer = true,
 }: Props) {
   const [editing, setEditing] = useState(!!editOnMount);
   const [draft, setDraft] = useState(req.description);
@@ -244,14 +247,17 @@ export function RequirementRow({
       </div>
       {/* Which container this requirement's test runs in. Worth showing per
           row: a BP can have several, and "it passes" means little without
-          knowing where. */}
-      <div role="gridcell" className="hidden w-24 shrink-0 items-center pt-0.5 sm:flex">
-        {result?.automation && (
-          <span className="truncate font-mono text-[10px] text-muted-foreground">
-            {result.automation}
-          </span>
-        )}
-      </div>
+          knowing where. Left blank for a requirement with no test — nothing
+          ran anywhere for it. */}
+      {showContainer && (
+        <div role="gridcell" className="hidden w-24 shrink-0 items-center pt-0.5 sm:flex">
+          {containerFor(result) && (
+            <span className="truncate font-mono text-[10px] text-muted-foreground">
+              {containerFor(result)}
+            </span>
+          )}
+        </div>
+      )}
       <div
         role="gridcell"
         className="flex w-[140px] shrink-0 items-center justify-end gap-0.5 pt-0.5 opacity-70 transition-opacity focus-within:opacity-100 group-hover:opacity-100"

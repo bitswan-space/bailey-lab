@@ -4,6 +4,7 @@ import type { ReqVerdict, TestState } from './api.ts';
 import {
   SUMMARY_TONES,
   VERDICT_TONES,
+  containerFor,
   rowVerdict,
   summarizeTests,
 } from './testStatus.ts';
@@ -129,4 +130,30 @@ test('"not run" is not styled as a claim about passing or failing', () => {
   assert.equal(VERDICT_TONES.unknown.label, 'not run');
   assert.notEqual(VERDICT_TONES.unknown.fg, VERDICT_TONES.pass.fg);
   assert.notEqual(VERDICT_TONES.unknown.fg, VERDICT_TONES.fail.fg);
+});
+
+// --- the container column ----------------------------------------------------
+
+test('a requirement with no test names no container', () => {
+  // Nothing ran anywhere for it; naming a container would suggest otherwise.
+  assert.equal(
+    containerFor({ verdict: 'no_test', automation: 'new-worker' }),
+    '',
+  );
+});
+
+test('a judged requirement names the container it ran in', () => {
+  assert.equal(containerFor({ verdict: 'pass', automation: 'backend' }), 'backend');
+  assert.equal(containerFor({ verdict: 'fail', automation: 'frontend' }), 'frontend');
+});
+
+test('a blocked requirement still names where its test would run', () => {
+  // It has a test and a resolved container — it just was not run, because a
+  // parent is failing.
+  assert.equal(containerFor({ verdict: 'blocked', automation: 'backend' }), 'backend');
+});
+
+test('a requirement with no result at all names no container', () => {
+  assert.equal(containerFor(null), '');
+  assert.equal(containerFor(undefined), '');
 });

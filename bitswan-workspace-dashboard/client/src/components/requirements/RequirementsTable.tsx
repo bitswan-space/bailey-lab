@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Plus } from 'lucide-react';
 import type { Requirement, RequirementTestResult } from '@/lib/api';
+import { containerFor } from '@/lib/testStatus';
 import { descendantIds, navigate, visibleRows } from '@/lib/treegridNav';
 import { RequirementRow } from './RequirementRow';
 
@@ -111,6 +112,15 @@ export function RequirementsTable({
   onRunTest,
 }: Props) {
   const flat = useMemo(() => flatten(requirements), [requirements]);
+  // The container column exists only when some row has a container to name.
+  // A requirement with no test never does — nothing ran anywhere for it, and
+  // printing a container beside it suggests otherwise. Deciding it here, rather
+  // than per row, is what keeps the header and the cells from drifting apart
+  // and skewing the columns.
+  const showContainer = useMemo(
+    () => requirements.some((r) => containerFor(results.get(r.id)) !== ''),
+    [requirements, results],
+  );
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [activeId, setActiveId] = useState<string | null>(null);
   // Enter on a focused row asks that row to open its editor. Kept separate
@@ -286,7 +296,7 @@ export function RequirementsTable({
       <div
         role="treegrid"
         aria-label="Testable requirements"
-        aria-colcount={5}
+        aria-colcount={showContainer ? 5 : 4}
         onKeyDown={onKeyDown}
       >
         {/* Column header — mirrors the design's requirements table chrome. */}
@@ -303,9 +313,11 @@ export function RequirementsTable({
           <span role="columnheader" className="flex-1">
             Description
           </span>
-          <span role="columnheader" className="hidden w-24 shrink-0 sm:block">
-            Container
-          </span>
+          {showContainer && (
+            <span role="columnheader" className="hidden w-24 shrink-0 sm:block">
+              Container
+            </span>
+          )}
           <span role="columnheader" className="w-[140px] shrink-0">
             <span className="sr-only">Actions</span>
           </span>
@@ -332,6 +344,7 @@ export function RequirementsTable({
               onEditDone={() => handleEditDone(req.id)}
               result={results.get(req.id) ?? null}
               stale={stale}
+              showContainer={showContainer}
               onAcceptProposal={() => onAcceptProposal(req)}
               onUpdateDescription={(text) => onUpdateDescription(req, text)}
               onAddChild={() => onAddChild(req)}

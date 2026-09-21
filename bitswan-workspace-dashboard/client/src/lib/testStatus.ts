@@ -130,3 +130,18 @@ export function rowVerdict(
   }
   return { verdict: result.verdict, stale: runIsStale };
 }
+
+/**
+ * The container to name beside a requirement, or '' for none.
+ *
+ * A requirement with no test has none: nothing ran anywhere for it, so naming
+ * a container beside it would suggest something did. Used both per row and to
+ * decide whether the column is rendered at all, so the header and the cells
+ * cannot disagree and skew the columns.
+ */
+export function containerFor(
+  result: { verdict: ReqVerdict; automation: string } | null | undefined,
+): string {
+  if (!result || result.verdict === 'no_test') return '';
+  return result.automation || '';
+}
