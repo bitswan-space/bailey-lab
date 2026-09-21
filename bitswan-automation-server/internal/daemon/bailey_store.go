@@ -282,6 +282,38 @@ CREATE TABLE IF NOT EXISTS public_endpoints (
   FOREIGN KEY (endpoint_host) REFERENCES endpoints(hostname) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS public_endpoints_pub_idx ON public_endpoints(public_host);
+
+-- Coding-agent browser test identities (issue #210). The agent invents these
+-- so it can drive a live-dev frontend as a user with a chosen group layout.
+-- They are NOT Keycloak users and exist only in the daemon's own issuer, which
+-- is why creating one grants nothing anywhere else on the platform.
+CREATE TABLE IF NOT EXISTS agent_identities (
+  label       TEXT PRIMARY KEY COLLATE NOCASE,
+  email       TEXT NOT NULL COLLATE NOCASE,
+  groups_json TEXT NOT NULL,
+  workspace   TEXT NOT NULL COLLATE NOCASE,
+  created_at  TEXT NOT NULL
+);
+
+-- One browser session handed to the agent: an opaque cookie value, stored only
+-- as a hash, that the gate exchanges for the identity above on a live-dev
+-- endpoint. Short-lived and revocable, like a magic link — never a JWT, so a
+-- stolen cookie stops working the moment the row is deleted.
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  token_hash    TEXT PRIMARY KEY,
+  label         TEXT NOT NULL COLLATE NOCASE,
+  endpoint_host TEXT NOT NULL COLLATE NOCASE,
+  workspace     TEXT NOT NULL COLLATE NOCASE,
+  created_at    TEXT NOT NULL,
+  expires_at    TEXT NOT NULL,
+  -- The hash of the hand-over token that appears in the sign-in URL. A browser
+  -- reads its saved cookies once, when it starts, so a session minted after
+  -- that is invisible to it; visiting a URL is the one hand-over that works no
+  -- matter when the browser was launched. Distinct from token_hash so the
+  -- cookie's own value never travels in a URL.
+  handover_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS agent_sessions_label_idx ON agent_sessions(label);
 `
 
 // baileyDBPath returns the absolute on-disk location of the daemon's
@@ -409,6 +441,26 @@ func openBaileyDB() (*sql.DB, error) {
 			!strings.Contains(err.Error(), "duplicate column name") {
 			db.Close()
 			baileyDBErr = fmt.Errorf("migrate endpoints.parent_endpoint: %w", err)
+			return
+		}
+		// Migration for databases whose agent_sessions predates the sign-in URL
+		// (bailey-lab#210). CREATE TABLE IF NOT EXISTS leaves an existing table
+		// alone, so without this the whole schema exec fails on a server that
+		// already handed out a session.
+		if _, err := db.Exec(`ALTER TABLE agent_sessions ADD COLUMN handover_hash TEXT`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			baileyDBErr = fmt.Errorf("migrate agent_sessions.handover_hash: %w", err)
+			return
+		}
+		// After the column exists, not in the schema block above: on an existing
+		// database that block runs first and would index a column that is not
+		// there yet.
+		if _, err := db.Exec(
+			`CREATE INDEX IF NOT EXISTS agent_sessions_handover_idx ON agent_sessions(handover_hash)`,
+		); err != nil {
+			db.Close()
+			baileyDBErr = fmt.Errorf("index agent_sessions.handover_hash: %w", err)
 			return
 		}
 		// Migration for databases created before kind existed. kind classifies

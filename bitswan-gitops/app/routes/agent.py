@@ -10,6 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from app.dependencies import get_automation_service
+from app.utils import DaemonAgentBrowserError, daemon_agent_browser
 from app.services.automation_service import (
     AutomationService,
     make_hostname_label,
@@ -633,3 +634,196 @@ async def exec_in_deployment(
         "exit_code": exit_code,
         "output": output,
     }
+
+
+# --- browser (#210) --------------------------------------------------------
+#
+# The coding agent drives a real browser at a live-dev frontend, signed in as a
+# test user it invented. gitops is the relay: the agent's container reaches
+# nothing but this API, and the daemon holds everything with authority — the
+# identities, the session cookie, the live-dev rule and the signing key.
+#
+# What gitops contributes is the part only it knows: which deployment the agent
+# means, what hostname that deployment is published at, and whether it is asleep
+# and needs waking before a browser arrives.
+
+
+class AgentIdentityRequest(BaseModel):
+    label: str
+    email: str | None = None
+    groups: list[str] = []
+
+
+class AgentBrowserSessionRequest(BaseModel):
+    label: str
+    deployment_id: str
+
+
+def _workspace_name() -> str:
+    return os.environ.get("BITSWAN_WORKSPACE_NAME", "workspace-local")
+
+
+def _daemon_error(e: DaemonAgentBrowserError) -> HTTPException:
+    """Pass the daemon's own refusal through with its status. A 403 from the
+    live-dev rule has to reach the agent as a 403 with the reason it gave, not
+    as a generic gateway error — the agent acts on the reason."""
+    if 400 <= e.status < 500:
+        return HTTPException(status_code=e.status, detail=e.detail)
+    return HTTPException(status_code=502, detail=f"the daemon refused: {e.detail}")
+
+
+@router.get("/browser/identities")
+async def list_agent_identities(_token=Depends(verify_agent_token)):
+    """The test users this workspace has, with the groups each carries."""
+    try:
+        return daemon_agent_browser(
+            "GET", "identities", params={"workspace": _workspace_name()}
+        )
+    except DaemonAgentBrowserError as e:
+        raise _daemon_error(e)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"daemon unreachable: {e}")
+
+
+@router.post("/browser/identities")
+async def create_agent_identity(
+    body: AgentIdentityRequest, _token=Depends(verify_agent_token)
+):
+    """Create (or redefine) one test user. Groups are whatever the agent asks
+    for: they exist only in the server's own agent issuer, so naming one grants
+    nothing anywhere else."""
+    try:
+        return daemon_agent_browser(
+            "POST",
+            "identities",
+            json_body={
+                "label": body.label,
+                "email": body.email or "",
+                "groups": body.groups,
+                "workspace": _workspace_name(),
+            },
+        )
+    except DaemonAgentBrowserError as e:
+        raise _daemon_error(e)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"daemon unreachable: {e}")
+
+
+@router.delete("/browser/identities/{label}")
+async def delete_agent_identity(label: str, _token=Depends(verify_agent_token)):
+    try:
+        return daemon_agent_browser(
+            "DELETE",
+            "identities",
+            params={"label": label, "workspace": _workspace_name()},
+        )
+    except DaemonAgentBrowserError as e:
+        raise _daemon_error(e)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"daemon unreachable: {e}")
+
+
+def _live_dev_source(deployment_id: str, copy: str | None = None) -> dict:
+    """The scanned source behind a live-dev deployment id, or a 404/400.
+
+    Refusing anything but live-dev here, before the daemon is asked, is the
+    same two-layer guard the deploy routes use: a synchronous, specific refusal
+    at the edge, and the authoritative one at the far end.
+    """
+    if not LIVE_DEV_PATTERN.match(deployment_id):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "the browser only opens live-dev deployments — "
+                f"'{deployment_id}' is not one"
+            ),
+        )
+    for src in _scan_automations(copy):
+        if src["deployment_id"] == deployment_id:
+            return src
+    raise HTTPException(
+        status_code=404, detail=f"no live-dev deployment '{deployment_id}' in this copy"
+    )
+
+
+@router.post("/browser/session")
+async def create_agent_browser_session(
+    body: AgentBrowserSessionRequest,
+    copy: str = Query(None),
+    automation_service: AutomationService = Depends(get_automation_service),
+    _token=Depends(verify_agent_token),
+):
+    """Hand the agent a browser session for one live-dev deployment: the URL a
+    person would visit, and the cookie that signs the browser in as the named
+    test user.
+
+    The deployment is woken first. A live-dev instance sleeps when the pool is
+    under pressure, and a browser arriving at a sleeping one gets the platform's
+    loading page instead of the app — which the agent would report as a bug in
+    the app.
+    """
+    src = _live_dev_source(body.deployment_id, copy)
+    host = (
+        make_hostname_label(
+            _workspace_name(),
+            src["automation_name"],
+            src["context"],
+            src["stage"],
+        )
+        + "."
+        + os.environ.get("BITSWAN_GITOPS_DOMAIN", "")
+    )
+    if host.endswith("."):
+        raise HTTPException(
+            status_code=409,
+            detail="this workspace has no domain yet, so it publishes no URLs",
+        )
+    try:
+        await automation_service.wake_live_dev(src["context"], src["stage"])
+    except Exception as e:  # noqa: BLE001 — a wake failure is worth saying, not fatal
+        logger.warning("agent browser: waking %s failed: %s", src["context"], e)
+    required_group = await _required_group(body.deployment_id)
+    try:
+        out = daemon_agent_browser(
+            "POST",
+            "session",
+            json_body={
+                "label": body.label,
+                "endpoint_host": host,
+                "workspace": _workspace_name(),
+            },
+        )
+    except DaemonAgentBrowserError as e:
+        raise _daemon_error(e)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"daemon unreachable: {e}")
+    out["deployment_id"] = body.deployment_id
+    if required_group:
+        out["required_group"] = required_group
+    return out
+
+
+async def _required_group(deployment_id: str) -> str:
+    """The group this deployment's code checks for, read from the running
+    container's environment.
+
+    Worth the lookup: an app that verifies a token then checks a group answers
+    403 to a test user who carries the wrong one, which reads like a bug in the
+    app rather than a detail of how the identity was made up. Best-effort — a
+    deployment that is not running yet simply yields nothing.
+    """
+    try:
+        svc = get_automation_service()
+        containers = await svc.get_container(deployment_id)
+        if not containers:
+            return ""
+        info = await svc.infra_driver.container_inspect(
+            svc._workspace_ctx(), containers[0].get("Id")
+        )
+        for entry in info.get("Config", {}).get("Env", []) or []:
+            key, _, value = entry.partition("=")
+            if key == "BITSWAN_ALLOWED_GROUP":
+                return value
+    except Exception as e:  # noqa: BLE001 - a hint is never worth failing over
+        logger.debug("could not read the required group for %s: %s", deployment_id, e)
+    return ""

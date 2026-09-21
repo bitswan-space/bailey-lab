@@ -25,12 +25,13 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
             BITSWAN_DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_ISSUER_URLS: https://keycloak.example.com/realms/testrealm,https://agent-auth.example.com
             BITSWAN_URL_TEMPLATE: https://ws4-{name}-4337-live-dev.example.com
             BITSWAN_WORKER_HOSTS: backend=ws4-fwgw-4337-live-dev:8080
             BITSWAN_WORKSPACE_NAME: ws4
             COUCHDB_DB_PREFIX: copy-bar-bp-acme-
             DEPLOYMENT_ID: backend-copy-bar-acme-live-dev
-            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_ISSUER_URL: https://agent-auth.example.com
             KEYCLOAK_REALM: testrealm
             KEYCLOAK_URL: https://keycloak.example.com
             PORT: "8080"
@@ -71,6 +72,7 @@ services:
             BITSWAN_DEPLOYMENT_CONTEXT: acme-copy-bar-live-dev
             BITSWAN_DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
             BITSWAN_GITOPS_DOMAIN: example.com
+            BITSWAN_ISSUER_URLS: https://keycloak.example.com/realms/testrealm,https://agent-auth.example.com
             BITSWAN_URL_PREFIX: https://ws4-
             BITSWAN_URL_SUFFIX: .example.com
             BITSWAN_URL_TEMPLATE: https://ws4-{name}-4337-live-dev.example.com
@@ -78,7 +80,7 @@ services:
             BITSWAN_WORKSPACE_NAME: ws4
             COUCHDB_DB_PREFIX: copy-bar-bp-acme-
             DEPLOYMENT_ID: frontend-copy-bar-acme-live-dev
-            KEYCLOAK_ISSUER_URL: https://keycloak.example.com/realms/testrealm
+            KEYCLOAK_ISSUER_URL: https://agent-auth.example.com
             KEYCLOAK_REALM: testrealm
             KEYCLOAK_URL: https://keycloak.example.com
             POSTGRES_DB: copy_bar_bp_acme

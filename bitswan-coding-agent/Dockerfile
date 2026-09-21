@@ -34,6 +34,30 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Playwright MCP server + headless Chromium (#210), so Claude Code drives a
+# browser through first-class tools (browser_navigate, browser_console_messages,
+# browser_take_screenshot, …) instead of writing scripts against a library.
+#
+# The browser is installed with the MCP's own install-browser command, not a
+# standalone `playwright install`: the MCP package pins its own playwright and
+# wants the chrome-for-testing distribution, and a standalone install lands
+# browsers at revisions the server refuses to use.
+#
+# One browser serves both access paths — the MCP server, and ad-hoc scripts that
+# require('playwright') through NODE_PATH (CommonJS only; the ESM loader ignores
+# NODE_PATH) and must launch with { channel: 'chromium' } to find
+# chrome-for-testing. Browsers go to a world-readable shared path because this
+# step runs as root while sessions run as the agent user, and the ENVs are
+# re-exported in /etc/profile.d by the entrypoint because SSH sessions inherit
+# none of this image's environment.
+ARG PLAYWRIGHT_MCP_VERSION=0.0.78
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright \
+    NODE_PATH=/usr/lib/node_modules/@playwright/mcp/node_modules:/usr/lib/node_modules
+RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
+    && playwright-mcp install-browser --with-deps chrome-for-testing \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create agent user
 RUN useradd -m -s /bin/bash -u 1000 agent \
     && mkdir -p /home/agent/.ssh \
@@ -100,9 +124,17 @@ RUN mkdir -p /workspace/copies /var/log/agent-sessions \
 # own CLAUDE.md at the copy or BP level; Claude merges all levels.
 COPY CLAUDE.md /workspace/CLAUDE.md
 
+# Default per-copy .mcp.json — the entrypoint and the session wrapper seed it
+# into copies that have none, as a bootstrap the user owns and may extend with
+# their own MCP servers. Claude Code's managed-mcp.json is deliberately NOT used:
+# it takes exclusive control and would block user-added servers. A bind mount
+# over this file (the pre-existing operator hook) still wins.
+COPY mcp.default.json /etc/bitswan/mcp.json
+
 # Copy session wrapper script
 COPY agent-session-wrapper /usr/local/bin/agent-session-wrapper
-RUN chmod +x /usr/local/bin/agent-session-wrapper
+COPY seed-copy-mcp /usr/local/bin/seed-copy-mcp
+RUN chmod +x /usr/local/bin/agent-session-wrapper /usr/local/bin/seed-copy-mcp
 
 # Copy entrypoint
 COPY entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh
