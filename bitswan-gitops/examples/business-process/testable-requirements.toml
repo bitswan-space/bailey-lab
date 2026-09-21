@@ -27,3 +27,19 @@ description = "A requirement whose test is deliberately failing, to show what a 
 id = "REQ-T0D0"
 parent = ""
 description = "A requirement nobody has written a test for yet — it shows as 'no test', which does not block a deploy"
+
+# Frontend requirements. `automation` points them at the React app's container
+# instead of the BP-wide default (backend); the framework for it comes from
+# [testing.frontend] in process.toml.
+
+[[requirement]]
+id = "REQ-SH1M"
+parent = ""
+description = "Backend calls are routed through the frontend shim, not direct to the private worker"
+automation = "frontend"
+
+[[requirement]]
+id = "REQ-TMP7"
+parent = ""
+description = "A named automation's URL is built from the workspace URL template"
+automation = "frontend"

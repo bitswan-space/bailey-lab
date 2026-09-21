@@ -18,14 +18,13 @@ name = "Internal app"
 automation = "backend"
 framework = "go"
 
-# If this BP mixed languages — say a Python worker alongside the Go backend —
-# each automation would name its own framework here. Without that the BP-wide
-# `framework` above applies to all of them, and a pytest suite whose output is
-# parsed as `go test -json` reports "no test" for tests that ran and passed.
-#
-#   [testing.new-worker]
-#   framework = "pytest"
-#
-# A single requirement can override `automation`, `framework` or `runner` on
-# its own row in testable-requirements.toml. Naming the framework is enough —
+# This BP DOES mix languages: the Go backend above and a React frontend. Each
+# automation names its own framework here — without that the BP-wide `framework`
+# applies to all of them, and a vitest suite whose output is parsed as
+# `go test -json` reports "no test" for tests that ran and passed.
+[testing.frontend]
+framework = "vitest"
+
+# A single requirement can also override `automation`, `framework` or `runner`
+# on its own row in testable-requirements.toml. Naming the framework is enough —
 # the built-in runner for it is then correct.

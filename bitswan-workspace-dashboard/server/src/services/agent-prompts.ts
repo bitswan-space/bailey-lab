@@ -79,9 +79,9 @@ export const WRITE_TESTS_PROMPT =
   'the conventions. ' +
   'For each requirement write a deterministic test whose NAME carries the ' +
   'requirement id with hyphens turned into underscores, so REQ-7QX4 is tested ' +
-  'by a test whose name contains REQ_7QX4 (e.g. def test_REQ_7QX4_… or ' +
-  'func TestREQ_7QX4_…). That name is the only binding — there is no registry ' +
-  'to update. ' +
+  'by a test whose name contains REQ_7QX4 — def test_REQ_7QX4_… (pytest), ' +
+  "func TestREQ_7QX4_… (go), it('test_REQ_7QX4_…') (vitest). That name is the " +
+  'only binding; there is no registry to update. ' +
   'Put each test INSIDE the automation directory (the one with ' +
   'automation.toml): only that directory is mounted into the container the ' +
   'tests run in, so a test elsewhere in the BP cannot be found. That mount is ' +

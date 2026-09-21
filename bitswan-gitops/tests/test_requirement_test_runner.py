@@ -500,3 +500,80 @@ async def test_a_mixed_bp_runs_each_requirement_in_its_own_container(
     # The Python worker's JUnit report is parsed as JUnit, not as go-test JSON.
     assert run.results["REQ-S96X"].verdict == VERDICT_PASS
     assert run.results["REQ-S96X"].automation == "new-worker"
+
+
+# ---- vitest -----------------------------------------------------------------
+#
+# vitest needs no parser of its own: its built-in `junit` reporter emits the
+# same JUnit XML pytest does, so the existing parser reads it unchanged. It is
+# a distinct framework name only so a BP can say which runner to invoke.
+
+
+def test_vitest_resolves_and_gets_its_built_in_runner():
+    target = test_runner.resolve_target(
+        Requirement(id="REQ-V1TE", framework="vitest"),
+        BpTestingConfig(),
+        [_member("frontend")],
+    )
+    assert target.error == ""
+    assert target.framework == "vitest"
+    assert "vitest run" in target.command
+    assert "REQ_V1TE" in target.command
+
+
+def test_the_vitest_runner_writes_its_report_outside_the_read_only_mount():
+    command = test_runner.DEFAULT_RUNNERS["vitest"]
+    assert "--outputFile=/tmp/" in command
+    assert "--reporter=junit" in command
+    # jsdom, or a component test cannot render at all.
+    assert "--environment jsdom" in command
+
+
+def test_vitest_is_inferred_from_a_custom_runner():
+    assert test_runner.resolve_framework("npx vitest run -t {id}", "") == "vitest"
+
+
+def test_a_vitest_runner_under_the_go_framework_is_named():
+    target = test_runner.resolve_target(
+        Requirement(id="REQ-V1TE", runner="npx vitest run -t {id}"),
+        BpTestingConfig(framework="go"),
+        [_member("frontend")],
+    )
+    assert "looks like vitest" in target.error
+
+
+def test_vitest_output_is_read_by_the_junit_parser():
+    from app.services.requirement_verdicts import (
+        VERDICT_FAIL,
+        VERDICT_NO_TEST,
+        VERDICT_PASS,
+        parse_report,
+        verdict_for_requirement,
+    )
+
+    # Shape taken from a real `vitest run --reporter=junit`: the name carries
+    # the describe-block prefix, and tests filtered out by -t are reported as
+    # skipped rather than omitted.
+    raw = (
+        '<?xml version="1.0" encoding="UTF-8" ?>\n'
+        '<testsuites name="vitest tests" tests="2">'
+        '<testsuite name="App.test.tsx" tests="2">'
+        '<testcase classname="App.test.tsx" '
+        'name="greeting &gt; test_REQ_V1TE_shows_a_greeting" time="0.002"/>'
+        '<testcase classname="App.test.tsx" '
+        'name="greeting &gt; test_REQ_F41L_is_broken" time="0">'
+        '<failure message="expected 500 to be 200">at App.test.tsx:9</failure>'
+        "</testcase>"
+        '<testcase classname="App.test.tsx" '
+        'name="greeting &gt; test_REQ_SK1P_filtered_out" time="0">'
+        "<skipped/></testcase>"
+        "</testsuite></testsuites>"
+    )
+    result = parse_report("vitest", raw)
+    # The describe prefix must not stop a name from matching its requirement.
+    assert verdict_for_requirement("REQ-V1TE", result)[0] == VERDICT_PASS
+    verdict, output = verdict_for_requirement("REQ-F41L", result)
+    assert verdict == VERDICT_FAIL
+    assert "expected 500 to be 200" in output
+    # A test the -t filter skipped is evidence of nothing.
+    assert verdict_for_requirement("REQ-SK1P", result)[0] == VERDICT_NO_TEST

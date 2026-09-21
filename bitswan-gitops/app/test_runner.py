@@ -22,8 +22,10 @@ import os
 
 from app.services.infra_driver_client import ExecSpec
 from app.services.requirement_verdicts import (
+    SUPPORTED_FRAMEWORKS,
     FRAMEWORK_GO,
     FRAMEWORK_PYTEST,
+    FRAMEWORK_VITEST,
     parse_report,
     verdict_for_requirement,
 )
@@ -64,12 +66,25 @@ DEFAULT_RUNNERS = {
         "cd /app && pytest -k {id} -q -p no:cacheprovider "
         "--junitxml=/tmp/bs-{id}.xml; cat /tmp/bs-{id}.xml"
     ),
+    # `run` (not watch), jsdom for component tests, and the report to /tmp for
+    # the same read-only-mount reason as pytest. `-t` filters by test NAME and
+    # marks the rest skipped rather than dropping them, which reads as "no
+    # test" for those ids — exactly the behaviour pytest's -k gives.
+    FRAMEWORK_VITEST: (
+        "cd /app && npx vitest run -t {id} --environment jsdom "
+        "--reporter=junit --outputFile=/tmp/bs-{id}.xml >/dev/null 2>&1; "
+        "cat /tmp/bs-{id}.xml"
+    ),
 }
 
 # Flags a custom runner needs for its report to be parseable at all. Missing
 # them is the most likely reason a hand-written runner produces nothing, so we
 # say so in the failure instead of leaving a bare "unparseable report".
-_REPORT_FLAGS = {FRAMEWORK_GO: "-json", FRAMEWORK_PYTEST: "--junitxml"}
+_REPORT_FLAGS = {
+    FRAMEWORK_GO: "-json",
+    FRAMEWORK_PYTEST: "--junitxml",
+    FRAMEWORK_VITEST: "--reporter=junit",
+}
 
 DEFAULT_TIMEOUT_SECONDS = 120
 
@@ -141,6 +156,8 @@ def resolve_framework(runner: str, framework: str) -> str:
     text = (runner or "").lower()
     if "go test" in text:
         return FRAMEWORK_GO
+    if "vitest" in text:
+        return FRAMEWORK_VITEST
     if "pytest" in text:
         return FRAMEWORK_PYTEST
     return ""
@@ -153,23 +170,20 @@ def framework_mismatch(runner: str, framework: str) -> str:
     parsed as `go test -json` yields no matching events, so a test that ran and
     passed is reported as "no test". Naming the mismatch turns a debugging
     session into a one-line fix.
+
+    Only a runner we can positively identify counts. A runner that names none
+    of the known frameworks — a wrapper script, say — is left alone, because
+    emitting a supported report from something else is legitimate.
     """
-    text = (runner or "").lower()
-    if not text:
-        return ""
-    looks_go = "go test" in text
-    looks_pytest = "pytest" in text
-    if framework == FRAMEWORK_GO and looks_pytest and not looks_go:
-        other = FRAMEWORK_PYTEST
-    elif framework == FRAMEWORK_PYTEST and looks_go and not looks_pytest:
-        other = FRAMEWORK_GO
-    else:
+    looks_like = resolve_framework(runner, "")
+    if not looks_like or not framework or looks_like == framework:
         return ""
     return (
-        f"the runner for this requirement looks like {other}, but the framework "
-        f"in force is {framework!r}, so its output cannot be parsed and every "
-        f"test will read as 'no test'. Set framework = \"{other}\" on the "
-        f"requirement, or under [testing.<automation>] in process.toml."
+        f"the runner for this requirement looks like {looks_like}, but the "
+        f"framework in force is {framework!r}, so its output cannot be parsed "
+        f"and every test will read as 'no test'. Set framework = "
+        f'"{looks_like}" on the requirement, or under [testing.<automation>] '
+        f"in process.toml."
     )
 
 
@@ -274,10 +288,10 @@ def resolve_target(req: Requirement, cfg, members: list[dict]) -> _Target:
     if not framework:
         return _Target(
             error=(
-                'no test framework configured. Set framework = "go" or '
-                'framework = "pytest" under [testing] in process.toml — or '
-                "under [testing.<automation>] when this business process mixes "
-                "languages."
+                "no test framework configured. Set framework to one of "
+                f"{', '.join(SUPPORTED_FRAMEWORKS)} under [testing] in "
+                "process.toml — or under [testing.<automation>] when this "
+                "business process mixes languages."
             )
         )
     mismatch = framework_mismatch(runner, framework)

@@ -69,13 +69,15 @@ TYPICAL WORKFLOW
      the tests, and which framework, in the BP's process.toml:
        [testing]
        automation = "backend"     # required when there is more than one
-       framework  = "go"          # or "pytest"
+       framework  = "go"          # or "pytest", or "vitest"
 
      If it MIXES LANGUAGES, give each automation its own section — the BP-wide
      framework applies to all of them otherwise, and a pytest suite parsed as
      go test output reports "no test" for tests that ran and passed:
        [testing.new-worker]
        framework  = "pytest"
+       [testing.frontend]
+       framework  = "vitest"
 
      A single requirement can override automation, framework or runner with its
      own key in testable-requirements.toml. Naming the framework is enough; the
@@ -85,7 +87,8 @@ TYPICAL WORKFLOW
      docker exec inside it, so nothing installs them at test time. Automations
      scaffolded from the built-in templates already have it (the Go templates
      are built on the golang image; the Python template installs pytest and
-     httpx from image/requirements-test.txt). In an older automation, add them
+     httpx; the frontend template installs vitest, jsdom and
+     @testing-library/react). In an older automation, add them
      and rebuild with
      "bitswan-coding-agent deployments build-and-restart <deployment-id>".
 

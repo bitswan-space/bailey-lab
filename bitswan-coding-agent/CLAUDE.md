@@ -48,10 +48,13 @@ The test's **name** carries the requirement's id with hyphens turned into
 underscores. That is the whole binding — there is no registry to update:
 
 ```python
-def test_REQ_7QX4_totals_include_vat():     # REQ-7QX4
+def test_REQ_7QX4_totals_include_vat():            # pytest
 ```
 ```go
-func TestREQ_7QX4_TotalsIncludeVAT(t *testing.T)   // REQ-7QX4
+func TestREQ_7QX4_TotalsIncludeVAT(t *testing.T)   // go
+```
+```ts
+it('test_REQ_7QX4_totals_include_vat', () => {})   // vitest
 ```
 
 Three constraints that are easy to get wrong:
@@ -73,7 +76,7 @@ container runs the tests, in `process.toml`:
 ```toml
 [testing]
 automation = "backend"     # required when the BP has more than one automation
-framework  = "go"          # or "pytest"
+framework  = "go"          # or "pytest", or "vitest"
 ```
 
 **If the BP mixes languages, give each automation its own section.** The
@@ -88,6 +91,9 @@ framework  = "go"
 
 [testing.new-worker]       # the Python worker in the same BP
 framework  = "pytest"
+
+[testing.frontend]         # the React app in the same BP
+framework  = "vitest"
 ```
 
 A requirement can override `automation`, `framework` or `runner` on its own row
@@ -107,8 +113,9 @@ framework = "pytest"
 `docker exec` inside that container, so nothing can install them at test time.
 
 Automations scaffolded from the built-in templates already have it: the Go
-templates are built on the `golang` image, and the Python template installs
-`pytest` and `httpx` from `image/requirements-test.txt`. If you are working in
+templates are built on the `golang` image, the Python template installs
+`pytest` and `httpx` from `image/requirements-test.txt`, and the frontend
+template installs `vitest`, `jsdom` and `@testing-library/react`. If you are working in
 an older automation that predates that, add them there yourself and rebuild:
 
 ```
@@ -117,6 +124,13 @@ bitswan-coding-agent deployments build-and-restart <deployment-id>
 
 A missing test dependency shows up as a `fail` whose output is the import
 error — read it rather than assuming the test is wrong.
+
+**Frontend tests run through the project's own `vite.config`,** which is where
+`@vitejs/plugin-react` lives. Without that plugin JSX fails at runtime with
+`ReferenceError: React is not defined`, reported as a failing test rather than
+as the configuration problem it is. The template's config already has it, and
+already points `cacheDir` at /tmp so vitest does not try to write into the
+read-only mount.
 
 You do not need a `pytest.ini` to keep pytest off the read-only mount — the
 built-in runner already passes `-p no:cacheprovider` and writes its report to

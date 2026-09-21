@@ -40,7 +40,11 @@ VERDICT_NO_TEST = "no_test"
 
 FRAMEWORK_GO = "go"
 FRAMEWORK_PYTEST = "pytest"
-SUPPORTED_FRAMEWORKS = (FRAMEWORK_GO, FRAMEWORK_PYTEST)
+# vitest needs no parser of its own: its built-in `junit` reporter emits the
+# same JUnit XML pytest does. It is named separately only so a business process
+# can say which runner to invoke.
+FRAMEWORK_VITEST = "vitest"
+SUPPORTED_FRAMEWORKS = (FRAMEWORK_GO, FRAMEWORK_PYTEST, FRAMEWORK_VITEST)
 
 
 def _truncate(text: str) -> str:
@@ -204,7 +208,7 @@ def parse_junit_xml(raw: str) -> ReportResult:
 def parse_report(framework: str, raw: str) -> ReportResult:
     if framework == FRAMEWORK_GO:
         return parse_go_test_json(raw)
-    if framework == FRAMEWORK_PYTEST:
+    if framework in (FRAMEWORK_PYTEST, FRAMEWORK_VITEST):
         return parse_junit_xml(raw)
     return ReportResult([], suite_error=f"unsupported test framework {framework!r}")
 
