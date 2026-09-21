@@ -1,7 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
 import {
-  ChevronDown,
-  ChevronRight,
   FlaskConical,
   Loader2,
   Play,
@@ -31,7 +29,9 @@ import {
 import { useRequirements } from '@/hooks/useRequirements';
 import { useBpTestState } from '@/components/workspace/WorkspaceProvider';
 import { RequirementsTable } from './RequirementsTable';
+import { TestStatusIcon } from './TestStatusIcon';
 import { TreegridLegend } from './TreegridLegend';
+import { VERDICT_TONES } from '@/lib/testStatus';
 import { useUrlParam } from '@/lib/urlState';
 import { cn } from '@/lib/utils';
 import { api, type Requirement, type RequirementTestResult } from '@/lib/api';
@@ -71,7 +71,6 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   );
   const [pendingEditId, setPendingEditId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Requirement | null>(null);
-  const [showPassed, setShowPassed] = useState(false);
   const [starting, setStarting] = useState(false);
 
   const results = useMemo(() => {
@@ -205,15 +204,15 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
         <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-border bg-background px-6 py-2.5">
           {counts ? (
             <div className="flex items-center gap-3 text-[12px]">
-              <Stat n={counts.fail + counts.blocked} label="failing" tone="text-red-700" />
+              <Stat n={counts.fail + counts.blocked} label="failing" tone={VERDICT_TONES.fail.fg} />
               <Stat
                 n={counts.running + counts.queued}
                 label="running"
-                tone="text-blue-700"
+                tone={VERDICT_TONES.running.fg}
               />
               <Stat n={counts.pass} label="passing" tone="text-green-700" />
               {counts.no_test > 0 && (
-                <Stat n={counts.no_test} label="without a test" tone="text-slate-600" />
+                <Stat n={counts.no_test} label="without a test" tone={VERDICT_TONES.no_test.fg} />
               )}
             </div>
           ) : (
@@ -331,7 +330,7 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
           <Group
             title="Blocked"
             n={groups.blocked.length}
-            tone="text-amber-700"
+            tone={VERDICT_TONES.blocked.fg}
             hidden={groups.blocked.length === 0}
             note="Not run — a parent requirement is failing. Fix the parent first."
           >
@@ -360,11 +359,8 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
           <Group
             title="Passing"
             n={groups.passed.length}
-            tone="text-green-700"
+            tone={VERDICT_TONES.pass.fg}
             hidden={groups.passed.length === 0}
-            collapsible
-            open={showPassed}
-            onToggle={() => setShowPassed((v) => !v)}
           >
             <RequirementsTable {...tableProps} requirements={groups.passed} />
           </Group>
@@ -443,9 +439,6 @@ function Group({
   tone,
   hidden,
   note,
-  collapsible = false,
-  open = true,
-  onToggle,
   children,
 }: {
   title: string;
@@ -453,41 +446,21 @@ function Group({
   tone: string;
   hidden: boolean;
   note?: string;
-  collapsible?: boolean;
-  open?: boolean;
-  onToggle?: () => void;
   children: React.ReactNode;
 }) {
   if (hidden) return null;
-  const header = (
-    <div className="flex items-center gap-2">
-      {collapsible &&
-        (open ? (
-          <ChevronDown className="size-3.5 text-muted-foreground" aria-hidden />
-        ) : (
-          <ChevronRight className="size-3.5 text-muted-foreground" aria-hidden />
-        ))}
-      <span className={cn('text-[12px] font-semibold uppercase tracking-wide', tone)}>
-        {title}
-      </span>
-      <span className="text-[11px] font-semibold text-muted-foreground">{n}</span>
-    </div>
-  );
   return (
     <section>
       <div className="mb-1.5">
-        {collapsible ? (
-          <button type="button" onClick={onToggle} className="w-full text-left">
-            {header}
-          </button>
-        ) : (
-          header
-        )}
-        {note && open && (
-          <p className="mt-0.5 text-[11px] text-muted-foreground">{note}</p>
-        )}
+        <div className="flex items-center gap-2">
+          <span className={cn('text-[12px] font-semibold uppercase tracking-wide', tone)}>
+            {title}
+          </span>
+          <span className="text-[11px] font-semibold text-muted-foreground">{n}</span>
+        </div>
+        {note && <p className="mt-0.5 text-[11px] text-muted-foreground">{note}</p>}
       </div>
-      {open && children}
+      {children}
     </section>
   );
 }

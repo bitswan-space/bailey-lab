@@ -22,6 +22,7 @@ import { api, errorMessage } from '@/lib/api';
 import { toast } from '@/lib/notify';
 import { cn } from '@/lib/utils';
 import { useBpTestState } from './WorkspaceProvider';
+import { TestStatusIcon } from '@/components/requirements/TestStatusIcon';
 import type { BusinessProcess, Copy, EnterCopy, FlowTab } from '@/types';
 
 type Role = 'admin' | 'auditor' | 'member';
@@ -86,43 +87,16 @@ interface TopNavProps {
 }
 
 /**
- * CI-style status dot beside the Requirements & tests step: amber while a run
- * is in flight, green when everything passed, red when anything failed.
+ * CI-style status icon beside the Requirements & tests step, from the live SSE
+ * feed — so the state is visible without opening the tab, which is the whole
+ * point of putting it in the nav.
  *
- * It reads the live SSE state rather than anything this tab owns, so the dot is
- * correct even when the user is nowhere near the Requirements tab — which is
- * the entire point of putting it in the nav.
+ * The icon set and its colours come from the shared tone map, so what the nav
+ * says and what the row badges say can never disagree.
  */
-function TestStatusDot({ bp }: { bp: string | null }) {
+function TestStatusIndicator({ bp }: { bp: string | null }) {
   const state = useBpTestState(bp);
-  if (!state) return null;
-  const failing = state.counts.fail + state.counts.blocked > 0;
-  const running = state.status === 'running';
-  const tone = running
-    ? 'bg-amber-500'
-    : failing
-      ? 'bg-red-500'
-      : state.green
-        ? 'bg-green-500'
-        : 'bg-slate-300';
-  const label = running
-    ? 'Tests are running'
-    : failing
-      ? `${state.counts.fail + state.counts.blocked} test(s) not passing`
-      : state.green
-        ? 'All tests passing'
-        : 'Tests are out of date';
-  // Decorative, like every other icon in this bar: an aria-label here would
-  // append the status to the tab button's accessible name, changing what the
-  // button is called every time a test run moves. The status itself lives in
-  // the tab this dot points at.
-  return (
-    <span
-      title={label}
-      aria-hidden
-      className={cn('ml-0.5 size-2 shrink-0 rounded-full', tone, running && 'animate-pulse')}
-    />
-  );
+  return <TestStatusIcon state={state} className="ml-0.5" />;
 }
 
 interface FlowStep {
@@ -379,7 +353,7 @@ export function TopNav({
       >
         <step.Icon className="size-3.5" aria-hidden />
         {step.label}
-        {step.showTestStatus && <TestStatusDot bp={activeBpId} />}
+        {step.showTestStatus && <TestStatusIndicator bp={activeBpId} />}
       </button>
     );
   };
