@@ -1037,7 +1037,7 @@ def test_the_parent_reads_as_ahead_of_main_the_instant_the_merge_returns(env):
     half of that promise; the client half (re-reading at all, and not showing
     the pre-merge answer as authoritative in the meantime) is pinned by
     `useBpDivergence`'s own tests."""
-    alice = env["user_copy"]("alice")
+    env["user_copy"]("alice")
     exp = env["experiment"]("exp-pricing-ab12", "alice")
     _commit(os.path.join(exp, "bpa"), "file.txt", "exp1\n", "exp bpa")
 
