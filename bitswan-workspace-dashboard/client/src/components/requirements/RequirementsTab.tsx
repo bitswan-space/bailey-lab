@@ -194,6 +194,10 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   const tableProps = {
     results,
     stale,
+    // Every requirement, so a group can name a parent that landed in another
+    // one — grouping is by verdict, and a blocked child is routinely shown
+    // apart from the failing parent that blocked it.
+    allRequirements: requirements,
     loading,
     pendingEditId,
     onEditDone: () => setPendingEditId(null),

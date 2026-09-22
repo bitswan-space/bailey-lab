@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Plus } from 'lucide-react';
 import type { Requirement, RequirementTestResult } from '@/lib/api';
+import { flattenForDisplay } from '@/lib/requirementTree';
 import { containerFor } from '@/lib/testStatus';
 import { descendantIds, navigate, visibleRows } from '@/lib/treegridNav';
 import { RequirementRow } from './RequirementRow';
@@ -18,6 +19,12 @@ interface Props {
   stale: boolean;
   /** Message for an empty table — differs per group. */
   emptyText?: string;
+  /**
+   * Every requirement in the BP, not just this table's. The tab groups by
+   * verdict, so a child can be shown without its parent; this is what lets
+   * such a row name the parent it belongs to.
+   */
+  allRequirements?: Requirement[];
   onAcceptProposal: (req: Requirement) => void;
   onUpdateDescription: (req: Requirement, text: string) => void;
   onAddChild: (parent: Requirement) => void;
@@ -26,35 +33,6 @@ interface Props {
   onAddRoot?: () => void;
   onDelete: (req: Requirement) => void;
   onRunTest: (req: Requirement) => void;
-}
-
-/**
- * Flattens the requirements list (which only carries `parent` pointers)
- * into a DFS-ordered render list, attaching a `depth` to each row for
- * indentation. Orphans (requirements whose `parent` no longer exists,
- * e.g. after a non-cascade delete) surface at the root, matching how the
- * agent CLI's tree builder handles them.
- */
-function flatten(reqs: Requirement[]): Array<{ req: Requirement; depth: number }> {
-  const byParent = new Map<string, Requirement[]>();
-  const ids = new Set(reqs.map((r) => r.id));
-  for (const r of reqs) {
-    const key = r.parent && ids.has(r.parent) ? r.parent : '';
-    const arr = byParent.get(key) ?? [];
-    arr.push(r);
-    byParent.set(key, arr);
-  }
-  const out: Array<{ req: Requirement; depth: number }> = [];
-  const walk = (parentId: string, depth: number) => {
-    const kids = byParent.get(parentId);
-    if (!kids) return;
-    for (const r of kids) {
-      out.push({ req: r, depth });
-      walk(r.id, depth + 1);
-    }
-  };
-  walk('', 0);
-  return out;
 }
 
 /**
@@ -104,6 +82,7 @@ export function RequirementsTable({
   results,
   stale,
   emptyText,
+  allRequirements,
   onAcceptProposal,
   onUpdateDescription,
   onAddChild,
@@ -111,7 +90,14 @@ export function RequirementsTable({
   onDelete,
   onRunTest,
 }: Props) {
-  const flat = useMemo(() => flatten(requirements), [requirements]);
+  const flat = useMemo(
+    () => flattenForDisplay(requirements, allRequirements ?? requirements),
+    [requirements, allRequirements],
+  );
+  const parentOf = useMemo(
+    () => new Map(flat.map(({ req, parentElsewhere }) => [req.id, parentElsewhere])),
+    [flat],
+  );
   // The container column exists only when some row has a container to name.
   // A requirement with no test never does — nothing ran anywhere for it, and
   // printing a container beside it suggests otherwise. Deciding it here, rather
@@ -345,6 +331,7 @@ export function RequirementsTable({
               result={results.get(req.id) ?? null}
               stale={stale}
               showContainer={showContainer}
+              parentElsewhere={parentOf.get(req.id) ?? null}
               onAcceptProposal={() => onAcceptProposal(req)}
               onUpdateDescription={(text) => onUpdateDescription(req, text)}
               onAddChild={() => onAddChild(req)}

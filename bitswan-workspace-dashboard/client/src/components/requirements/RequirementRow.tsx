@@ -49,6 +49,13 @@ interface Props {
   onFocusRow: () => void;
   /** Whether this table renders a container column at all. */
   showContainer?: boolean;
+  /**
+   * The parent requirement when it is not shown in this same table. Rows are
+   * grouped by verdict, so a blocked child and its failing parent end up apart
+   * — and indentation, the usual way the tree reads, says nothing across that
+   * boundary. Naming the parent keeps the row from looking unrelated.
+   */
+  parentElsewhere?: Requirement | null;
 }
 
 /**
@@ -84,6 +91,7 @@ export function RequirementRow({
   rowRef,
   onFocusRow,
   showContainer = true,
+  parentElsewhere,
 }: Props) {
   const [editing, setEditing] = useState(!!editOnMount);
   const [draft, setDraft] = useState(req.description);
@@ -189,6 +197,15 @@ export function RequirementRow({
         {running && <Loader2 className="size-3 animate-spin text-blue-700" />}
       </div>
       <div role="gridcell" className="min-w-0 flex-1 pt-0.5">
+        {parentElsewhere && (
+          <p
+            className="truncate pb-0.5 text-[11px] text-muted-foreground"
+            title={`Parent — ${parentElsewhere.id}: ${parentElsewhere.description}`}
+          >
+            Parent — <span className="font-mono">{parentElsewhere.id}</span>
+            {parentElsewhere.description ? `: ${parentElsewhere.description}` : ''}
+          </p>
+        )}
         {editing ? (
           <textarea
             ref={inputRef}
