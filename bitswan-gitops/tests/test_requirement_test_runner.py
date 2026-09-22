@@ -577,3 +577,55 @@ def test_vitest_output_is_read_by_the_junit_parser():
     assert "expected 500 to be 200" in output
     # A test the -t filter skipped is evidence of nothing.
     assert verdict_for_requirement("REQ-SK1P", result)[0] == VERDICT_NO_TEST
+
+
+# ---- every row knows which container it belongs to ---------------------------
+#
+# The UI shows the container per row and hides the column when no row has one.
+# A row that is judged but carries no container makes that column vanish from a
+# whole group, which is how "Passing" lost its Container column.
+
+
+async def test_a_passing_row_keeps_its_container_after_a_subset_rerun(
+    bp_dir, monkeypatch
+):
+    _write(
+        bp_dir,
+        '[[requirement]]\nid = "REQ-AAAA"\n\n[[requirement]]\nid = "REQ-BBBB"\n',
+        _PROCESS_GO,
+    )
+    driver = FakeDriver(
+        {
+            "REQ_AAAA": _go_report("TestREQ_AAAA_Health", "pass"),
+            "REQ_BBBB": _go_report("TestREQ_BBBB_Count", "fail"),
+        }
+    )
+    _install(monkeypatch, [_member("backend")], driver)
+    await test_runner.execute_run("dev1", "shop")
+
+    # Re-run only what failed. The passing requirement is not executed again,
+    # but it is still shown — and still belongs to a container.
+    run = await test_runner.execute_run("dev1", "shop", failed_only=True)
+
+    assert run.results["REQ-AAAA"].verdict == VERDICT_PASS
+    assert run.results["REQ-AAAA"].automation == "backend"
+
+
+async def test_a_blocked_row_names_the_container_its_test_would_run_in(
+    bp_dir, monkeypatch
+):
+    _write(
+        bp_dir,
+        '[[requirement]]\nid = "REQ-PPPP"\n\n'
+        '[[requirement]]\nid = "REQ-CCCC"\nparent = "REQ-PPPP"\n',
+        _PROCESS_GO,
+    )
+    driver = FakeDriver({"REQ_PPPP": _go_report("TestREQ_PPPP_Base", "fail")})
+    _install(monkeypatch, [_member("backend")], driver)
+
+    run = await test_runner.execute_run("dev1", "shop")
+
+    assert run.results["REQ-CCCC"].verdict == VERDICT_BLOCKED
+    # It was not run, but its target resolved — the container is real
+    # information, not a claim that something executed.
+    assert run.results["REQ-CCCC"].automation == "backend"

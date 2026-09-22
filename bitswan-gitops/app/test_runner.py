@@ -504,7 +504,17 @@ async def execute_run(
     by_id = {r.id: r for r in requirements}
     targets: dict[str, _Target] = {}
     for req in requirements:
-        targets[req.id] = resolve_target(req, cfg, members)
+        target = resolve_target(req, cfg, members)
+        targets[req.id] = target
+        # Record where this requirement belongs NOW, for every row rather than
+        # only the ones about to execute. A row that is judged but carries no
+        # container makes the UI's container column vanish for a whole group —
+        # which is what happened to every passing row after a subset re-run,
+        # and to every blocked row, since neither reaches the execution step
+        # that used to be the only place this was set.
+        if target.deployment_id:
+            run.results[req.id].deployment_id = target.deployment_id
+            run.results[req.id].automation = target.automation
 
     await on_change()
 
@@ -538,8 +548,6 @@ async def execute_run(
                     result.verdict = VERDICT_NO_TEST
                     continue
 
-                result.deployment_id = target.deployment_id
-                result.automation = target.automation
                 groups.setdefault(target.deployment_id, []).append((req, target))
 
             await on_change()
