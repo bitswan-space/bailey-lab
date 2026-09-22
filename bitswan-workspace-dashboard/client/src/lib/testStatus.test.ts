@@ -133,27 +133,43 @@ test('"not run" is not styled as a claim about passing or failing', () => {
 });
 
 // --- the container column ----------------------------------------------------
+//
+// Read from the BP's own files, not from a run: a requirement's own
+// `automation` when it pins one, otherwise the BP's [testing] default, which
+// the server resolves into `effectiveAutomation`.
 
-test('a requirement with no test names no container', () => {
-  // Nothing ran anywhere for it; naming a container would suggest otherwise.
-  assert.equal(
-    containerFor({ verdict: 'no_test', automation: 'new-worker' }),
-    '',
-  );
+test('a requirement inheriting the BP default still names a container', () => {
+  // The common case by far: in the dev workspace's BP, none of its
+  // requirements pin an automation — all of them come from
+  // `[testing] automation = "backend"` in process.toml.
+  const req = { automation: '', effectiveAutomation: 'backend' };
+  assert.equal(containerFor(req, { verdict: 'pass' }), 'backend');
 });
 
-test('a judged requirement names the container it ran in', () => {
-  assert.equal(containerFor({ verdict: 'pass', automation: 'backend' }), 'backend');
-  assert.equal(containerFor({ verdict: 'fail', automation: 'frontend' }), 'frontend');
+test('a requirement that pins its own container names that one', () => {
+  const req = { automation: 'new-worker', effectiveAutomation: 'new-worker' };
+  assert.equal(containerFor(req, { verdict: 'pass' }), 'new-worker');
+});
+
+test('a requirement with no test names no container', () => {
+  // Nothing runs anywhere for it; naming a container would suggest otherwise.
+  const req = { automation: '', effectiveAutomation: 'backend' };
+  assert.equal(containerFor(req, { verdict: 'no_test' }), '');
+});
+
+test('a container is known before any run has judged the requirement', () => {
+  // This is the point of reading it from the contract: no run needs to have
+  // recorded it, so it cannot go missing when one does not.
+  const req = { automation: '', effectiveAutomation: 'backend' };
+  assert.equal(containerFor(req, null), 'backend');
+});
+
+test('a BP with no [testing] default and no pin names nothing', () => {
+  assert.equal(containerFor({ automation: '', effectiveAutomation: '' }, null), '');
+  assert.equal(containerFor(null, null), '');
 });
 
 test('a blocked requirement still names where its test would run', () => {
-  // It has a test and a resolved container — it just was not run, because a
-  // parent is failing.
-  assert.equal(containerFor({ verdict: 'blocked', automation: 'backend' }), 'backend');
-});
-
-test('a requirement with no result at all names no container', () => {
-  assert.equal(containerFor(null), '');
-  assert.equal(containerFor(undefined), '');
+  const req = { automation: '', effectiveAutomation: 'backend' };
+  assert.equal(containerFor(req, { verdict: 'blocked' }), 'backend');
 });

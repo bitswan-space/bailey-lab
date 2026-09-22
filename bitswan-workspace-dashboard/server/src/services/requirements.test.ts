@@ -7,6 +7,7 @@ import {
   addRequirement,
   annotateHasTest,
   listRequirements,
+  readTestingAutomation,
   removeRequirement,
   updateRequirement,
 } from './requirements.js';
@@ -142,5 +143,56 @@ describe('hasTest', () => {
     const byId = new Map(annotated.map((r) => [r.id, r.hasTest]));
     assert.equal(byId.get('REQ-1000'), true);
     assert.equal(byId.get('REQ-100'), false);
+  });
+});
+
+describe('which container a requirement runs in', () => {
+  async function writeProcess(body: string) {
+    await fs.writeFile(
+      path.join(root, 'copies', COPY, BP, 'process.toml'),
+      body,
+      'utf8',
+    );
+  }
+
+  it('falls back to the BP default when the requirement pins nothing', async () => {
+    // The common case: in a real BP none of the requirements carry an
+    // `automation` key — it comes from process.toml.
+    await writeContract('[[requirement]]\nid = "REQ-AAAA"\n');
+    await writeProcess('[testing]\nautomation = "backend"\nframework = "go"\n');
+
+    const [row] = await annotateHasTest(scope(), await listRequirements(scope()));
+    assert.equal(row!.automation, '', 'the contract field stays as written');
+    assert.equal(row!.effectiveAutomation, 'backend');
+  });
+
+  it('prefers the requirement’s own pin over the default', async () => {
+    await writeContract(
+      '[[requirement]]\nid = "REQ-AAAA"\nautomation = "new-worker"\n',
+    );
+    await writeProcess('[testing]\nautomation = "backend"\n');
+
+    const [row] = await annotateHasTest(scope(), await listRequirements(scope()));
+    assert.equal(row!.effectiveAutomation, 'new-worker');
+  });
+
+  it('resolves to nothing when neither says', async () => {
+    await writeContract('[[requirement]]\nid = "REQ-AAAA"\n');
+    await writeProcess('process-id = "x"\n');
+
+    const [row] = await annotateHasTest(scope(), await listRequirements(scope()));
+    assert.equal(row!.effectiveAutomation, '');
+  });
+
+  it('treats a missing or unparseable process.toml as no default', async () => {
+    // Not this surface's problem to report — the test runner says so loudly
+    // enough when it tries to use it.
+    await fs.rm(path.join(root, 'copies', COPY, BP, 'process.toml'), {
+      force: true,
+    });
+    assert.equal(await readTestingAutomation(scope()), '');
+
+    await writeProcess('[testing]\nautomation = ');
+    assert.equal(await readTestingAutomation(scope()), '');
   });
 });

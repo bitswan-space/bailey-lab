@@ -98,13 +98,12 @@ export function RequirementsTable({
     () => new Map(flat.map(({ req, parentElsewhere }) => [req.id, parentElsewhere])),
     [flat],
   );
-  // The container column exists only when some row has a container to name.
-  // A requirement with no test never does — nothing ran anywhere for it, and
-  // printing a container beside it suggests otherwise. Deciding it here, rather
-  // than per row, is what keeps the header and the cells from drifting apart
-  // and skewing the columns.
+  // The container column exists only when some row has a container to name —
+  // i.e. some requirement here pins its own `automation`, or the BP declares a
+  // default. Deciding it here, rather than per row, keeps the header and the
+  // cells from drifting apart and skewing the columns.
   const showContainer = useMemo(
-    () => requirements.some((r) => containerFor(results.get(r.id)) !== ''),
+    () => requirements.some((r) => containerFor(r, results.get(r.id)) !== ''),
     [requirements, results],
   );
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());

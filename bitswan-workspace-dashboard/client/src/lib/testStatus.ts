@@ -134,14 +134,19 @@ export function rowVerdict(
 /**
  * The container to name beside a requirement, or '' for none.
  *
- * A requirement with no test has none: nothing ran anywhere for it, so naming
- * a container beside it would suggest something did. Used both per row and to
- * decide whether the column is rendered at all, so the header and the cells
- * cannot disagree and skew the columns.
+ * Read from the BP's own files rather than from a run: the requirement's own
+ * `automation` when it pins one, otherwise the business process's
+ * `[testing] automation` default, which the server resolves into
+ * `effectiveAutomation`. Known before anything has run, and not something a
+ * run has to remember to record.
+ *
+ * A requirement with no test names nothing regardless: nothing runs anywhere
+ * for it, so pointing at a container would suggest otherwise.
  */
 export function containerFor(
-  result: { verdict: ReqVerdict; automation: string } | null | undefined,
+  req: { effectiveAutomation?: string; automation?: string } | null | undefined,
+  result: { verdict: ReqVerdict } | null | undefined,
 ): string {
-  if (!result || result.verdict === 'no_test') return '';
-  return result.automation || '';
+  if (result?.verdict === 'no_test') return '';
+  return req?.effectiveAutomation || req?.automation || '';
 }

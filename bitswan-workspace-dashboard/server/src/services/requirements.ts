@@ -46,9 +46,18 @@ export interface Requirement {
   framework: string;
 }
 
-/** A requirement annotated with whether a matching test exists in the BP. */
+/** A requirement annotated with what the BP's own files say about it. */
 export interface RequirementWithTest extends Requirement {
   hasTest: boolean;
+  /**
+   * The container this requirement's test runs in: its own `automation` when
+   * it pins one, otherwise the business process's `[testing] automation`
+   * default from process.toml. Empty when neither says.
+   *
+   * Resolved from those two files rather than from a test run, so it is known
+   * before anything has run and does not depend on a run having recorded it.
+   */
+  effectiveAutomation: string;
 }
 
 const REQUIREMENTS_FILENAME = 'testable-requirements.toml';
@@ -241,16 +250,49 @@ export async function findTestedRequirementIds(opts: {
   return found;
 }
 
+/**
+ * The BP-wide `[testing] automation` default, from process.toml. '' when the
+ * file is missing, unparseable, or says nothing — a business process with one
+ * automation needs no default, and guessing one here would be a second place
+ * that decides where tests run.
+ */
+export async function readTestingAutomation(opts: {
+  workspaceRoot: string;
+  copy: string;
+  bp: string;
+}): Promise<string> {
+  const filePath = path.join(path.dirname(resolveFilePath(opts)), 'process.toml');
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, 'utf8');
+  } catch {
+    return '';
+  }
+  try {
+    const parsed = TOML.parse(raw) as { testing?: { automation?: unknown } };
+    const value = parsed.testing?.automation;
+    return typeof value === 'string' ? value : '';
+  } catch {
+    // A process.toml we cannot parse is not this surface's problem to report;
+    // the test runner says so loudly enough when it tries to use it.
+    return '';
+  }
+}
+
 /** Annotate a requirement list with per-id test existence. */
 export async function annotateHasTest(
   opts: { workspaceRoot: string; copy: string; bp: string },
   reqs: Requirement[],
 ): Promise<RequirementWithTest[]> {
-  const tested = await findTestedRequirementIds({
-    ...opts,
-    ids: reqs.map((r) => r.id),
-  });
-  return reqs.map((r) => ({ ...r, hasTest: tested.has(r.id) }));
+  const [tested, defaultAutomation] = await Promise.all([
+    findTestedRequirementIds({ ...opts, ids: reqs.map((r) => r.id) }),
+    readTestingAutomation(opts),
+  ]);
+  return reqs.map((r) => ({
+    ...r,
+    hasTest: tested.has(r.id),
+    effectiveAutomation: r.automation || defaultAutomation,
+  }));
 }
 
 /**

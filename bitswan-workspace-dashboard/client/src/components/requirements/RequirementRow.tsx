@@ -264,13 +264,14 @@ export function RequirementRow({
       </div>
       {/* Which container this requirement's test runs in. Worth showing per
           row: a BP can have several, and "it passes" means little without
-          knowing where. Left blank for a requirement with no test — nothing
-          ran anywhere for it. */}
+          knowing where. Read from the BP's own files, so it is known before
+          anything has run. Blank for a requirement with no test — nothing runs
+          anywhere for it. */}
       {showContainer && (
         <div role="gridcell" className="hidden w-24 shrink-0 items-center pt-0.5 sm:flex">
-          {containerFor(result) && (
+          {containerFor(req, result) && (
             <span className="truncate font-mono text-[10px] text-muted-foreground">
-              {containerFor(result)}
+              {containerFor(req, result)}
             </span>
           )}
         </div>

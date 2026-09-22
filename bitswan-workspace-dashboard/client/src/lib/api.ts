@@ -2168,6 +2168,13 @@ export interface Requirement {
    * endpoint annotates); the hook preserves the previous value across those.
    */
   hasTest?: boolean;
+  /**
+   * The container this requirement's test runs in: its own `automation` when
+   * it pins one, otherwise the BP's `[testing] automation` default. Resolved
+   * from the BP's own files, so it is known before anything has run. Absent on
+   * add/update responses, like `hasTest`.
+   */
+  effectiveAutomation?: string;
 }
 
 export interface AddRequirementRequest {
