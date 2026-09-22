@@ -57,6 +57,15 @@ jobs:
 
       - name: Install and configure dnsmasq for .localhost and .test resolution
         run: |
+          # Forward to whatever resolvers this machine actually uses. Hardcoding
+          # 8.8.8.8 only works where outbound DNS to public resolvers is allowed;
+          # on a self-hosted runner it is usually blocked, and then every lookup
+          # dies the moment resolv.conf is repointed at dnsmasq below.
+          UPSTREAM="$(resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: //p' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -3)"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$(awk '/^nameserver/ && $2 !~ /^127\./ {print $2}' /etc/resolv.conf | head -3)"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$(ip route | awk '/^default/{print $3; exit}')"
+          [ -n "$UPSTREAM" ] || UPSTREAM="8.8.8.8"
+          echo "dnsmasq upstreams: $(echo $UPSTREAM | tr '\n' ' ')"
           sudo apt-get update
           sudo apt-get install -y dnsmasq
           sudo systemctl stop systemd-resolved || true
@@ -67,12 +76,11 @@ jobs:
           echo "listen-address=127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "port=53" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "no-resolv" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.8.8" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.4.4" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          sudo systemctl start dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          for s in $UPSTREAM; do echo "server=$s" | sudo tee -a /etc/dnsmasq.d/localhost.conf; done
+          sudo systemctl restart dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          sudo rm -f /etc/resolv.conf
           echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
-          sudo chattr +i /etc/resolv.conf || true
+          for s in $UPSTREAM; do echo "nameserver $s" | sudo tee -a /etc/resolv.conf; done
           sleep 3
           dig @127.0.0.1 test.bs-e2e.localhost +short || echo "DNS resolution check skipped"
 
@@ -238,6 +246,15 @@ jobs:
 
       - name: Install and configure dnsmasq for .localhost and .test resolution
         run: |
+          # Forward to whatever resolvers this machine actually uses. Hardcoding
+          # 8.8.8.8 only works where outbound DNS to public resolvers is allowed;
+          # on a self-hosted runner it is usually blocked, and then every lookup
+          # dies the moment resolv.conf is repointed at dnsmasq below.
+          UPSTREAM="$(resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: //p' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -3)"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$(awk '/^nameserver/ && $2 !~ /^127\./ {print $2}' /etc/resolv.conf | head -3)"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$(ip route | awk '/^default/{print $3; exit}')"
+          [ -n "$UPSTREAM" ] || UPSTREAM="8.8.8.8"
+          echo "dnsmasq upstreams: $(echo $UPSTREAM | tr '\n' ' ')"
           sudo apt-get update
           sudo apt-get install -y dnsmasq
           sudo systemctl stop systemd-resolved || true
@@ -248,12 +265,11 @@ jobs:
           echo "listen-address=127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "port=53" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "no-resolv" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.8.8" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.4.4" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          sudo systemctl start dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          for s in $UPSTREAM; do echo "server=$s" | sudo tee -a /etc/dnsmasq.d/localhost.conf; done
+          sudo systemctl restart dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          sudo rm -f /etc/resolv.conf
           echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
-          sudo chattr +i /etc/resolv.conf || true
+          for s in $UPSTREAM; do echo "nameserver $s" | sudo tee -a /etc/resolv.conf; done
           sleep 3
           dig @127.0.0.1 test.bs-e2e.localhost +short || echo "DNS resolution check skipped"
 
