@@ -95,9 +95,12 @@ jobs:
           # 8.8.8.8 only works where outbound DNS to public resolvers is allowed;
           # on a self-hosted runner it is usually blocked, and then every lookup
           # dies the moment resolv.conf is repointed at dnsmasq below.
-          UPSTREAM="$(resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: //p' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -3)"
-          [ -n "$UPSTREAM" ] || UPSTREAM="$(awk '/^nameserver/ && $2 !~ /^127\./ {print $2}' /etc/resolv.conf | head -3)"
-          [ -n "$UPSTREAM" ] || UPSTREAM="$(ip route | awk '/^default/{print $3; exit}')"
+          # NB: every probe ends in "|| true" — the step runs under `set -e -o
+          # pipefail`, so a grep/awk that simply finds nothing would otherwise
+          # abort the whole step.
+          UPSTREAM="$( { resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: //p' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -3; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$( { awk '/^nameserver/ && $2 !~ /^127\./ {print $2}' /etc/resolv.conf 2>/dev/null | head -3; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$( { ip route 2>/dev/null | awk '/^default/{print $3; exit}'; } || true )"
           [ -n "$UPSTREAM" ] || UPSTREAM="8.8.8.8"
           echo "dnsmasq upstreams: $(echo $UPSTREAM | tr '\n' ' ')"
           sudo apt-get update
