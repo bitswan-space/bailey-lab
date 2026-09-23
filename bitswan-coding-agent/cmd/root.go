@@ -65,10 +65,20 @@ TYPICAL WORKFLOW
      found. That mount is READ-ONLY, so a test must not write next to itself;
      write to /tmp.
 
-     If the business process has MORE THAN ONE automation, say which one runs
-     the tests, and which framework, in the BP's process.toml:
+     DECLARE automation ON EVERY REQUIREMENT. A business process is scaffolded
+     with a frontend AND a backend, so there is almost never an unambiguous
+     default. A requirement that does not say where it belongs inherits the
+     BP's [testing] automation, and inheriting the wrong one reads as your
+     fault rather than the configuration's: the test runs in a container where
+     that requirement's source is not mounted, nothing carrying the id is
+     found, and it reports "no test" even though the test is correct.
+       [[requirement]]
+       id = "REQ-SH1M"
+       automation = "frontend"
+
+     The BP's own defaults live in process.toml:
        [testing]
-       automation = "backend"     # required when there is more than one
+       automation = "backend"     # the fallback for a requirement that names none
        framework  = "go"          # or "pytest", or "vitest"
 
      If it MIXES LANGUAGES, give each automation its own section — the BP-wide

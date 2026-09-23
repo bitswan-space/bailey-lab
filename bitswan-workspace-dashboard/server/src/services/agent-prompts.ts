@@ -86,6 +86,11 @@ export const WRITE_TESTS_PROMPT =
   'automation.toml): only that directory is mounted into the container the ' +
   'tests run in, so a test elsewhere in the BP cannot be found. That mount is ' +
   'read-only — write any temporary file to /tmp. ' +
+  'Declare automation on every requirement, naming the automation its test ' +
+  'lives in: a BP is scaffolded with a frontend AND a backend, so a ' +
+  'requirement that does not say inherits the BP default, and inheriting the ' +
+  'wrong one makes a correct test report "no test" because it ran in a ' +
+  'container where that source is not mounted. ' +
   'If the BP has more than one automation, make sure process.toml says which ' +
   'one runs the tests and which framework, under [testing]. If it mixes ' +
   'languages, give each automation its own [testing.<automation>] section (or ' +

@@ -150,3 +150,31 @@ export function containerFor(
   if (result?.verdict === 'no_test') return '';
   return req?.effectiveAutomation || req?.automation || '';
 }
+
+/**
+ * Why a requirement reports "no test" even though a test for it exists.
+ *
+ * Two facts arrive from different places and scopes: `hasTest` is the
+ * dashboard scanning the WHOLE business process for a test file carrying this
+ * id, while the `no_test` verdict is gitops reporting that the run found none
+ * inside the ONE container the requirement resolved to. When they disagree,
+ * the test exists but the run looked somewhere it is not — which is what a
+ * missing or wrong `automation` key produces, and what a wrong `framework`
+ * produces too (a report the parser cannot read contains no tests at all).
+ *
+ * Saying so is the difference between a five-minute fix and reading it as
+ * "my test is wrong".
+ */
+export function noTestHint(
+  req: { hasTest?: boolean; automation?: string; effectiveAutomation?: string },
+  result: { verdict: ReqVerdict } | null | undefined,
+): string {
+  if (result?.verdict !== 'no_test' || !req.hasTest) return '';
+  const container = req.effectiveAutomation || req.automation;
+  const where = container ? `in ${container}` : 'in the container it runs in';
+  return (
+    `A test carrying this id exists in this business process, but the run ` +
+    `found none ${where}. Check the requirement's automation — and its ` +
+    `framework, since a report the runner cannot parse also reads as no test.`
+  );
+}

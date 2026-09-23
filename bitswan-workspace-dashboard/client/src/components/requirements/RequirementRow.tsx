@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import type { Requirement, RequirementTestResult } from '@/lib/api';
-import { containerFor, rowVerdict } from '@/lib/testStatus';
+import { containerFor, noTestHint, rowVerdict } from '@/lib/testStatus';
 import { StatusBadge } from './StatusBadge';
 
 interface Props {
@@ -146,6 +146,7 @@ export function RequirementRow({
   const running = result?.verdict === 'running';
   const shown = rowVerdict(result, req.hasTest, stale);
   const failureOutput = result?.verdict === 'fail' ? result.output : '';
+  const hint = noTestHint(req, result);
   const paddingLeft = 14 + depth * 18;
 
   return (
@@ -238,6 +239,9 @@ export function RequirementRow({
               <span className="italic text-muted-foreground">(no description)</span>
             )}
           </button>
+        )}
+        {hint && (
+          <p className="mt-1 text-[11px] leading-relaxed text-amber-700">{hint}</p>
         )}
         {failureOutput && (
           <>

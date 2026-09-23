@@ -68,38 +68,49 @@ Three constraints that are easy to get wrong:
   is failing its children are not run at all (they report `blocked`), so fix
   the parent first.
 
-### Configuring where tests run
+### Saying which container a requirement runs in
 
-A BP with one automation needs nothing. A BP with several must say which
-container runs the tests, in `process.toml`:
+**Declare `automation` on every requirement.** A business process is scaffolded
+with two automations — a frontend and a backend — so there is almost never an
+unambiguous default, and a requirement that does not say where it belongs
+inherits the business process's `[testing] automation`. Inheriting the wrong one
+fails in a way that reads as your fault rather than the configuration's: the
+test runs in a container where that requirement's source is not mounted, no
+test carrying the id is found, and the requirement reports `no_test` even though
+the test exists and is correct.
 
 ```toml
-[testing]
-automation = "backend"     # required when the BP has more than one automation
-framework  = "go"          # or "pytest", or "vitest"
+[[requirement]]
+id = "REQ-7QX4"
+description = "Totals include VAT"
+automation = "backend"
+
+[[requirement]]
+id = "REQ-SH1M"
+description = "The basket shows the VAT line"
+automation = "frontend"
 ```
 
-**If the BP mixes languages, give each automation its own section.** The
-BP-wide `framework` applies to every automation otherwise, and a pytest suite
-whose output is parsed as `go test -json` reports `no_test` for tests that ran
-and passed — a confusing failure that looks like a missing test:
+The business process's own defaults live in `process.toml`, and each automation
+names its framework there — the BP-wide `framework` applies to every automation
+otherwise, and a pytest suite whose output is parsed as `go test -json` reports
+`no_test` for tests that ran and passed:
 
 ```toml
 [testing]
-automation = "backend"     # the default for requirements that name no automation
+automation = "backend"     # the fallback for a requirement that names none
 framework  = "go"
-
-[testing.new-worker]       # the Python worker in the same BP
-framework  = "pytest"
 
 [testing.frontend]         # the React app in the same BP
 framework  = "vitest"
+
+[testing.new-worker]       # a Python worker in the same BP
+framework  = "pytest"
 ```
 
-A requirement can override `automation`, `framework` or `runner` on its own row
-in `testable-requirements.toml`. Naming the framework is enough — the built-in
-runner for it is then correct, so do not write out a `runner` unless you need
-something the default cannot do:
+A requirement can override `framework` or `runner` on its own row too. Naming
+the framework is enough — the built-in runner for it is then correct, so do not
+write out a `runner` unless you need something the default cannot do:
 
 ```toml
 [[requirement]]

@@ -5,6 +5,7 @@ import {
   SUMMARY_TONES,
   VERDICT_TONES,
   containerFor,
+  noTestHint,
   rowVerdict,
   summarizeTests,
 } from './testStatus.ts';
@@ -172,4 +173,38 @@ test('a BP with no [testing] default and no pin names nothing', () => {
 test('a blocked requirement still names where its test would run', () => {
   const req = { automation: '', effectiveAutomation: 'backend' };
   assert.equal(containerFor(req, { verdict: 'blocked' }), 'backend');
+});
+
+// --- "no test", but a test exists ---------------------------------------------
+//
+// `hasTest` scans the whole business process; the `no_test` verdict is scoped
+// to the one container the requirement resolved to. Their disagreement is the
+// signature of a missing or wrong `automation` — the mistake that declaring it
+// on every requirement is meant to prevent.
+
+test('a no_test row whose test exists elsewhere explains itself', () => {
+  const hint = noTestHint(
+    { hasTest: true, effectiveAutomation: 'backend' },
+    { verdict: 'no_test' },
+  );
+  assert.match(hint, /exists in this business process/);
+  assert.match(hint, /in backend/);
+  assert.match(hint, /automation/);
+});
+
+test('it names the framework too, which produces the same signature', () => {
+  // A report the runner cannot parse contains no tests at all, so a wrong
+  // framework reads as "no test" exactly like a wrong container.
+  const hint = noTestHint({ hasTest: true }, { verdict: 'no_test' });
+  assert.match(hint, /framework/);
+});
+
+test('a requirement with genuinely no test gets no hint', () => {
+  assert.equal(noTestHint({ hasTest: false }, { verdict: 'no_test' }), '');
+});
+
+test('a passing or failing requirement gets no hint', () => {
+  assert.equal(noTestHint({ hasTest: true }, { verdict: 'pass' }), '');
+  assert.equal(noTestHint({ hasTest: true }, { verdict: 'fail' }), '');
+  assert.equal(noTestHint({ hasTest: true }, null), '');
 });
