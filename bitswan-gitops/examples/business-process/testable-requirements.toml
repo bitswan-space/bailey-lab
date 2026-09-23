@@ -1,45 +1,39 @@
-# The contract this business process is held to.
+# ILLUSTRATIVE ONLY — this file documents the contract format. It is not
+# scaffolded into a business process (only the automation directories beside it
+# are), and the tests it refers to are not shipped: a template cannot carry
+# requirement-named tests, because ids are minted per business process and a
+# template cannot know them.
 #
-# There is no status here on purpose: a verdict is produced by running the
+# There is no status here on purpose. A verdict is produced by running the
 # test, is held by gitops for the commit it ran against, and is shown in the
 # Requirements & tests tab. Nothing can write one into this file.
 #
 # A requirement's test is the test whose NAME carries its id with hyphens
-# turned into underscores — REQ-H3AL is tested by TestREQ_H3AL_… in
-# backend/requirements_test.go.
+# turned into underscores — REQ-H3AL is tested by TestREQ_H3AL_… in the
+# automation named below.
 
 [[requirement]]
 id = "REQ-H3AL"
 parent = ""
 description = "The backend reports its health on /health"
+# Declare `automation` on every requirement: a business process is scaffolded
+# with a frontend AND a backend, so inheriting the [testing] default silently
+# sends a test to the wrong container.
+automation = "backend"
 
 [[requirement]]
 id = "REQ-GR33"
 parent = "REQ-H3AL"
 description = "The public root endpoint greets the caller"
+automation = "backend"
 
-[[requirement]]
-id = "REQ-D3M0"
-parent = ""
-description = "A requirement whose test is deliberately failing, to show what a failure looks like"
-
-[[requirement]]
-id = "REQ-T0D0"
-parent = ""
-description = "A requirement nobody has written a test for yet — it shows as 'no test', which does not block a deploy"
-
-# Frontend requirements. `automation` points them at the React app's container
-# instead of the BP-wide default (backend); the framework for it comes from
-# [testing.frontend] in process.toml.
-
+# A requirement can also name its own framework, which is what a business
+# process that mixes languages needs. Here the React frontend is tested with
+# vitest while the backend above uses go — see [testing.frontend] in
+# process.toml, which sets the same thing per automation instead of per row.
 [[requirement]]
 id = "REQ-SH1M"
 parent = ""
 description = "Backend calls are routed through the frontend shim, not direct to the private worker"
 automation = "frontend"
-
-[[requirement]]
-id = "REQ-TMP7"
-parent = ""
-description = "A named automation's URL is built from the workspace URL template"
-automation = "frontend"
+framework = "vitest"
