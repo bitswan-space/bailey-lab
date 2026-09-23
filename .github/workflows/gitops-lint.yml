@@ -16,7 +16,7 @@ defaults:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
 
     steps:
     - uses: actions/checkout@v4
@@ -42,7 +42,7 @@ jobs:
   # tests before, so a change to how identities are checked could pass CI
   # untouched.
   examples:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
     strategy:
       fail-fast: false
       matrix:
