@@ -27,7 +27,7 @@ from app.routes.copies import (
     sync_copy,
 )
 from app.services import bp_delete, bp_git, git_server
-from app.task_queue import current_requester
+from app.task_queue import current_requester, task_queue
 
 OWNER = "alice@x"
 OTHER = "mallory@x"
@@ -76,8 +76,15 @@ def _as(email, make_coro):
     """Run a route as a gate-verified requester (the contextvar the ASGI
     middleware sets from X-Forwarded-Email)."""
     token = current_requester.set(email)
+
+    async def _run_route():
+        try:
+            return await make_coro()
+        finally:
+            await task_queue.drain()
+
     try:
-        return asyncio.run(make_coro())
+        return asyncio.run(_run_route())
     finally:
         current_requester.reset(token)
 

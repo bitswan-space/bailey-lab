@@ -25,7 +25,7 @@ on:
 
 jobs:
   bp-lifecycle-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
     timeout-minutes: 75
 
     services:
@@ -55,8 +55,35 @@ jobs:
           echo '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]}' | sudo tee /etc/docker/daemon.json
           sudo service docker start || true
 
+      - name: Authenticate to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        run: |
+          # A self-hosted runner pulls the whole stack from Docker Hub on every
+          # job from a cold image store, and anonymous pulls are capped at 100
+          # per hour per IP - bringup then dies on "429 Too Many Requests".
+          # Authenticated pulls are counted against the account instead.
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_ACCESS_TOKEN" ]; then
+            echo "$DOCKERHUB_ACCESS_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "No Docker Hub credentials set; pulling anonymously (rate limited)."
+          fi
+
       - name: Install and configure dnsmasq for .localhost and .test resolution
         run: |
+          # Forward to whatever resolvers this machine actually uses. Hardcoding
+          # 8.8.8.8 only works where outbound DNS to public resolvers is allowed;
+          # on a self-hosted runner it is usually blocked, and then every lookup
+          # dies the moment resolv.conf is repointed at dnsmasq below.
+          # NB: every probe ends in "|| true" — the step runs under `set -e -o
+          # pipefail`, so a grep/awk that simply finds nothing would otherwise
+          # abort the whole step.
+          UPSTREAM="$( { resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: //p' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -3; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$( { awk '/^nameserver/ && $2 !~ /^127\./ {print $2}' /etc/resolv.conf 2>/dev/null | head -3; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$( { ip route 2>/dev/null | awk '/^default/{print $3; exit}'; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="8.8.8.8"
+          echo "dnsmasq upstreams: $(echo $UPSTREAM | tr '\n' ' ')"
           sudo apt-get update
           sudo apt-get install -y dnsmasq
           sudo systemctl stop systemd-resolved || true
@@ -67,12 +94,11 @@ jobs:
           echo "listen-address=127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "port=53" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "no-resolv" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.8.8" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.4.4" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          sudo systemctl start dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          for s in $UPSTREAM; do echo "server=$s" | sudo tee -a /etc/dnsmasq.d/localhost.conf; done
+          sudo systemctl restart dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          sudo rm -f /etc/resolv.conf
           echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
-          sudo chattr +i /etc/resolv.conf || true
+          for s in $UPSTREAM; do echo "nameserver $s" | sudo tee -a /etc/resolv.conf; done
           sleep 3
           dig @127.0.0.1 test.bs-e2e.localhost +short || echo "DNS resolution check skipped"
 
@@ -139,7 +165,7 @@ jobs:
 
       - name: Upload the Operator's Handbook
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: forgejo/upload-artifact@v4
         with:
           name: operators-handbook
           path: |
@@ -171,7 +197,7 @@ jobs:
 
       - name: Upload Playwright report + traces
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: forgejo/upload-artifact@v4
         with:
           name: playwright-report
           path: |
@@ -206,7 +232,7 @@ jobs:
           done
 
   device-trust-e2e:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
     timeout-minutes: 45
 
     services:
@@ -236,8 +262,35 @@ jobs:
           echo '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]}' | sudo tee /etc/docker/daemon.json
           sudo service docker start || true
 
+      - name: Authenticate to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        run: |
+          # A self-hosted runner pulls the whole stack from Docker Hub on every
+          # job from a cold image store, and anonymous pulls are capped at 100
+          # per hour per IP - bringup then dies on "429 Too Many Requests".
+          # Authenticated pulls are counted against the account instead.
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_ACCESS_TOKEN" ]; then
+            echo "$DOCKERHUB_ACCESS_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "No Docker Hub credentials set; pulling anonymously (rate limited)."
+          fi
+
       - name: Install and configure dnsmasq for .localhost and .test resolution
         run: |
+          # Forward to whatever resolvers this machine actually uses. Hardcoding
+          # 8.8.8.8 only works where outbound DNS to public resolvers is allowed;
+          # on a self-hosted runner it is usually blocked, and then every lookup
+          # dies the moment resolv.conf is repointed at dnsmasq below.
+          # NB: every probe ends in "|| true" — the step runs under `set -e -o
+          # pipefail`, so a grep/awk that simply finds nothing would otherwise
+          # abort the whole step.
+          UPSTREAM="$( { resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: //p' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -3; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$( { awk '/^nameserver/ && $2 !~ /^127\./ {print $2}' /etc/resolv.conf 2>/dev/null | head -3; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$( { ip route 2>/dev/null | awk '/^default/{print $3; exit}'; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="8.8.8.8"
+          echo "dnsmasq upstreams: $(echo $UPSTREAM | tr '\n' ' ')"
           sudo apt-get update
           sudo apt-get install -y dnsmasq
           sudo systemctl stop systemd-resolved || true
@@ -248,12 +301,11 @@ jobs:
           echo "listen-address=127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "port=53" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "no-resolv" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.8.8" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.4.4" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          sudo systemctl start dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          for s in $UPSTREAM; do echo "server=$s" | sudo tee -a /etc/dnsmasq.d/localhost.conf; done
+          sudo systemctl restart dnsmasq || sudo dnsmasq --no-daemon --log-queries &
+          sudo rm -f /etc/resolv.conf
           echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
-          sudo chattr +i /etc/resolv.conf || true
+          for s in $UPSTREAM; do echo "nameserver $s" | sudo tee -a /etc/resolv.conf; done
           sleep 3
           dig @127.0.0.1 test.bs-e2e.localhost +short || echo "DNS resolution check skipped"
 
@@ -287,7 +339,7 @@ jobs:
 
       - name: Upload the device-trust report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: forgejo/upload-artifact@v4
         with:
           name: device-trust-report
           path: |

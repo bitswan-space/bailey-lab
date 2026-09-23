@@ -1651,6 +1651,15 @@ export const api = {
      */
     handOffPrompt: (copy: string, bp: string, text: string) =>
       postJson<{ delivered: boolean }>('/api/coding-agent/sidebar/prompt', { copy, bp, text }),
+    /**
+     * Whether there is a panel to show at all.
+     *
+     * `/view` answers a JSON 503 when the extension is not on disk, and the
+     * panel is an iframe — which renders that refusal as the page. So ask
+     * first and mount second; see `lib/sidebarAvailability.ts`.
+     */
+    sidebarStatus: () =>
+      getJson<{ available: boolean }>('/api/coding-agent/sidebar/status'),
   },
 
   /**

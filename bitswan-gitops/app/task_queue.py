@@ -205,6 +205,23 @@ class TaskQueue:
         elif self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run())
 
+    async def drain(self, timeout: float = 120.0) -> None:
+        """Wait until queued work for this loop has finished.
+
+        Production keeps one loop for the process lifetime, so the worker is
+        simply long-lived. Tests drive routes through asyncio.run() and close a
+        loop per call; closing it while the worker is mid-task leaves the
+        cancellation to asyncio.run's teardown, which can then wait forever.
+        """
+        loop = asyncio.get_running_loop()
+        if self._queue is None or self._loop is not loop:
+            return
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            if self._running_id is None and self._queue.empty():
+                return
+            await asyncio.sleep(0.01)
+
     async def _run(self) -> None:
         while True:
             task_id = await self._queue.get()
