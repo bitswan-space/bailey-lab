@@ -629,3 +629,72 @@ async def test_a_blocked_row_names_the_container_its_test_would_run_in(
     # It was not run, but its target resolved — the container is real
     # information, not a claim that something executed.
     assert run.results["REQ-CCCC"].automation == "backend"
+
+
+# ---- timeout resolution -----------------------------------------------------
+
+
+def test_timeout_falls_back_from_automation_to_bp_to_default():
+    from app.services.testable_requirements import parse_testing_config
+
+    cfg = parse_testing_config(
+        '[testing]\nautomation = "backend"\nframework = "go"\ntimeout = 60\n\n'
+        '[testing.frontend]\nframework = "vitest"\ntimeout = 300\n'
+    )
+    members = [_member("backend"), _member("frontend")]
+
+    # The automation's own value wins — a slow suite is usually slow in one
+    # automation, which is why the override exists.
+    slow = test_runner.resolve_target(
+        Requirement(id="REQ-AAAA", automation="frontend"), cfg, members
+    )
+    assert slow.timeout == 300
+
+    # Without one, the BP-wide value applies.
+    normal = test_runner.resolve_target(
+        Requirement(id="REQ-BBBB", automation="backend"), cfg, members
+    )
+    assert normal.timeout == 60
+
+
+def test_timeout_defaults_when_nothing_declares_one():
+    target = test_runner.resolve_target(
+        Requirement(id="REQ-AAAA"),
+        BpTestingConfig(framework="go"),
+        [_member("backend")],
+    )
+    assert target.timeout == test_runner.DEFAULT_TIMEOUT_SECONDS
+
+
+# ---- a business process that predates `framework` ----------------------------
+
+
+async def test_a_legacy_runner_is_told_what_is_wrong_with_it(bp_dir, monkeypatch):
+    """A [testing] runner written before verdicts came from reports produces no
+    parseable output. It must fail LOUDLY with the fix, not silently."""
+    _write(
+        bp_dir,
+        '[[requirement]]\nid = "REQ-AAAA"\n',
+        'process-id = "x"\n\n[testing]\nautomation = "backend"\n'
+        'runner = "go test -run {id} ./... -v"\n',
+    )
+    # What that runner really prints: human-readable go test output, no -json.
+    driver = FakeDriver(
+        {
+            "REQ_AAAA": (
+                "=== RUN   TestREQ_AAAA_Health\n"
+                "--- PASS: TestREQ_AAAA_Health (0.00s)\nPASS\nok  \tbackend\t0.007s\n"
+            )
+        }
+    )
+    _install(monkeypatch, [_member("backend")], driver)
+
+    run = await test_runner.execute_run("dev1", "shop")
+
+    result = run.results["REQ-AAAA"]
+    assert result.verdict == VERDICT_FAIL
+    # The hint keys off the RESOLVED command, not the requirement's own runner
+    # key — a legacy BP sets the runner once under [testing], so keying it off
+    # the requirement meant the config that most needs explaining never got it.
+    assert "-json" in result.output
+    assert "drop `runner`" in result.output

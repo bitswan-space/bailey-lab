@@ -215,7 +215,14 @@ def runner_hint(runner: str, framework: str) -> str:
 class _Target:
     """Where and how one requirement's test runs."""
 
-    __slots__ = ("deployment_id", "automation", "command", "framework", "error")
+    __slots__ = (
+        "deployment_id",
+        "automation",
+        "command",
+        "framework",
+        "timeout",
+        "error",
+    )
 
     def __init__(
         self,
@@ -223,12 +230,17 @@ class _Target:
         automation: str = "",
         command: str = "",
         framework: str = "",
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
         error: str = "",
     ):
         self.deployment_id = deployment_id
         self.automation = automation
         self.command = command
         self.framework = framework
+        # Per-test, resolved like the runner: automation override, else the
+        # BP-wide value, else the default. A slow suite is usually slow in one
+        # automation, which is the whole reason the override exists.
+        self.timeout = timeout
         self.error = error
 
 
@@ -302,6 +314,9 @@ def resolve_target(req: Requirement, cfg, members: list[dict]) -> _Target:
         automation=match.get("automation_name", ""),
         command=build_command(runner, framework, req.id),
         framework=framework,
+        timeout=(auto_cfg.timeout if auto_cfg else None)
+        or cfg.timeout
+        or DEFAULT_TIMEOUT_SECONDS,
     )
 
 
@@ -380,14 +395,14 @@ def _levels(requirements: list[Requirement]) -> list[list[str]]:
 
 
 async def _run_one(
-    svc, run: TestRun, req: Requirement, target: _Target, timeout: int, on_change
+    svc, run: TestRun, req: Requirement, target: _Target, on_change
 ) -> None:
     result = run.results[req.id]
     result.verdict = VERDICT_RUNNING
     await on_change()
 
     output, error = await _exec_in_deployment(
-        svc, target.deployment_id, target.command, timeout
+        svc, target.deployment_id, target.command, target.timeout
     )
     if error:
         result.verdict = VERDICT_FAIL
@@ -397,16 +412,20 @@ async def _run_one(
         verdict, detail = verdict_for_requirement(req.id, parsed)
         result.verdict = verdict
         if verdict == VERDICT_FAIL and parsed.suite_error:
-            detail = detail + runner_hint(req.runner or "", target.framework)
+            # The RESOLVED command, not the requirement's own `runner` key: a
+            # business process that predates `framework` sets its runner once
+            # under [testing], so keying the hint off the requirement meant the
+            # one config that most needs the explanation never got it.
+            detail = detail + runner_hint(target.command, target.framework)
         result.output = detail
     await on_change()
 
 
-async def _run_group(svc, run, group, timeout, on_change) -> None:
+async def _run_group(svc, run, group, on_change) -> None:
     """One deployment's requirements, sequentially — a single container should
     not be running several test processes at once."""
     for req, target in group:
-        await _run_one(svc, run, req, target, timeout, on_change)
+        await _run_one(svc, run, req, target, on_change)
 
 
 def _selection(
@@ -500,7 +519,6 @@ async def execute_run(
         except Exception as e:  # noqa: BLE001 — a wake failure is not fatal yet
             logger.warning("wake before tests failed for %s/%s: %s", copy, bp, e)
 
-    timeout = cfg.timeout or DEFAULT_TIMEOUT_SECONDS
     by_id = {r.id: r for r in requirements}
     targets: dict[str, _Target] = {}
     for req in requirements:
@@ -554,7 +572,7 @@ async def execute_run(
             if groups:
                 await asyncio.gather(
                     *[
-                        _run_group(svc, run, group, timeout, on_change)
+                        _run_group(svc, run, group, on_change)
                         for group in groups.values()
                     ]
                 )
