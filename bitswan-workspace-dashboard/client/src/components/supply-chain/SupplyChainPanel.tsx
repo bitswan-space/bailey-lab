@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Check, ExternalLink, EyeOff, Loader2, ShieldOff, Undo2 } from 'lucide-react';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { toast } from '@/lib/notify';
 import { api, type CveSeverity, type SupplyChainReport } from '@/lib/api';
 import { SessionExpiredError } from '@/lib/session';
@@ -516,14 +517,19 @@ export function SupplyChainPanel({
 
       {/* Mark-out-of-scope dialog */}
       {dialog && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/45 p-10" onClick={() => setDialog(null)}>
-          <div className="w-[520px] max-w-[96%] overflow-hidden rounded-xl border border-border bg-background shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+        <Dialog open onOpenChange={(o) => !o && setDialog(null)}>
+          <DialogContent
+            aria-describedby={undefined}
+            className="w-[520px] max-w-[96%] gap-0 overflow-hidden rounded-xl p-0"
+          >
+            <div className="flex items-center gap-3 border-b border-border px-5 py-4 pr-12">
               <span className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg', SEV[dialog.severity].pill)}>
                 <AlertTriangle className="size-4" aria-hidden />
               </span>
               <div className="min-w-0 flex-1">
-                <div className="font-mono text-[15px] font-bold text-foreground">{dialog.cve}</div>
+                <DialogTitle className="font-mono text-[15px] font-bold text-foreground">
+                  {dialog.cve}
+                </DialogTitle>
                 <div className="mt-0.5 font-mono text-[12px] text-muted-foreground">
                   {dialog.package} @ {dialog.version}
                 </div>
@@ -615,8 +621,8 @@ export function SupplyChainPanel({
                     </button>
                   )}
             </div>
-          </div>
-        </div>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   );

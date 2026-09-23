@@ -9,6 +9,7 @@ Names are always shown.
 import types
 
 from app.services import automation_service as asvc
+from app.task_queue import current_requester
 from app.services import bp_secrets
 from app.services.automation_service import _mask_env, SECRET_MASK
 
@@ -50,6 +51,7 @@ def _stub_self():
         secrets_dir="/s",
         _FW_ROLES=asvc.AutomationService._FW_ROLES,
         _ENV_REVEAL_ROLES=asvc.AutomationService._ENV_REVEAL_ROLES,
+        _actor=lambda: (current_requester.get() or "").strip() or None,
     )
 
 
@@ -83,9 +85,8 @@ def _patch(
 
 
 def _visibility(deployment_id="dep1", by="alice@acme.com"):
-    return asvc.AutomationService._env_secret_visibility(
-        _stub_self(), deployment_id, by
-    )
+    current_requester.set(by)
+    return asvc.AutomationService._env_secret_visibility(_stub_self(), deployment_id)
 
 
 def test_production_secret_visible_to_admin_and_auditor(monkeypatch):
@@ -118,7 +119,7 @@ def test_nonproduction_secret_masked_for_unknown_role(monkeypatch):
 
 def test_no_identity_fails_closed(monkeypatch):
     _patch(monkeypatch, stage="dev", role="admin")
-    _, reveal = _visibility(by=None)  # no `by` → never consult the role store
+    _, reveal = _visibility(by=None)  # no identity → never consult the role store
     assert reveal is False
 
 

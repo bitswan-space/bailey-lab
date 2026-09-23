@@ -1023,7 +1023,7 @@ async def update_git(
         # author via --author.
         from app.task_queue import current_requester
 
-        actor = deployed_by or current_requester.get()
+        actor = current_requester.get() or deployed_by
         if actor:
             author = f"{actor} <{actor}>"
             ident_name = actor

@@ -157,13 +157,12 @@ class BpSecretsRequest(BaseModel):
 @router.get("/business-processes/{bp}/secrets")
 async def get_bp_secrets_route(
     bp: ValidBp,
-    by: str | None = None,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """A BP's decrypted per-stage secrets: {dev, staging, production} each a
     {KEY: value} map (Deployments → Secrets). Production values are redacted
-    unless `by` (a shim-verified email) resolves to admin/auditor."""
-    return automation_service.read_bp_secrets(bp, by=by)
+    unless the gate-forwarded identity resolves to admin/auditor."""
+    return automation_service.read_bp_secrets(bp)
 
 
 @router.put("/business-processes/{bp}/secrets")
@@ -609,14 +608,14 @@ async def get_bp_secrets_snapshot(
     bp: ValidBp,
     commit: str = Query(...),
     stage: str = Query(...),
-    by: str | None = None,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """A BP stage's decrypted secrets as they were at a bitswan.yaml revision
     (Inspect → Secrets snapshot). The values come from the encrypted blob in
     bitswan.yaml at `commit` — the same source a rollback restores. Production
-    values are redacted unless `by` resolves to admin/auditor."""
-    return await automation_service.read_bp_secrets_at(bp, commit, stage, by=by)
+    values are redacted unless the gate-forwarded identity resolves to
+    admin/auditor."""
+    return await automation_service.read_bp_secrets_at(bp, commit, stage)
 
 
 @router.post("/business-processes/{bp}/rollback")
@@ -1374,14 +1373,13 @@ async def stream_automation_logs(
 @router.get("/{deployment_id}/inspect")
 async def inspect_automation(
     deployment_id: str,
-    by: str | None = None,
     automation_service: AutomationService = Depends(get_automation_service),
 ):
     """The deployment's containers with their env. Secret env values are masked
-    server-side unless `by` (a shim-verified email, same contract as the
+    server-side unless the gate-forwarded identity (same contract as the
     secrets routes) resolves to a role allowed to see them: production secrets
     need admin/auditor, other stages any known role. Fails closed."""
-    return await automation_service.inspect_automation(deployment_id, by=by)
+    return await automation_service.inspect_automation(deployment_id)
 
 
 @router.delete("/{deployment_id}")

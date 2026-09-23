@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 import app.services.automation_service as mod
 from app.services.automation_service import MAX_AUDIT_REPORT_CHARS, AutomationService
+from app.task_queue import current_requester
 
 REPORT = "# Audit — invoices\n\n## Risk\n\nThe approval threshold is a constant.\n"
 
@@ -26,6 +27,7 @@ def _svc(tmp_path):
 @pytest.fixture()
 def frozen(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "daemon_user_role", lambda by: "auditor")
+    current_requester.set("auditor@x")
     (tmp_path / "bitswan.yaml").write_text(
         yaml.safe_dump(
             {"staging_gate": {"invoices": {"frozen": True, "frozen_sha": "abc123"}}}
@@ -79,6 +81,7 @@ async def test_an_enormous_report_is_bounded(frozen):
 
 async def test_signing_off_still_needs_a_frozen_image(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "daemon_user_role", lambda by: "auditor")
+    current_requester.set("a@x")
     (tmp_path / "bitswan.yaml").write_text(
         yaml.safe_dump({"staging_gate": {"invoices": {"frozen": False}}})
     )

@@ -82,7 +82,7 @@ class _Service:
     def __init__(self, role="auditor", frozen=True, sha="abc12345", commit="9b72ebb3"):
         self._role, self._frozen, self._sha, self._commit = role, frozen, sha, commit
 
-    def _role_of(self, _by):
+    def _role_of(self):
         return self._role
 
     def read_staging_gate(self, _bp):

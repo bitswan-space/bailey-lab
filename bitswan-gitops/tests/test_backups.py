@@ -6,6 +6,7 @@ import asyncio
 import subprocess
 
 from app.utils import read_bitswan_yaml, dump_bitswan_yaml
+from app.task_queue import current_requester
 from app.services import firewall_service as fws
 from app.services.automation_service import AutomationService
 
@@ -18,6 +19,7 @@ def _git_svc(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.services.automation_service.daemon_user_role", lambda by: "admin"
     )
+    current_requester.set("tim@x")
     monkeypatch.setattr(fws, "firewall_dir", lambda: str(tmp_path / "fw"))
     monkeypatch.delenv("HOST_PATH", raising=False)
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)

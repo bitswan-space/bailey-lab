@@ -1143,7 +1143,7 @@ async def _staged_change_summary(clone_path: str) -> str:
         if len(parts) < 2:
             continue
         verb = verbs.get(parts[0][0], "edit")
-        groups.setdefault(verb, []).append(os.path.basename(parts[-1]))
+        groups.setdefault(verb, []).append(parts[-1])
         total += 1
     if total == 0:
         return ""
@@ -2755,7 +2755,7 @@ async def open_audit(body: OpenAuditRequest):
     bp = body.bp
     service = get_automation_service()
     owner = (current_requester.get() or "").strip()
-    role = service._role_of(owner)
+    role = service._role_of()
     if role not in ("admin", "auditor"):
         raise HTTPException(
             status_code=403,

@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 import app.services.automation_service as mod
 from app.services.automation_service import AutomationService
+from app.task_queue import current_requester
 
 
 def _svc(tmp_path):
@@ -25,6 +26,7 @@ def _svc(tmp_path):
 
 def _as_role(monkeypatch, role):
     monkeypatch.setattr(mod, "daemon_user_role", lambda by: role)
+    current_requester.set(f"{role}@x")
 
 
 def test_production_rollback_blocked_for_member(tmp_path, monkeypatch):

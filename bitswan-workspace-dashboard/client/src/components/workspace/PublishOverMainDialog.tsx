@@ -103,6 +103,13 @@ export function PublishOverMainDialog({
           </DialogDescription>
         </DialogHeader>
 
+        <form
+          className="contents"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (confirmEnabled && preview) onConfirm(preview.main);
+          }}
+        >
         <div className="flex flex-col gap-3 text-[13px] leading-snug">
           {loading && <div className="text-muted-foreground">Reading main…</div>}
           {error && (
@@ -184,14 +191,11 @@ export function PublishOverMainDialog({
           <Button variant="outline" disabled={busy} onClick={onCancel}>
             Cancel
           </Button>
-          <Button
-            variant="destructive"
-            disabled={!confirmEnabled}
-            onClick={() => preview && onConfirm(preview.main)}
-          >
+          <Button variant="destructive" type="submit" disabled={!confirmEnabled}>
             {busy ? 'Publishing…' : 'Publish over main'}
           </Button>
         </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

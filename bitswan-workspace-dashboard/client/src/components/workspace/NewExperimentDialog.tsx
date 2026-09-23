@@ -106,23 +106,23 @@ export function NewExperimentDialog({
               {`The experiment is on ${bp.displayName} and only ${bp.displayName} — each business process is its own repository. Switching to another one takes you back to your copy.`}
             </p>
           )}
-        </form>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <span
-            title={
-              bp === null
-                ? 'Select a business process first — an experiment belongs to exactly one.'
-                : 'Start this experiment'
-            }
-          >
-            <Button onClick={() => handleSubmit()} disabled={!canSubmit}>
-              Start experiment
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              Cancel
             </Button>
-          </span>
-        </DialogFooter>
+            <span
+              title={
+                bp === null
+                  ? 'Select a business process first — an experiment belongs to exactly one.'
+                  : 'Start this experiment'
+              }
+            >
+              <Button type="submit" disabled={!canSubmit}>
+                Start experiment
+              </Button>
+            </span>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

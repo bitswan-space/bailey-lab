@@ -598,9 +598,7 @@ class AutomationService:
         )
         return [c.to_docker_dict() for c in containers]
 
-    async def inspect_automation(
-        self, deployment_id: str, by: str | None = None
-    ) -> list[dict]:
+    async def inspect_automation(self, deployment_id: str) -> list[dict]:
         """The deployment's containers as `docker inspect`-shaped records (see
         `_project_inspect`), each enriched with its environment (`Env`:
         [{name, value, secret, masked}]).
@@ -623,7 +621,7 @@ class AutomationService:
         containers = await self.get_container(deployment_id)
         if not containers:
             return containers
-        secret_keys, reveal = self._env_secret_visibility(deployment_id, by)
+        secret_keys, reveal = self._env_secret_visibility(deployment_id)
         out: list[dict] = []
         for c in containers:
             cid = c.get("Id")
@@ -662,9 +660,7 @@ class AutomationService:
     # to "" and is never in either set — fail closed.
     _ENV_REVEAL_ROLES = ("admin", "auditor", "member", "user")
 
-    def _env_secret_visibility(
-        self, deployment_id: str, by: str | None
-    ) -> tuple[set[str], bool]:
+    def _env_secret_visibility(self, deployment_id: str) -> tuple[set[str], bool]:
         """(secret_keys, reveal) for a deployment's env view. `secret_keys` are
         the env var NAMES provisioned from the BP's secret set for the
         deployment's realm (dev covers live-dev); `reveal` says whether `by`
@@ -682,12 +678,13 @@ class AutomationService:
         if not secret_keys:
             return secret_keys, False
         role = ""
-        if by:
+        actor = self._actor()
+        if actor:
             try:
-                role = daemon_user_role(by)
+                role = daemon_user_role(actor)
             except Exception:
                 logger.warning(
-                    "role lookup failed for %s; masking secret env values", by
+                    "role lookup failed for %s; masking secret env values", actor
                 )
                 role = ""
         if realm == "production":
@@ -2005,6 +2002,151 @@ class AutomationService:
             released.insert(0, csha)
         rec["released_shas"] = released[: self.RELEASED_SHAS_KEPT]
 
+    HISTORY_STAGE_LABEL = {"dev": "Development", "staging": "Staging"}
+    FIREWALL_SUMMARY_HOSTS = 3
+
+    @classmethod
+    def _firewall_change_summary(cls, before: tuple | None, after: tuple) -> str:
+        prev = dict(before or ())
+        cur = dict(after)
+        allowed = sorted(
+            h for h, st in cur.items() if st == "allowed" and prev.get(h) != "allowed"
+        )
+        denied = sorted(
+            h for h, st in cur.items() if st == "denied" and prev.get(h) != "denied"
+        )
+        removed = sorted(h for h in prev if h not in cur)
+
+        def hosts(names: list[str]) -> str:
+            shown = names[: cls.FIREWALL_SUMMARY_HOSTS]
+            extra = len(names) - len(shown)
+            return ", ".join(shown) + (f" (+{extra} more)" if extra > 0 else "")
+
+        parts = []
+        if allowed:
+            parts.append(f"allowed {hosts(allowed)}")
+        if denied:
+            parts.append(f"denied {hosts(denied)}")
+        if removed:
+            parts.append(f"removed {hosts(removed)}")
+        return "; ".join(parts) or "rules changed"
+
+    async def _source_subjects(self, bp: str, shas: list[str]) -> dict[str, str]:
+        if not shas:
+            return {}
+        try:
+            bare = bp_bare_repo_path(bp)
+        except ValueError:
+            return {}
+        if not os.path.isdir(bare):
+            return {}
+        out, _, rc = await call_git_command_with_output(
+            "git",
+            "-C",
+            bare,
+            "log",
+            "--no-walk=unsorted",
+            "--format=%H%x1f%s",
+            *shas,
+        )
+        subjects: dict[str, str] = {}
+        if rc != 0:
+            return subjects
+        for line in out.splitlines():
+            sha, _, subject = line.partition("\x1f")
+            if sha and subject:
+                subjects[sha] = subject
+        return subjects
+
+    HISTORY_CHANGES_KEPT = 50
+
+    async def _source_commits(
+        self, bp: str, base: str | None, tip: str
+    ) -> list[dict] | None:
+        try:
+            bare = bp_bare_repo_path(bp)
+        except ValueError:
+            return None
+        if not os.path.isdir(bare):
+            return None
+        fmt = "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%s"
+        spec = f"{base}..{tip}" if base and base != tip else tip
+        out, _, rc = await call_git_command_with_output(
+            "git", "-C", bare, "log", f"-{self.HISTORY_CHANGES_KEPT + 1}", fmt, spec
+        )
+        if rc != 0 or not out.strip():
+            if spec == tip:
+                return None
+            out, _, rc = await call_git_command_with_output(
+                "git", "-C", bare, "log", "-1", fmt, tip
+            )
+            if rc != 0 or not out.strip():
+                return None
+        rows: list[dict] = []
+        for line in out.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) != 5:
+                continue
+            sha, name, email, at, subject = parts
+            if subject.endswith(f" ({bp})"):
+                subject = subject[: -len(f" ({bp})")]
+            rows.append(
+                {"sha": sha, "author": email or name, "at": at, "subject": subject}
+            )
+        return rows
+
+    async def _describe_history(self, bp: str, entries: list[dict]) -> None:
+        previous_version: str | None = None
+        for e in reversed(entries):
+            kind = e.get("source")
+            if kind in ("firewall", "backup", "secret"):
+                e["changes"] = []
+                continue
+            src = e.get("source_commit")
+            if not src:
+                e["changes"] = []
+                continue
+            rows = await self._source_commits(bp, previous_version, src)
+            truncated = rows is not None and len(rows) > self.HISTORY_CHANGES_KEPT
+            if truncated:
+                rows = rows[: self.HISTORY_CHANGES_KEPT]
+            e["changes"] = rows or []
+            e["changes_truncated"] = truncated
+            e["since"] = previous_version
+            previous_version = src
+
+        for e in entries:
+            kind = e.get("source")
+            changes = e.get("changes") or []
+            e["source_subject"] = changes[0]["subject"] if changes else None
+            if kind == "firewall":
+                fw = e.get("firewall") or {}
+                realm = fw.get("realm") or ""
+                e["summary"] = (
+                    f"Firewall ({realm}): {fw.get('summary') or 'rules changed'}"
+                )
+            elif kind == "backup":
+                bk = e.get("backup") or {}
+                e["summary"] = bk.get("detail") or bk.get("summary") or "Backup event"
+            elif kind == "secret":
+                realm = (e.get("secret") or {}).get("realm") or ""
+                e["summary"] = (
+                    f"Secrets changed ({realm})" if realm else "Secrets changed"
+                )
+            else:
+                short = (e.get("source_commit") or "")[:8]
+                if kind == "rollback":
+                    head = f"Rolled back to {short}"
+                elif kind in self.HISTORY_STAGE_LABEL:
+                    head = f"Promoted from {self.HISTORY_STAGE_LABEL[kind]}"
+                else:
+                    head = f"Deployed {short}"
+                count = len(changes) + (1 if e.get("changes_truncated") else 0)
+                if kind != "rollback" and count > 1:
+                    more = "+" if e.get("changes_truncated") else ""
+                    head += f" · {len(changes)}{more} commits"
+                e["summary"] = head
+
     async def bp_history(self, bp: str, stage: str, limit: int = 200) -> dict:
         """Deployment + firewall history for one BP stage, derived from the GIT
         LOG of bitswan.yaml (no history is stored in the file). Two interleaved
@@ -2110,6 +2252,7 @@ class AutomationService:
                         "source_commit": src,  # the deployed source version
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": status,
                         "source": source,
                         "members": members,
@@ -2150,12 +2293,15 @@ class AutomationService:
                         "source_commit": None,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "firewall",
                         "source": "firewall",
                         "members": {},
                         "firewall": {
                             "realm": realm,
-                            "summary": subject,
+                            "summary": self._firewall_change_summary(
+                                prev_fw_key, fw_key
+                            ),
                             "allowed": sum(
                                 1
                                 for r in fw_rules.values()
@@ -2193,6 +2339,7 @@ class AutomationService:
                         "source_commit": None,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "backup",
                         "source": "backup",
                         "members": {},
@@ -2226,6 +2373,7 @@ class AutomationService:
                         "source_commit": src,
                         "deployed_at": date,
                         "deployed_by": author,
+                        "subject": subject,
                         "status": "secret",
                         "source": "secret",
                         "members": members,
@@ -2234,6 +2382,7 @@ class AutomationService:
                 )
             prev_sec_key = sec_key
         entries.reverse()  # newest-first
+        await self._describe_history(bp, entries)
         # The current deployment is the newest APPLIED state. On dev/staging a
         # secret change applies immediately (it redeploys the single-slot
         # members), so it counts. On PRODUCTION a secret change is PENDING — it
@@ -2500,7 +2649,7 @@ class AutomationService:
         the stage has never been deployed."""
         return self._bp_stage_node(bp, stage).get("git_commit")
 
-    def read_bp_secrets(self, bp: str, by: str | None = None) -> dict:
+    def read_bp_secrets(self, bp: str) -> dict:
         """Decrypted per-stage secrets for a BP: {dev, staging, production} each
         a {KEY: value} map. Each stage is independent (dev covers live-dev).
 
@@ -2518,13 +2667,11 @@ class AutomationService:
             out[realm] = (
                 bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
             )
-        if "production" in out and not self._is_production_role(by):
+        if "production" in out and not self._is_production_role():
             out["production"] = {}
         return out
 
-    async def read_bp_secrets_at(
-        self, bp: str, commit: str, stage: str, by: str | None = None
-    ) -> dict:
+    async def read_bp_secrets_at(self, bp: str, commit: str, stage: str) -> dict:
         """A BP stage's decrypted secrets AS THEY WERE at a bitswan.yaml revision
         (Inspect → Secrets snapshot). Reads the per-BP bitswan.yaml at `commit`
         from git — the encrypted blob at that point in history is the source of
@@ -2547,7 +2694,7 @@ class AutomationService:
             raise HTTPException(status_code=500, detail="Could not parse that revision")
         blob = ((y.get("secrets") or {}).get(bp) or {}).get(realm)
         values = bp_secrets.decrypt_secrets(self.secrets_dir, blob) if blob else {}
-        if realm == "production" and not self._is_production_role(by):
+        if realm == "production" and not self._is_production_role():
             values = {}
         return {
             "bp": bp,
@@ -2557,11 +2704,12 @@ class AutomationService:
             "values": values,
         }
 
-    def _is_production_role(self, by: str | None) -> bool:
+    def _is_production_role(self) -> bool:
         """Whether `by` (an email a trusted shim has verified) is allowed to see
         production secrets — i.e. resolves to admin/auditor in the daemon's
         authoritative role store. Fails CLOSED on missing identity or any
         lookup error (never guesses a privileged role)."""
+        by = self._actor()
         if not by:
             return False
         try:
@@ -2606,7 +2754,7 @@ class AutomationService:
         # can't see. So for them, keep every stored production value as-is and
         # allow only new key names (forced to an empty value). Missing identity
         # or any role-lookup error is treated as unprivileged.
-        if not self._is_production_role(deployed_by):
+        if not self._is_production_role():
             prod_blob = enc.get("production")
             stored_prod = (
                 bp_secrets.decrypt_secrets(self.secrets_dir, prod_blob)
@@ -2857,10 +3005,14 @@ class AutomationService:
     _STAGING_GATE_ROLES = ("admin", "auditor")
     DEFAULT_AUDITS_REQUIRED = 1
 
-    def _role_of(self, by: str | None) -> str | None:
+    def _actor(self) -> str | None:
+        return (current_requester.get() or "").strip() or None
+
+    def _role_of(self) -> str | None:
         """The acting user's authoritative Bailey role (email already verified by
         a trusted shim), or None on missing identity / lookup failure — so every
         gate that consumes it fails CLOSED (never guesses a privileged role)."""
+        by = self._actor()
         if not by:
             return None
         try:
@@ -3044,10 +3196,10 @@ class AutomationService:
             },
         )
 
-    def _require_staging_gate_role(self, by: str | None, action: str) -> str:
+    def _require_staging_gate_role(self, action: str) -> str:
         """Resolve + enforce that `by` is an admin/auditor for a gate mutation
         (freeze, policy edit, audit sign-off). Returns the role. 403 otherwise."""
-        role = self._role_of(by)
+        role = self._role_of()
         if role not in self._STAGING_GATE_ROLES:
             raise HTTPException(
                 status_code=403,
@@ -3062,7 +3214,8 @@ class AutomationService:
         bitswan.yaml. Freezing captures the current staging image sha so audits
         attach to a fixed tag and closes dev→staging; unfreezing clears the trail
         anchor and re-opens dev→staging."""
-        role = self._require_staging_gate_role(by, "freeze or unfreeze staging")
+        role = self._require_staging_gate_role("freeze or unfreeze staging")
+        by = self._actor() or by
         bs = read_bitswan_yaml(self.gitops_dir) or {}
         rec = bs.setdefault("staging_gate", {}).setdefault(bp, {})
         if frozen:
@@ -3110,7 +3263,7 @@ class AutomationService:
         rec["frozen_sha"] = None
         rec["frozen_commit"] = None
         rec["production_commit_at_freeze"] = None
-        self._append_gate_log(rec, "unfreeze", by, self._role_of(by), reason)
+        self._append_gate_log(rec, "unfreeze", by, self._role_of(), reason)
         await self._persist_bp_state(
             bs, {bp}, bp, "audit", deployed_by=by, message=f"unfreeze staging {bp}"
         )
@@ -3122,7 +3275,8 @@ class AutomationService:
         """Set how many auditor sign-offs a frozen staging image needs before it
         can be promoted to Production (admin/auditor only; minimum 1).
         Versioned in bitswan.yaml."""
-        role = self._require_staging_gate_role(by, "change the audit policy")
+        role = self._require_staging_gate_role("change the audit policy")
+        by = self._actor() or by
         if required < 1:
             raise ValueError("Audits required must be at least 1")
         bs = read_bitswan_yaml(self.gitops_dir) or {}
@@ -3167,7 +3321,8 @@ class AutomationService:
         the deployment-history badge can look it up. Append-only: an auditor MAY
         sign again to change their mind, but only their latest verdict counts
         (see audit_verdicts). Raises 409 only if staging is not frozen."""
-        role = self._require_staging_gate_role(by, "sign off audits")
+        role = self._require_staging_gate_role("sign off audits")
+        by = self._actor() or by
         if verdict not in ("approve", "reject"):
             raise ValueError("verdict must be 'approve' or 'reject'")
         gate = self.read_staging_gate(bp)
@@ -3250,7 +3405,7 @@ class AutomationService:
                 )
             return
         if target_stage == "production":
-            role = self._role_of(by)
+            role = self._role_of()
             if role not in self._STAGING_GATE_ROLES:
                 raise HTTPException(
                     status_code=403,
@@ -3477,7 +3632,8 @@ class AutomationService:
         The pointer flip + audit are authoritative; the ingress apply is
         best-effort (a transient ingress error must not desync the recorded
         state — re-applying bitswan.yaml re-asserts it)."""
-        self._require_staging_gate_role(by, "swap the DR slot into production")
+        self._require_staging_gate_role("swap the DR slot into production")
+        by = self._actor() or by
         cur = self.read_backups(bp)
         target_slot = cur["dr_slot"]
         if not target_slot:
@@ -3590,7 +3746,8 @@ class AutomationService:
         carries the same authoritative, fail-closed role gate as the
         staging→production path, enforced from the verified `by`.
         """
-        self._require_staging_gate_role(by, "run a zero-downtime production promote")
+        self._require_staging_gate_role("run a zero-downtime production promote")
+        by = self._actor() or by
         staged = await self.begin_zero_downtime_promote(bp, by)
         target_slot = staged["target_slot"]
         dep_ids = list(self._bp_stage_members(bp, "production").keys())

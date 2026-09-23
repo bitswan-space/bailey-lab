@@ -60,6 +60,7 @@ import {
 } from '@/components/workspace/WorkspaceProvider';
 import { AuditSignOff, isAuditor } from '@/components/audits/AuditSignOff';
 import { AuditReportDialog } from '@/components/audits/AuditReportDialog';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { DiffView } from '@/components/diff/DiffView';
 import { FileTree } from '@/components/files/FileTree';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
@@ -1000,6 +1001,39 @@ const BACKUP_EVENT_LABEL: Record<string, string> = {
   retention: 'Retention changed',
 };
 
+const HISTORY_CHANGES_PREVIEW = 3;
+
+function HistoryChanges({ entry }: { entry: BpHistoryEntry }) {
+  const [expanded, setExpanded] = useState(false);
+  const changes = entry.changes ?? [];
+  if (changes.length === 0) return null;
+  const shown = expanded ? changes : changes.slice(0, HISTORY_CHANGES_PREVIEW);
+  const hidden = changes.length - shown.length;
+  return (
+    <ul className="flex flex-col gap-0.5 text-[12px] text-muted-foreground">
+      {shown.map((c) => (
+        <li key={c.sha} className="flex items-baseline gap-2" title={`${c.author} · ${c.at}`}>
+          <span className="shrink-0 font-mono text-[11px]">{c.sha.slice(0, 7)}</span>
+          <span className="min-w-0 truncate text-foreground/80">{c.subject}</span>
+        </li>
+      ))}
+      {(hidden > 0 || entry.changes_truncated || expanded) && changes.length > HISTORY_CHANGES_PREVIEW && (
+        <li>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="text-[12px] font-medium text-primary hover:underline"
+          >
+            {expanded
+              ? 'Show fewer'
+              : `… ${hidden} more commit${hidden === 1 ? '' : 's'}${entry.changes_truncated ? ' (and older ones not listed)' : ''}`}
+          </button>
+        </li>
+      )}
+    </ul>
+  );
+}
+
 function entryTone(e: BpHistoryEntry, isCurrent: boolean) {
   if (e.source === 'firewall')
     return { dot: 'bg-violet-500', label: 'Firewall change', cls: 'bg-violet-100 text-violet-700' };
@@ -1266,18 +1300,16 @@ function InspectModal({
   ];
 
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/45 p-5"
-      onClick={onClose}
-    >
-      <div
-        className="flex h-[620px] max-h-[90vh] w-[960px] max-w-[96vw] overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <>
+      <Dialog open onOpenChange={(o) => !o && onClose()}>
+        <DialogContent
+          aria-describedby={undefined}
+          className="flex h-[620px] max-h-[90vh] w-[960px] max-w-[96vw] gap-0 overflow-hidden rounded-xl p-0"
+        >
         {/* Left rail */}
         <div className="flex w-[210px] shrink-0 flex-col border-r border-border bg-muted/40">
           <div className="border-b border-border px-4 py-3">
-            <div className="text-[13px] font-bold text-foreground">Inspect</div>
+            <DialogTitle className="text-[13px] font-bold text-foreground">Inspect</DialogTitle>
             <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">
               {stageLabel} · {short(entry.source_commit ?? entry.commit, 7)}
             </div>
@@ -1307,18 +1339,10 @@ function InspectModal({
         </div>
         {/* Right content */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex items-center gap-2.5 border-b border-border px-4 py-3">
+          <div className="flex items-center gap-2.5 border-b border-border px-4 py-3 pr-12">
             <div className="flex-1 text-sm font-semibold text-foreground">
               {tabs.find((t) => t.id === panel)?.label}
             </div>
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex size-7 items-center justify-center rounded text-muted-foreground hover:bg-muted"
-              aria-label="Close"
-            >
-              <X className="size-4" aria-hidden />
-            </button>
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {panel === 'diff' ? (
@@ -1602,7 +1626,8 @@ function InspectModal({
             </div>
           )}
         </div>
-      </div>
+        </DialogContent>
+      </Dialog>
       <TakeVersionDialog
         open={takeOpen}
         source="commit"
@@ -1633,7 +1658,7 @@ function InspectModal({
           setRevertError('');
         }}
       />
-    </div>
+    </>
   );
 }
 
@@ -1780,6 +1805,15 @@ function DeploymentCard({
           )}
         </div>
       </div>
+      {entry.summary && (
+        <div
+          className="text-[13px] font-medium leading-snug text-foreground"
+          title={entry.subject ?? undefined}
+        >
+          {entry.summary}
+        </div>
+      )}
+      <HistoryChanges entry={entry} />
       <div className="flex flex-wrap items-center gap-3.5 text-[12px] text-muted-foreground">
         {entry.deployed_by && (
           <span className="inline-flex items-center gap-1.5">

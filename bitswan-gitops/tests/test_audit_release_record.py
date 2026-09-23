@@ -16,6 +16,7 @@ from fastapi import HTTPException
 
 import app.services.automation_service as mod
 from app.services.automation_service import AutomationService
+from app.task_queue import current_requester
 
 REPORT = "# Audit — invoices\n\nRead the payment path; the threshold is a constant.\n"
 LATER = "# Audit — invoices\n\nSecond look, months after the release.\n"
@@ -41,6 +42,7 @@ def _read(tmp_path):
 @pytest.fixture()
 def frozen(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "daemon_user_role", lambda by: "auditor")
+    current_requester.set("auditor@x")
     _write(
         tmp_path,
         {"staging_gate": {"invoices": {"frozen": True, "frozen_sha": "abc123"}}},

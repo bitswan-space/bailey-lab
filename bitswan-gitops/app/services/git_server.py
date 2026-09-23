@@ -126,7 +126,7 @@ def _ident_for(author: str | None) -> list[str]:
     identity for genuinely server-initiated commits."""
     from app.task_queue import current_requester
 
-    who = (author or "").strip() or (current_requester.get() or "").strip()
+    who = (current_requester.get() or "").strip() or (author or "").strip()
     if who:
         return ["-c", f"user.name={who}", "-c", f"user.email={who}"]
     return list(_GIT_IDENT)

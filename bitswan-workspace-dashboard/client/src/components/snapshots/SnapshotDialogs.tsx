@@ -79,28 +79,32 @@ export function CreateSnapshotDialog({
               : "Capture this business process's data (Postgres, CouchDB, object storage) at one stage. Manual snapshots are kept until you delete them."}
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-3">
+        <form
+          className="flex flex-col gap-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (stage) onConfirm(stage, label.trim());
+          }}
+        >
           {!fixedStage && (
             <StagePicker value={stage} onChange={setStage} enabled={enabledStages} />
           )}
           <Input
+            autoFocus
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             placeholder="Label (optional) — e.g. before-release"
           />
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onCancel}>
-            Cancel
-          </Button>
-          <Button
-            disabled={!stage}
-            onClick={() => stage && onConfirm(stage, label.trim())}
-          >
-            <Camera className="size-3.5" aria-hidden />
-            Create snapshot
-          </Button>
-        </DialogFooter>
+          <DialogFooter className="mt-1">
+            <Button variant="outline" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!stage}>
+              <Camera className="size-3.5" aria-hidden />
+              Create snapshot
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );
