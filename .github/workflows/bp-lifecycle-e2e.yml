@@ -195,14 +195,25 @@ jobs:
           done
           echo "::endgroup::"
 
-      - name: Upload Playwright report + traces
+      - name: Upload Playwright report
         if: always()
         uses: forgejo/upload-artifact@v4
         with:
           name: playwright-report
-          path: |
-            e2e/playwright-report/
-            e2e/test-results/
+          path: e2e/playwright-report/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # playwright.config.ts sets trace: 'on', so test-results carries a trace
+      # for every test - about 750MB a run, which the forge refuses part-way
+      # through and fails the job even when the suite itself passed. The traces
+      # are only of interest when something broke, so ship them then.
+      - name: Upload Playwright traces
+        if: failure()
+        uses: forgejo/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: e2e/test-results/
           retention-days: 14
           if-no-files-found: ignore
 
