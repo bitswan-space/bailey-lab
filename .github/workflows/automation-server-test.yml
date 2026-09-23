@@ -25,7 +25,11 @@ jobs:
         # /proc + statfs and ships as a Linux container). macOS stays for
         # general cross-Unix portability; Windows is dropped — it can't build
         # the Unix-only syscalls and is not a supported runtime.
-        os: [ubuntu-latest, macos-latest]
+        #
+        # macOS only where macOS runners actually exist. A self-hosted Forgejo
+        # has none, and a macos-latest job there queues forever instead of
+        # failing, so the whole workflow never reports.
+        os: ${{ contains(github.server_url, 'github.com') && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["bailey-vm"]') }}
 
     runs-on: ${{ matrix.os }}
 
@@ -59,7 +63,7 @@ jobs:
         run: bash <(curl -s https://codecov.io/bash)
 
   integration-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
     # Integration tests require Docker and root access
 
     services:
@@ -85,8 +89,35 @@ jobs:
           echo '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]}' | sudo tee /etc/docker/daemon.json
           sudo service docker start || true
 
+      - name: Authenticate to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        run: |
+          # A self-hosted runner pulls the whole stack from Docker Hub on every
+          # job from a cold image store, and anonymous pulls are capped at 100
+          # per hour per IP - bringup then dies on "429 Too Many Requests".
+          # Authenticated pulls are counted against the account instead.
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_ACCESS_TOKEN" ]; then
+            echo "$DOCKERHUB_ACCESS_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "No Docker Hub credentials set; pulling anonymously (rate limited)."
+          fi
+
       - name: Install and configure dnsmasq for .localhost resolution
         run: |
+          # Forward to whatever resolvers this machine actually uses. Hardcoding
+          # 8.8.8.8 only works where outbound DNS to public resolvers is allowed;
+          # on a self-hosted runner it is usually blocked, and then every lookup
+          # dies the moment resolv.conf is repointed at dnsmasq below.
+          # NB: every probe ends in "|| true" — the step runs under `set -e -o
+          # pipefail`, so a grep/awk that simply finds nothing would otherwise
+          # abort the whole step.
+          UPSTREAM="$( { resolvectl status 2>/dev/null | sed -n 's/.*DNS Servers: //p' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -3; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$( { awk '/^nameserver/ && $2 !~ /^127\./ {print $2}' /etc/resolv.conf 2>/dev/null | head -3; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="$( { ip route 2>/dev/null | awk '/^default/{print $3; exit}'; } || true )"
+          [ -n "$UPSTREAM" ] || UPSTREAM="8.8.8.8"
+          echo "dnsmasq upstreams: $(echo $UPSTREAM | tr '\n' ' ')"
           sudo apt-get update
           sudo apt-get install -y dnsmasq
           # Stop systemd-resolved which might conflict with dnsmasq
@@ -98,17 +129,15 @@ jobs:
           echo "listen-address=127.0.0.1" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "port=53" | sudo tee -a /etc/dnsmasq.d/localhost.conf
           echo "no-resolv" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.8.8" | sudo tee -a /etc/dnsmasq.d/localhost.conf
-          echo "server=8.8.4.4" | sudo tee -a /etc/dnsmasq.d/localhost.conf
+          for s in $UPSTREAM; do echo "server=$s" | sudo tee -a /etc/dnsmasq.d/localhost.conf; done
           # Test configuration
           sudo dnsmasq --test || true
           # Start dnsmasq
           sudo systemctl start dnsmasq || sudo dnsmasq --no-daemon --log-queries &
           # Update resolv.conf to use dnsmasq first, then fallback to Google DNS
+          sudo rm -f /etc/resolv.conf
           echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
-          echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
-          # Make resolv.conf immutable to prevent systemd-resolved from overwriting it
-          sudo chattr +i /etc/resolv.conf || true
+          for s in $UPSTREAM; do echo "nameserver $s" | sudo tee -a /etc/resolv.conf; done
           # Verify dnsmasq is working
           sleep 3
           dig @127.0.0.1 test.localhost +short || nslookup test.localhost 127.0.0.1 || echo "DNS resolution check skipped"

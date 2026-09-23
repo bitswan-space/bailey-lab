@@ -22,7 +22,7 @@ defaults:
 
 jobs:
   build-and-release:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
     steps:
       # 1) Checkout full history (tags included)
       - name: Checkout code

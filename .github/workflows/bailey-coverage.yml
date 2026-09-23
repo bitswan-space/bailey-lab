@@ -23,7 +23,7 @@ on:
 
 jobs:
   coverage-gate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
     env:
       THRESHOLD: '80'
     steps:
