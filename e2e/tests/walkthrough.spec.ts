@@ -2048,6 +2048,27 @@ test('Bailey product walkthrough → manual screenshots', async ({ page }) => {
   // .last() = the primary action button in the tab body.
   const pressDeploy = async () => {
     await clickTopTab(/^Deploy$/);
+    // The deploy gate. While a business process's requirement tests are still
+    // running — or have failed, or describe code that has since changed — the
+    // Deploy button is REPLACED by a message and a jump to Requirements &
+    // tests, so waiting for Deploy to become enabled would wait forever and
+    // report "nothing to deploy", which is not what went wrong.
+    //
+    // This state is expected rather than exceptional: Sync & Deploy commits,
+    // and a commit starts a run. So wait it out deliberately. A suite that
+    // genuinely fails surfaces here as the gate's own words, which is the
+    // failure worth reading.
+    const gate = d
+      .getByText(
+        /(Deploy is available once they pass|Deploy will be available once they pass|All tests must pass before this can be deployed|have not run for this business process yet|no longer describe it)/i,
+      )
+      .first();
+    if (await gate.isVisible().catch(() => false)) {
+      await expect(
+        gate,
+        'the requirement tests never cleared the deploy gate',
+      ).toBeHidden({ timeout: 10 * 60_000 });
+    }
     const btn = d.getByRole('button', { name: /^Deploy$|Working/ }).last();
     await expect(btn).toBeEnabled({ timeout: SLA });
     await btn.click();

@@ -1304,7 +1304,10 @@ async def _tests_gate_for(copy: str, bp: str) -> dict:
     branch tip moving), so the loop closes without this request having a side
     effect on background state.
     """
-    from app.services.testable_requirements import read_requirements
+    from app.services.testable_requirements import (
+        find_tested_requirement_ids,
+        read_requirements,
+    )
     from app.test_runner import current_state
 
     try:
@@ -1323,7 +1326,23 @@ async def _tests_gate_for(copy: str, bp: str) -> dict:
         return {"green": True, "reason": ""}
 
     state = await current_state(copy, bp)
-    if state is None or state["stale"] or state["status"] == "running":
+    if state is None:
+        # Never run. Whether that should hold a deploy back depends on there
+        # being something to wait for: if no test carries any of these ids, a
+        # run would report "no test" for every one of them and let the deploy
+        # through anyway. Blocking here made the gate's answer depend on
+        # whether a run happened to have been triggered yet — which, since
+        # adding a requirement does not commit, it usually has not.
+        if not find_tested_requirement_ids(copy, bp, [r.id for r in requirements]):
+            return {"green": True, "reason": ""}
+        return {
+            "green": False,
+            "reason": (
+                f"Tests for '{bp}' have not run yet. Deploy will be available "
+                "once they pass."
+            ),
+        }
+    if state["stale"] or state["status"] == "running":
         return {
             "green": False,
             "reason": (

@@ -17,6 +17,17 @@ from app.test_run_manager import test_run_manager
 TOKEN = "test-gitops-secret"
 
 
+@pytest.fixture(autouse=True)
+def _clean_run_state():
+    """Test state is a process-wide singleton, so a run left behind by one test
+    is visible to the next — which is exactly what the gate reads. Clear it
+    around every test rather than only in the `client` fixture, since not every
+    test here needs a client."""
+    test_run_manager.forget("dev1", "shop")
+    yield
+    test_run_manager.forget("dev1", "shop")
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("BITSWAN_GITOPS_SECRET", TOKEN)
@@ -172,9 +183,14 @@ async def test_the_gate_starts_nothing(tmp_path, monkeypatch):
 
     monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
     bp_dir = tmp_path / "dev1" / "shop"
-    bp_dir.mkdir(parents=True)
+    (bp_dir / "backend").mkdir(parents=True)
     (bp_dir / "testable-requirements.toml").write_text(
         '[[requirement]]\nid = "REQ-AAAA"\n'
+    )
+    # A test exists, so this BP is one the gate genuinely holds back — the case
+    # where it would be most tempting to kick a run off.
+    (bp_dir / "backend" / "app_test.go").write_text(
+        "func TestREQ_AAAA_Health(t *testing.T) {}\n"
     )
 
     spawned = []
@@ -183,3 +199,69 @@ async def test_the_gate_starts_nothing(tmp_path, monkeypatch):
     gate = await _tests_gate_for("dev1", "shop")
     assert gate["green"] is False
     assert spawned == []
+
+
+async def test_requirements_with_no_tests_do_not_hold_back_a_deploy(
+    tmp_path, monkeypatch
+):
+    """The walkthrough's shape, and a common one: requirements written, no
+    tests yet, nothing has run. A run would report `no_test` for all of them
+    and let the deploy through, so waiting for it gates on nothing."""
+    from app.routes.copies import _tests_gate_for
+
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
+    bp_dir = tmp_path / "dev1" / "shop"
+    bp_dir.mkdir(parents=True)
+    (bp_dir / "testable-requirements.toml").write_text(
+        '[[requirement]]\nid = "REQ-AAAA"\ndescription = "VAT matches the PO"\n\n'
+        '[[requirement]]\nid = "REQ-BBBB"\ndescription = "Held for approval"\n'
+    )
+
+    gate = await _tests_gate_for("dev1", "shop")
+    assert gate["green"] is True
+
+
+async def test_a_requirement_with_a_test_still_waits_for_its_verdict(
+    tmp_path, monkeypatch
+):
+    """The other half: once a test exists there IS something to wait for, and
+    publishing before it has run would be publishing on no evidence."""
+    from app.routes.copies import _tests_gate_for
+
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
+    bp_dir = tmp_path / "dev1" / "shop"
+    (bp_dir / "backend").mkdir(parents=True)
+    (bp_dir / "testable-requirements.toml").write_text(
+        '[[requirement]]\nid = "REQ-AAAA"\n'
+    )
+    (bp_dir / "backend" / "app_test.go").write_text(
+        "func TestREQ_AAAA_Health(t *testing.T) {}\n"
+    )
+
+    gate = await _tests_gate_for("dev1", "shop")
+    assert gate["green"] is False
+    assert "have not run yet" in gate["reason"]
+
+
+def test_test_file_discovery_matches_the_runners(tmp_path, monkeypatch):
+    from app.services.testable_requirements import (
+        find_tested_requirement_ids,
+        is_test_path,
+    )
+
+    assert is_test_path("backend/app_test.go")
+    assert is_test_path("worker/test_app.py")
+    assert is_test_path("frontend/src/App.test.tsx")
+    assert is_test_path("tests/anything.py")
+    # A helper script naming an id in its usage text is not a test.
+    assert not is_test_path("scripts/run-req-test.sh")
+
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
+    bp_dir = tmp_path / "dev1" / "shop"
+    (bp_dir / "backend").mkdir(parents=True)
+    (bp_dir / "backend" / "x_test.go").write_text("func TestREQ_AAAA_Health() {}")
+    (bp_dir / "backend" / "notes.md").write_text("REQ_BBBB is discussed here")
+
+    found = find_tested_requirement_ids("dev1", "shop", ["REQ-AAAA", "REQ-BBBB"])
+    # Only a test file counts; prose mentioning an id does not.
+    assert found == {"REQ-AAAA"}

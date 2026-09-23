@@ -370,3 +370,86 @@ def children_by_parent(requirements: list[Requirement]) -> dict[str, list[str]]:
         parent = req.parent if req.parent in known else ""
         out.setdefault(parent, []).append(req.id)
     return out
+
+
+# ── Does a test for this requirement exist at all? ──────────────────────────
+#
+# Mirrors the dashboard's `findTestedRequirementIds`. gitops needs the same
+# answer for the deploy gate: a business process whose requirements have no
+# tests has nothing that could fail, so it must not be held back waiting for a
+# verdict that would say "nothing to verify" either way.
+
+# Dependency/VCS/build noise, skipped while scanning.
+_SCAN_SKIP_NAMES = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "vendor",
+        "dist",
+        "build",
+        ".pytest_cache",
+    }
+)
+
+# Files larger than this are not scanned.
+_SCAN_FILE_SIZE_LIMIT = 1024 * 1024
+
+_TEST_DIR_RE = re.compile(r"^(tests?|specs?|__tests__)$", re.IGNORECASE)
+_TEST_STEM_RE = re.compile(r"(^test_|_test$|_spec$|\.test$|\.spec$)", re.IGNORECASE)
+
+
+def is_test_path(rel_path: str) -> bool:
+    """Does this path look like it holds tests?
+
+    Matches the discovery rules of the common runners: pytest (test_*.py /
+    *_test.py / tests/), go test (*_test.go), vitest/jest (*.test.* /
+    *.spec.* / __tests__/), rspec (*_spec.rb). Deliberately NOT dash-separated
+    names — a helper script like run-req-test.sh mentions requirement ids in
+    its usage without being a test.
+    """
+    parts = rel_path.replace("\\", "/").split("/")
+    base = parts[-1] if parts else ""
+    if any(_TEST_DIR_RE.match(d) for d in parts[:-1]):
+        return True
+    stem = os.path.splitext(base)[0]
+    return bool(_TEST_STEM_RE.search(stem))
+
+
+def find_tested_requirement_ids(
+    copy: str | None, bp: str, ids: "list[str] | set[str]"
+) -> set[str]:
+    """Requirement ids that some test file in the BP names.
+
+    Scans the whole business process, not just one automation: the question is
+    whether a test exists at all, which is what decides if there is anything to
+    wait for.
+    """
+    found: set[str] = set()
+    wanted = {requirement_token(i): i for i in ids}
+    if not wanted:
+        return found
+    bp_dir = bp_clone_path(copy, bp)
+
+    for root, dirs, files in os.walk(bp_dir):
+        dirs[:] = [d for d in dirs if d not in _SCAN_SKIP_NAMES]
+        for name in files:
+            if len(found) == len(wanted):
+                return found
+            full = os.path.join(root, name)
+            rel = os.path.relpath(full, bp_dir)
+            if not is_test_path(rel):
+                continue
+            try:
+                if os.path.getsize(full) > _SCAN_FILE_SIZE_LIMIT:
+                    continue
+                with open(full, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for token, req_id in wanted.items():
+                if req_id not in found and name_matches_requirement(req_id, content):
+                    found.add(req_id)
+    return found
