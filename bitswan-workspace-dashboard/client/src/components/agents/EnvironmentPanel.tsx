@@ -30,6 +30,8 @@ import {
 import { useAutomations } from '@/components/workspace/WorkspaceProvider';
 import { bpContainers, type BpContainer } from '@/lib/bpContainers';
 import { isUpStatus, STATUS_META } from '@/lib/status';
+import { usePendingActions, type PendingAction } from '@/lib/pendingActions';
+import { PendingActionMark } from '@/components/shared/PendingActionMark';
 import { SecretsEditor } from '@/components/secrets/SecretsEditor';
 import { cn } from '@/lib/utils';
 
@@ -63,6 +65,7 @@ const WORKER_TYPES: { type: string; label: string }[] = [
 
 export function EnvironmentPanel({ bp, copy }: Props) {
   const { automations } = useAutomations();
+  const pending = usePendingActions();
   const [collapsed, setCollapsed] = useState(false);
   const [busy, setBusy] = useState(false);
   // eslint-disable-next-line no-restricted-syntax -- null = nothing being renamed
@@ -196,6 +199,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               iconClass="text-blue-500"
               renaming={renaming === f.name}
               busy={busy}
+              pending={f.deploymentId ? pending.get(f.deploymentId) : undefined}
               onStartRename={() => setRenaming(f.name)}
               onRename={(next) => doRename(f.name, next)}
               onCancelRename={() => setRenaming(null)}
@@ -230,6 +234,7 @@ export function EnvironmentPanel({ bp, copy }: Props) {
               iconClass="text-muted-foreground"
               renaming={renaming === w.name}
               busy={busy}
+              pending={w.deploymentId ? pending.get(w.deploymentId) : undefined}
               onStartRename={() => setRenaming(w.name)}
               onRename={(next) => doRename(w.name, next)}
               onCancelRename={() => setRenaming(null)}
@@ -312,6 +317,7 @@ function Row({
   iconClass,
   renaming,
   busy,
+  pending,
   onStartRename,
   onRename,
   onCancelRename,
@@ -322,6 +328,7 @@ function Row({
   iconClass: string;
   renaming: boolean;
   busy: boolean;
+  pending?: PendingAction;
   onStartRename: () => void;
   onRename: (next: string) => void;
   onCancelRename: () => void;
@@ -363,6 +370,7 @@ function Row({
           {canOpen && <ExternalLink className="size-2.5 shrink-0 opacity-60" aria-hidden />}
         </a>
       )}
+      <PendingActionMark pending={pending} density="dot" />
       <span className={cn('size-1.5 shrink-0 rounded-full', meta.dot)} title={statusTitle} />
       {!renaming && (
         <div className="flex opacity-60 transition-opacity group-hover:opacity-100">

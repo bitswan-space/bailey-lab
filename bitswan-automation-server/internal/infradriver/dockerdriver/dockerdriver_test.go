@@ -107,35 +107,75 @@ func TestEveryListedContainerIsInspectedInOneExec(t *testing.T) {
 	}
 }
 
-func TestParseRestartCounts(t *testing.T) {
-	raw := []byte("abc123" + psSep + "23032\n" + "def456" + psSep + "0\n")
-	got := parseRestartCounts(raw)
-	if got["abc123"] != 23032 {
-		t.Errorf("abc123 = %d, want 23032", got["abc123"])
+func TestParseInspectReadings(t *testing.T) {
+	raw := []byte("abc123" + psSep + "23032" + psSep + "2026-09-10T18:26:13.744009882Z\n" +
+		"def456" + psSep + "0" + psSep + "2026-09-11T16:50:12.233568268Z\n")
+	counts, started := parseInspectReadings(raw)
+	if counts["abc123"] != 23032 {
+		t.Errorf("abc123 = %d, want 23032", counts["abc123"])
 	}
-	n, ok := got["def456"]
+	n, ok := counts["def456"]
 	if !ok || n != 0 {
 		t.Errorf("def456 = %d (present=%v), want 0 present", n, ok)
 	}
-	if len(got) != 2 {
-		t.Errorf("got %d entries, want 2", len(got))
+	if len(counts) != 2 {
+		t.Errorf("got %d counts, want 2", len(counts))
+	}
+	if started["abc123"] != 1789064773 {
+		t.Errorf("abc123 started = %d, want 1789064773", started["abc123"])
+	}
+	if started["def456"] != 1789145412 {
+		t.Errorf("def456 started = %d, want 1789145412", started["def456"])
 	}
 }
 
-func TestParseRestartCountsNeverGuessesAndLosesOnlyTheBadLine(t *testing.T) {
+func TestBothReadingsRideOneInspect(t *testing.T) {
+	if !strings.Contains(inspectReadingsFormat, "{{.RestartCount}}") {
+		t.Error("the inspect format must still read the restart count")
+	}
+	if !strings.Contains(inspectReadingsFormat, "{{.State.StartedAt}}") {
+		t.Error("the inspect format must read the start time in the SAME exec")
+	}
+	if n := strings.Count(inspectReadingsFormat, psSep); n != 2 {
+		t.Errorf("inspect format has %d separators, want 2 (id + 2 readings)", n)
+	}
+}
+
+func TestAStartTimeThatWasNeverSetIsAbsentNotTheZeroTime(t *testing.T) {
+	raw := []byte("abc123" + psSep + "0" + psSep + "0001-01-01T00:00:00Z\n")
+	counts, started := parseInspectReadings(raw)
+	if _, ok := started["abc123"]; ok {
+		t.Errorf("the zero time must be absent, got %d", started["abc123"])
+	}
+	if n, ok := counts["abc123"]; !ok || n != 0 {
+		t.Errorf("count = %d (present=%v), want 0 present", n, ok)
+	}
+}
+
+func TestAnUnreadableReadingCostsOnlyThatReading(t *testing.T) {
 	raw := []byte(strings.Join([]string{
-		"abc123" + psSep + "not-a-number",
+		"abc123" + psSep + "not-a-number" + psSep + "2026-09-10T18:26:13.744009882Z",
+		"bad789" + psSep + "7" + psSep + "not-a-timestamp",
 		"noseparatorhere",
-		"def456" + psSep + "23032",
+		"def456" + psSep + "23032" + psSep + "2026-09-11T16:50:12.233568268Z",
 	}, "\n") + "\n")
-	got := parseRestartCounts(raw)
-	if _, ok := got["abc123"]; ok {
+	counts, started := parseInspectReadings(raw)
+	if _, ok := counts["abc123"]; ok {
 		t.Error("a count that could not be read must be absent, not guessed at")
 	}
-	if got["def456"] != 23032 {
-		t.Errorf("def456 = %d, want 23032 — a bad line elsewhere must not cost it", got["def456"])
+	if started["abc123"] != 1789064773 {
+		t.Error("an unreadable count must not cost the container its start time")
 	}
-	if len(got) != 1 {
-		t.Errorf("got %d counts, want 1", len(got))
+	if counts["bad789"] != 7 {
+		t.Errorf("bad789 count = %d, want 7 — an unreadable timestamp must not cost the count", counts["bad789"])
+	}
+	if _, ok := started["bad789"]; ok {
+		t.Error("a start time that could not be read must be absent, not guessed at")
+	}
+	if counts["def456"] != 23032 {
+		t.Errorf("def456 = %d, want 23032 — a bad line elsewhere must not cost it", counts["def456"])
+	}
+	if len(counts) != 2 || len(started) != 2 {
+		t.Errorf("got %d counts / %d start times, want 2 / 2", len(counts), len(started))
 	}
 }
