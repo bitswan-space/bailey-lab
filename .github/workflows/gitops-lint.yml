@@ -31,7 +31,10 @@ jobs:
 
     - name: Run linter
       run: |
-        ruff check app
+        # Neither line takes a path: both walk the whole package. `ruff check app`
+        # used to stop at the package boundary, so `tests` was formatted-checked
+        # but never linted, and dead assignments sat there unseen (#473).
+        ruff check
         ruff format --check
 
     - name: Run tests

@@ -116,7 +116,7 @@ def test_history_entries_say_what_changed(tmp_path, monkeypatch):
     assert [c["subject"] for c in dev[0]["changes"]] == ["Add invoice validation"]
 
     staging = asyncio.run(svc.bp_history("shop", "staging"))["history"]
-    assert staging[0]["summary"] == f"Promoted from Development · 5 commits"
+    assert staging[0]["summary"] == "Promoted from Development · 5 commits"
     assert len(staging[0]["changes"]) == 5
 
 
