@@ -29,7 +29,7 @@ defaults:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
 
     steps:
     - name: Check out the repo

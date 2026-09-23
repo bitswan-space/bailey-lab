@@ -29,7 +29,7 @@ jobs:
         # macOS only where macOS runners actually exist. A self-hosted Forgejo
         # has none, and a macos-latest job there queues forever instead of
         # failing, so the whole workflow never reports.
-        os: ${{ contains(github.server_url, 'github.com') && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
+        os: ${{ contains(github.server_url, 'github.com') && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["bailey-vm"]') }}
 
     runs-on: ${{ matrix.os }}
 
@@ -63,7 +63,7 @@ jobs:
         run: bash <(curl -s https://codecov.io/bash)
 
   integration-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(github.server_url, 'github.com') && 'ubuntu-latest' || 'bailey-vm' }}
     # Integration tests require Docker and root access
 
     services:
