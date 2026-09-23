@@ -89,6 +89,21 @@ jobs:
           echo '{"hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"]}' | sudo tee /etc/docker/daemon.json
           sudo service docker start || true
 
+      - name: Authenticate to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        run: |
+          # A self-hosted runner pulls the whole stack from Docker Hub on every
+          # job from a cold image store, and anonymous pulls are capped at 100
+          # per hour per IP - bringup then dies on "429 Too Many Requests".
+          # Authenticated pulls are counted against the account instead.
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_ACCESS_TOKEN" ]; then
+            echo "$DOCKERHUB_ACCESS_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "No Docker Hub credentials set; pulling anonymously (rate limited)."
+          fi
+
       - name: Install and configure dnsmasq for .localhost resolution
         run: |
           # Forward to whatever resolvers this machine actually uses. Hardcoding
