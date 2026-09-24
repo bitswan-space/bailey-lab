@@ -1012,7 +1012,9 @@ export interface BpFileContent {
 
 /** Gitops `POST /copies/{name}/sync` response. */
 export interface SyncCopyResult {
-  status: 'success' | 'needs_rebase';
+  /** `blocked_by_tests`: nothing was published — the BP's requirement tests
+   *  have not passed for the commit the sync just made. */
+  status: 'success' | 'needs_rebase' | 'blocked_by_tests';
   /** "fast-forward" when synced server-side. */
   method?: string | null;
   message: string;

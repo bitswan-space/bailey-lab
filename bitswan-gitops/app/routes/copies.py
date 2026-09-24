@@ -1303,6 +1303,11 @@ async def _tests_gate_for(copy: str, bp: str) -> dict:
     before this is itself what triggers one (the copies watcher fires on a
     branch tip moving), so the loop closes without this request having a side
     effect on background state.
+
+    The order below is the substance of it. A run's own verdict comes first,
+    because that is evidence and everything else is inference: the file scan
+    that decides "is there anything to verify" is a heuristic, and a heuristic
+    must never overrule a test that actually ran and failed.
     """
     from app.services.testable_requirements import (
         find_tested_requirement_ids,
@@ -1326,15 +1331,33 @@ async def _tests_gate_for(copy: str, bp: str) -> dict:
         return {"green": True, "reason": ""}
 
     state = await current_state(copy, bp)
+
+    # 1. Evidence of failure, whatever anything else says.
+    if state is not None:
+        counts = state["counts"]
+        if counts["fail"] or counts["blocked"]:
+            detail = f"{counts['fail']} test(s) failed"
+            if counts["blocked"]:
+                detail += f" and {counts['blocked']} could not run"
+            return {
+                "green": False,
+                "reason": (
+                    f"{detail} for '{bp}'. All tests must pass before it can "
+                    "be deployed — see Requirements & tests."
+                ),
+            }
+
+    # 2. Nothing that could verify a requirement. A run would report "no test"
+    #    for every id and come back green, so there is nothing to hold the
+    #    deploy for — and that stays true whatever state a run is in. Checked
+    #    before staleness on purpose: publishing commits first, which makes the
+    #    previous run stale, and a business process with no tests has nothing
+    #    to be stale about.
+    if not find_tested_requirement_ids(copy, bp, [r.id for r in requirements]):
+        return {"green": True, "reason": ""}
+
+    # 3. Something can be verified, so a verdict is required.
     if state is None:
-        # Never run. Whether that should hold a deploy back depends on there
-        # being something to wait for: if no test carries any of these ids, a
-        # run would report "no test" for every one of them and let the deploy
-        # through anyway. Blocking here made the gate's answer depend on
-        # whether a run happened to have been triggered yet — which, since
-        # adding a requirement does not commit, it usually has not.
-        if not find_tested_requirement_ids(copy, bp, [r.id for r in requirements]):
-            return {"green": True, "reason": ""}
         return {
             "green": False,
             "reason": (
@@ -1352,17 +1375,9 @@ async def _tests_gate_for(copy: str, bp: str) -> dict:
         }
     if state["green"]:
         return {"green": True, "reason": ""}
-
-    counts = state["counts"]
-    detail = f"{counts['fail']} test(s) failed"
-    if counts["blocked"]:
-        detail += f" and {counts['blocked']} could not run"
     return {
         "green": False,
-        "reason": (
-            f"{detail} for '{bp}'. All tests must pass before it can be "
-            "deployed — see Requirements & tests."
-        ),
+        "reason": f"The last test run for '{bp}' did not complete.",
     }
 
 

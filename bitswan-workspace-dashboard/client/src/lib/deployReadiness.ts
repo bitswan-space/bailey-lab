@@ -60,8 +60,13 @@ export interface DeployReadinessInput {
    */
   // eslint-disable-next-line no-restricted-syntax -- null = no run / no contract
   tests?: TestState | null;
-  /** True when the BP has no requirements, so there is nothing to gate on. */
-  hasRequirements?: boolean;
+  /**
+   * True when some requirement in this BP has a test. Not "has requirements":
+   * a contract nobody has written a test for can never produce a verdict, so
+   * waiting for one would hold the deploy forever. Mirrors the same decision
+   * on the server.
+   */
+  hasTestedRequirements?: boolean;
   // eslint-disable-next-line no-restricted-syntax
   lastDeploy?: LastDeployReading | null;
 }
@@ -112,9 +117,21 @@ export function changedForBp(changed: ChangedPath[], bpDir: string): ChangedPath
  */
 function testGate(
   tests: TestState | null | undefined,
-  hasRequirements: boolean | undefined,
+  hasTestedRequirements: boolean | undefined,
 ): { running: boolean; blocked: boolean; reason: string } {
-  if (hasRequirements === false) return { running: false, blocked: false, reason: '' };
+  // Evidence of failure first — a run that failed is a fact, and everything
+  // below it is inference about whether a verdict is owed at all.
+  const failing = tests ? tests.counts.fail + tests.counts.blocked : 0;
+  if (failing > 0) {
+    return {
+      running: false,
+      blocked: true,
+      reason: `${failing} test(s) are not passing. All tests must pass before this can be deployed.`,
+    };
+  }
+  if (hasTestedRequirements === false) {
+    return { running: false, blocked: false, reason: '' };
+  }
   if (!tests) {
     return {
       running: false,
@@ -138,14 +155,6 @@ function testGate(
         'The code changed after the last test run, so its results no longer describe it. Commit to start a new run.',
     };
   }
-  const failing = tests.counts.fail + tests.counts.blocked;
-  if (failing > 0) {
-    return {
-      running: false,
-      blocked: true,
-      reason: `${failing} test(s) are not passing. All tests must pass before this can be deployed.`,
-    };
-  }
   if (!tests.green) {
     return {
       running: false,
@@ -163,7 +172,7 @@ export function deployReadiness({
   bpDir,
   lastDeploy,
   tests,
-  hasRequirements,
+  hasTestedRequirements,
 }: DeployReadinessInput): DeployReadiness {
   const bpChanged = changedForBp(changed, bpDir);
   const dirty = bpChanged.length > 0;
@@ -178,7 +187,7 @@ export function deployReadiness({
   // existence.
   const nothingToPublish = known && aheadBp === 0 && behindBp === 0 && !dirty;
   const upToDate = nothingToPublish && !lastDeployFailed;
-  const gate = testGate(tests, hasRequirements);
+  const gate = testGate(tests, hasTestedRequirements);
   return {
     bpChanged,
     dirty,

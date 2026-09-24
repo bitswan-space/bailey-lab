@@ -197,7 +197,7 @@ function testState(over: Partial<import('./api').TestState> = {}) {
   };
 }
 
-test('a business process with no requirements is never gated on tests', () => {
+test('a business process with nothing testable is never gated on tests', () => {
   // "No tests" is not "failing tests". Gating here would stop every BP that
   // has not adopted the feature from ever deploying again.
   const r = deployReadiness({
@@ -206,7 +206,7 @@ test('a business process with no requirements is never gated on tests', () => {
     changedUnknown: false,
     bpDir: BP,
     tests: null,
-    hasRequirements: false,
+    hasTestedRequirements: false,
   });
   assert.equal(r.blockedByTests, false);
   assert.equal(r.actionable, true);
@@ -219,7 +219,7 @@ test('requirements that exist but have never been run block the deploy', () => {
     changedUnknown: false,
     bpDir: BP,
     tests: null,
-    hasRequirements: true,
+    hasTestedRequirements: true,
   });
   assert.equal(r.blockedByTests, true);
   assert.match(r.testsReason, /have not run/i);
@@ -231,7 +231,7 @@ test('a failing run blocks, and says how many', () => {
     changed: [],
     changedUnknown: false,
     bpDir: BP,
-    hasRequirements: true,
+    hasTestedRequirements: true,
     tests: testState({
       green: false,
       counts: { queued: 0, running: 0, pass: 1, fail: 2, no_test: 0, blocked: 1 },
@@ -247,7 +247,7 @@ test('a run in flight blocks, and is reported as running rather than failing', (
     changed: [],
     changedUnknown: false,
     bpDir: BP,
-    hasRequirements: true,
+    hasTestedRequirements: true,
     tests: testState({
       status: 'running',
       green: false,
@@ -265,7 +265,7 @@ test('a stale green run blocks — its verdicts describe code that changed since
     changed: [],
     changedUnknown: false,
     bpDir: BP,
-    hasRequirements: true,
+    hasTestedRequirements: true,
     tests: testState({ stale: true, green: false }),
   });
   assert.equal(r.blockedByTests, true);
@@ -278,7 +278,7 @@ test('requirements with no test do not block a green run', () => {
     changed: [],
     changedUnknown: false,
     bpDir: BP,
-    hasRequirements: true,
+    hasTestedRequirements: true,
     tests: testState({
       counts: { queued: 0, running: 0, pass: 1, fail: 0, no_test: 4, blocked: 0 },
     }),
@@ -294,7 +294,7 @@ test('nothing to publish is never "blocked by tests"', () => {
     changed: [],
     changedUnknown: false,
     bpDir: BP,
-    hasRequirements: true,
+    hasTestedRequirements: true,
     tests: null,
   });
   assert.equal(r.upToDate, true);

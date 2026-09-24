@@ -265,3 +265,61 @@ def test_test_file_discovery_matches_the_runners(tmp_path, monkeypatch):
     found = find_tested_requirement_ids("dev1", "shop", ["REQ-AAAA", "REQ-BBBB"])
     # Only a test file counts; prose mentioning an id does not.
     assert found == {"REQ-AAAA"}
+
+
+async def test_an_edit_does_not_block_a_bp_with_nothing_to_verify(
+    tmp_path, monkeypatch
+):
+    """Publishing commits first, which makes any previous run stale. A business
+    process with no tests has nothing to be stale ABOUT, so staleness must not
+    hold it back — otherwise every second deploy is refused."""
+    from app.routes.copies import _tests_gate_for
+    from app.test_run_manager import RUN_COMPLETED, VERDICT_NO_TEST, RequirementResult
+
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
+    bp_dir = tmp_path / "dev1" / "shop"
+    bp_dir.mkdir(parents=True)
+    (bp_dir / "testable-requirements.toml").write_text(
+        '[[requirement]]\nid = "REQ-AAAA"\n'
+    )
+
+    run = test_run_manager.start("dev1", "shop", "abc123", "v1", "tree1")
+    run.results["REQ-AAAA"] = RequirementResult(id="REQ-AAAA", verdict=VERDICT_NO_TEST)
+    test_run_manager.finish(run, RUN_COMPLETED)
+
+    async def moved(_path):
+        return "tree2"  # the v2 edit just landed
+
+    monkeypatch.setattr(test_runner, "working_tree_sha", moved)
+
+    gate = await _tests_gate_for("dev1", "shop")
+    assert gate["green"] is True
+
+
+async def test_a_stale_run_still_blocks_when_a_test_exists(tmp_path, monkeypatch):
+    """The other side: once something can be verified, a verdict that describes
+    code which has since changed is not evidence about what is being published."""
+    from app.routes.copies import _tests_gate_for
+    from app.test_run_manager import RUN_COMPLETED, VERDICT_PASS, RequirementResult
+
+    monkeypatch.setenv("BITSWAN_COPIES_DIR", str(tmp_path))
+    bp_dir = tmp_path / "dev1" / "shop"
+    (bp_dir / "backend").mkdir(parents=True)
+    (bp_dir / "testable-requirements.toml").write_text(
+        '[[requirement]]\nid = "REQ-AAAA"\n'
+    )
+    (bp_dir / "backend" / "app_test.go").write_text(
+        "func TestREQ_AAAA_Health(t *testing.T) {}\n"
+    )
+
+    run = test_run_manager.start("dev1", "shop", "abc123", "v1", "tree1")
+    run.results["REQ-AAAA"] = RequirementResult(id="REQ-AAAA", verdict=VERDICT_PASS)
+    test_run_manager.finish(run, RUN_COMPLETED)
+
+    async def moved(_path):
+        return "tree2"
+
+    monkeypatch.setattr(test_runner, "working_tree_sha", moved)
+
+    gate = await _tests_gate_for("dev1", "shop")
+    assert gate["green"] is False

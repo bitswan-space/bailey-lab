@@ -156,7 +156,9 @@ export function SyncDeployTab({
   // "requirements exist but nothing has run", which must block.
   const testState = useBpTestState(bp.name);
   const { requirements } = useRequirements(wt.name, bp.name);
-  const hasRequirements = requirements.length > 0;
+  // What can actually produce a verdict. A requirement with no test never
+  // will, so gating on it would wait forever — the server decides the same way.
+  const hasTestedRequirements = requirements.some((r) => r.hasTest);
 
   const readiness = deployReadiness({
     divergence: divergenceStale ? null : divergence,
@@ -165,7 +167,7 @@ export function SyncDeployTab({
     bpDir: bp.name,
     lastDeploy,
     tests: testState,
-    hasRequirements,
+    hasTestedRequirements,
   });
   const bpChanged = readiness.bpChanged as typeof changed;
   const adds = bpChanged.reduce((a, c) => a + c.adds, 0);
@@ -221,6 +223,14 @@ export function SyncDeployTab({
         // request. Fail loudly with what the server said — nothing was
         // deployed, and the fix is the Sync tab.
         toast.error(`Deploy failed: ${result.message}`);
+        return;
+      }
+      if (result.status === 'blocked_by_tests') {
+        // The server refused to publish: this BP's requirement tests have not
+        // passed for the commit the sync just made. NOTHING merged, so say so
+        // — falling through would leave the screen implying a deploy happened
+        // while Development still serves the previous version.
+        toast.error(`Deploy blocked: ${result.message}`, { duration: 12000 });
         return;
       }
       // Fast-forwarded into main. The sync endpoint ALREADY spawned the
