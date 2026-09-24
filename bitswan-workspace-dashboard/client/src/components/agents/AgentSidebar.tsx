@@ -84,6 +84,15 @@ export function AgentSidebar({ copy, bp }: AgentSidebarProps) {
     setFailed(false);
 
     const fromFrame = (ev: MessageEvent) => {
+      // Our own panel only. The injected bridge posts to `parent`, and this
+      // listener is on the shared window — so with more than one panel on the
+      // page (they are kept mounted across BP switches, see AgentPanels) every
+      // panel hears every other panel's messages. Relaying one to the wrong
+      // socket drives the wrong BP's agent: one typed message opened a
+      // conversation in three business processes at once, and one panel
+      // booting sent its channel-less `init` to all of them, which is the
+      // extension's signal to close every live channel it has.
+      if (!frameRef.current || ev.source !== frameRef.current.contentWindow) return;
       const data = ev.data as { [FRAME_KEY]?: boolean; payload?: unknown } | null;
       if (!data || data[FRAME_KEY] !== true) return;
       const payload = JSON.stringify(data.payload);

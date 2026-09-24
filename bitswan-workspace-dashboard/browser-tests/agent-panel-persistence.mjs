@@ -12,13 +12,26 @@
 // is a DOM fact. So this drives the real provider in Chromium and counts what
 // the server is asked for — a reload is a second GET of /sidebar/view, and a
 // panel that survived answers with the nonce it was first served.
+//
+// It also covers what keeping several panels alive at once exposed: the bridge
+// that carries a panel's messages to its websocket listens on the shared
+// window, so without a check of which frame spoke, every panel relayed every
+// other panel's traffic to its own agent. One typed message opened a
+// conversation in three business processes at once, and one panel booting sent
+// its channel-less `init` to all of them — the extension's signal to close
+// every live channel it has.
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, firefox } from 'playwright';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const dashboard = resolve(here, '..');
+// `ws` comes from the dashboard's own dependencies rather than being
+// duplicated here, the same way build-harness.mjs takes esbuild.
+const { WebSocketServer } = createRequire(resolve(dashboard, 'package.json'))('ws');
 
 const PAGE = `<!doctype html>
 <html>
@@ -28,11 +41,23 @@ const PAGE = `<!doctype html>
 <body><div id="root"></div><script src="/bundle-agent-panels.js"></script></body>
 </html>`;
 
-/** One served panel page, told apart from a re-served one by its nonce. */
+/**
+ * One served panel page, told apart from a re-served one by its nonce.
+ *
+ * It posts to `parent` exactly as the extension's real webview does — that is
+ * the bridge AgentSidebar relays to the panel's websocket, and the thing that
+ * must never reach another panel's socket.
+ */
 function panelPage(nonce, scope) {
   return `<!doctype html>
 <html><head><meta charset="utf-8" /><title>panel</title></head>
-<body data-nonce="${nonce}" data-scope="${scope}">panel ${scope} #${nonce}</body></html>`;
+<body data-nonce="${nonce}" data-scope="${scope}">panel ${scope} #${nonce}
+<script>
+  window.say = function (what) {
+    parent.postMessage({ __bitswanSidebar: true, payload: { from: ${JSON.stringify(scope)}, what } }, '*');
+  };
+</script>
+</body></html>`;
 }
 
 /** Every /sidebar/view the client asked for, in order. */
@@ -66,11 +91,28 @@ const server = createServer((req, res) => {
     return;
   }
   // /oauth2/auth included: no token here, which the client handles by sending
-  // none. The websocket upgrade is likewise left unanswered — the bridge
-  // failing to connect is not what this test is about, and the panel stays
-  // mounted through it.
+  // none. The websocket upgrade is handled below.
   res.writeHead(404, { 'content-type': 'text/plain' });
   res.end('not found');
+});
+
+// What each panel's websocket was told, keyed by the BP it was opened for.
+const heard = new Map();
+const wss = new WebSocketServer({ noServer: true });
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+  if (url.pathname !== '/ws/coding-agent-sidebar') {
+    socket.destroy();
+    return;
+  }
+  const bp = url.searchParams.get('bp');
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    ws.on('message', (raw) => {
+      const list = heard.get(bp) ?? [];
+      list.push(String(raw));
+      heard.set(bp, list);
+    });
+  });
 });
 
 await new Promise((done) => server.listen(0, '127.0.0.1', done));
@@ -168,6 +210,39 @@ await check('an evicted panel reloads on the next visit, like any first visit', 
   await switchTo('beta');
   eq(views.length, 6, 'beta was served again');
   eq(views[5], 'mine/beta', 'and it is beta that was served');
+});
+
+/** Ask one panel's page to post a message up to the dashboard. */
+async function sayFrom(bp, what) {
+  await page.frameLocator(frameFor(bp)).locator('body').evaluate((_b, w) => window.say(w), what);
+  await page.waitForTimeout(150);
+}
+
+/** Only `speaker` heard it, exactly once, and nobody else heard anything. */
+function onlyHeardBy(speaker, marker) {
+  eq(
+    (heard.get(speaker) ?? []).filter((m) => m.includes(marker)).length,
+    1,
+    `${speaker} relayed its own message once`,
+  );
+  const others = [...heard.entries()].filter(([bp, ms]) => bp !== speaker && ms.length > 0);
+  eq(others.map(([bp]) => bp).join(','), '', 'no other BP was spoken to');
+}
+
+// Two panels that are certainly still mounted: the last two shown.
+await switchTo('gamma');
+await switchTo('delta');
+
+await check('the panel you are looking at speaks only to its own BP', async () => {
+  heard.clear();
+  await sayFrom('delta', 'hello-from-delta');
+  onlyHeardBy('delta', 'hello-from-delta');
+});
+
+await check('a panel kept alive in the background speaks only to its own BP', async () => {
+  heard.clear();
+  await sayFrom('gamma', 'hello-from-gamma');
+  onlyHeardBy('gamma', 'hello-from-gamma');
 });
 
 console.log(`\n${checks - failures.length}/${checks} checks passed`);
