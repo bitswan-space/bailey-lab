@@ -10,6 +10,7 @@ import {
   useDeployDone,
 } from '@/components/workspace/WorkspaceProvider';
 import { WorkspaceView } from '@/components/views/WorkspaceView';
+import { AgentPanelProvider } from '@/components/agents/AgentPanels';
 import { DeleteCopyDialog } from '@/components/workspace/DeleteCopyDialog';
 import { BusyOverlay } from '@/components/workspace/BusyOverlay';
 import { useCopyStatus } from '@/hooks/useCopyStatus';
@@ -35,7 +36,12 @@ export function App() {
     <AuthGate>
       <SessionExpiredBanner />
       <WorkspaceProvider>
+        {/* Above every switch in the app on purpose: the Coding Agent panels
+            are mounted here so navigating between BPs (or tabs) never reloads
+            one, which would make the extension abandon a running agent. */}
+        <AgentPanelProvider>
           <Shell />
+        </AgentPanelProvider>
       </WorkspaceProvider>
     </AuthGate>
   );

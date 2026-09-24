@@ -12,7 +12,7 @@ import { FilesTab } from '@/components/files/FilesTab';
 import { DiffTab } from '@/components/diff/DiffTab';
 import { ContainersPane } from '@/components/agents/ContainersPane';
 import { Button } from '@/components/ui/button';
-import { AgentSidebar } from '@/components/agents/AgentSidebar';
+import { useAgentPanelPane } from '@/components/agents/AgentPanels';
 import { useLatestAgentSession } from '@/hooks/useLatestAgentSession';
 import { cn } from '@/lib/utils';
 import { useUrlEnum, useUrlFlag } from '@/lib/urlState';
@@ -22,8 +22,8 @@ interface AgentFilesTabProps {
   bp: string;
   branch: string;
   /** True only when the Coding Agent tab is the active tab (the pane stays
-   *  mounted-but-hidden otherwise). Gates auto-reattach so we don't spin up
-   *  sessions for BPs the user is only browsing on other tabs. */
+   *  mounted-but-hidden otherwise). Gates the panel so we don't spin up an
+   *  agent for BPs the user is only browsing on other tabs. */
   tabVisible?: boolean;
 }
 
@@ -89,6 +89,10 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
     setShowDiff(false);
   }, [sub, copy, setShowDiff]);
 
+  // The Claude Code panel for this BP, drawn over the chat pane below. It
+  // outlives this component — switching BPs or tabs only hides it — because
+  // reloading that iframe is what makes the extension abandon a running agent.
+  const chatPaneRef = useAgentPanelPane(copy, bp, tabVisible && sub === 'chat');
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -127,16 +131,17 @@ export function AgentFilesTab({ copy, bp, branch: _branch, tabVisible = true }: 
         )}
       </div>
 
-      {/* Chat pane — always mounted (hidden when on Files) so the live
-          terminal portal target survives the toggle. */}
+      {/* Chat pane — an empty box the agent panel is drawn over. The panel
+          itself is mounted by AgentPanelProvider, above every BP switch in
+          the app, because reloading that iframe makes the extension treat it
+          as a fresh client and kill the running agent. */}
       <main
+        ref={chatPaneRef}
         className={cn(
           'relative min-h-0 flex-1 overflow-hidden bg-zinc-50',
           sub !== 'chat' && 'hidden',
         )}
-      >
-        <AgentSidebar copy={copy} bp={bp} />
-      </main>
+      />
 
       {/* Files pane — mounted alongside so toggling back to Chat doesn't
           remount (and re-fetch) the tree. */}

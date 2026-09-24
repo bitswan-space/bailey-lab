@@ -107,8 +107,9 @@ export function WorkspaceView({
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
   // Opening the agent, optionally with something to say. A running session has
   // no command for typing into it, so a prompt is handed over the only way the
-  // extension offers: it is seeded for the panel's next load, and the panel is
-  // reloaded. The person reads it and presses send.
+  // extension offers: it opens a conversation with the text already in the
+  // composer — delivered straight to the panel when one is attached, parked
+  // for the next one when not. The person reads it and presses send.
   const showAgents = useCallback(
     (prompt?: string) => {
       onTab('agent');

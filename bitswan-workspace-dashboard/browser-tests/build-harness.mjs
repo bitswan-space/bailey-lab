@@ -1,4 +1,4 @@
-// Bundles the real RequirementsTable into a standalone page for the browser
+// Bundles the real components under test into standalone pages for the browser
 // tests. Nothing is stubbed: the component under test is the shipped one, with
 // only its data and callbacks supplied by the harness.
 import { createRequire } from 'node:module';
@@ -22,19 +22,26 @@ try {
   process.exit(1);
 }
 
-await build({
-  entryPoints: [resolve(here, 'harness-requirements.tsx')],
-  outfile: resolve(here, 'bundle.js'),
-  bundle: true,
-  format: 'iife',
-  jsx: 'automatic',
-  // The client's `@/*` path alias, resolved for a standalone bundle.
-  alias: { '@': resolve(dashboard, 'client/src') },
-  absWorkingDir: dashboard,
-  // This directory is not an npm workspace, so bare imports need an explicit
-  // resolution root.
-  nodePaths: [resolve(dashboard, 'node_modules')],
-  loader: { '.css': 'empty' },
-  define: { 'process.env.NODE_ENV': '"development"' },
-  logLevel: 'warning',
-});
+const HARNESSES = [
+  ['harness-requirements.tsx', 'bundle.js'],
+  ['harness-agent-panels.tsx', 'bundle-agent-panels.js'],
+];
+
+for (const [entry, out] of HARNESSES) {
+  await build({
+    entryPoints: [resolve(here, entry)],
+    outfile: resolve(here, out),
+    bundle: true,
+    format: 'iife',
+    jsx: 'automatic',
+    // The client's `@/*` path alias, resolved for a standalone bundle.
+    alias: { '@': resolve(dashboard, 'client/src') },
+    absWorkingDir: dashboard,
+    // This directory is not an npm workspace, so bare imports need an explicit
+    // resolution root.
+    nodePaths: [resolve(dashboard, 'node_modules')],
+    loader: { '.css': 'empty' },
+    define: { 'process.env.NODE_ENV': '"development"' },
+    logLevel: 'warning',
+  });
+}

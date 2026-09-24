@@ -4,8 +4,8 @@
   "type": "module",
   "description": "Browser tests for dashboard components that cannot be covered by the client's node:test runner.",
   "scripts": {
-    "test": "node build-harness.mjs && node treegrid-keyboard.mjs",
-    "test:firefox": "node build-harness.mjs && BROWSER=firefox node treegrid-keyboard.mjs"
+    "test": "node build-harness.mjs && node treegrid-keyboard.mjs && node agent-panel-persistence.mjs",
+    "test:firefox": "node build-harness.mjs && BROWSER=firefox node treegrid-keyboard.mjs && BROWSER=firefox node agent-panel-persistence.mjs"
   },
   "devDependencies": {
     "playwright": "^1.48.0"

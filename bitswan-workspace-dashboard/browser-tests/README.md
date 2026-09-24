@@ -38,6 +38,18 @@ into the tab order, that `Tab` still escapes rather than being trapped, that
 `aria-level` reports tree depth, and that collapsing a subtree never strands
 focus on `<body>`.
 
+`agent-panel-persistence.mjs` — the Coding Agent panel surviving navigation.
+The panel is an iframe hosting the Claude Code webview, and the extension
+behind it reads a reloaded page as a fresh client: it closes every live
+channel, so a reload kills the running agent. The test drives the real
+`AgentPanelProvider` against a stub server and asserts what only a browser can
+say — that switching business processes, and leaving the tab, never re-fetches
+`/sidebar/view`, that the panel's own page (identified by a nonce the server
+stamps into it) is the one it was first served, and that only the panel past
+the cap is dropped. It serves the harness over HTTP rather than `file://`
+because the panel asks the server whether there is an extension before it
+mounts anything.
+
 Adding a case? Assert on focus via `document.activeElement`, and note the trap
 documented in the script: `page.click()` focuses the element it clicks, which
 can mask exactly the focus bug you are trying to catch. Use
