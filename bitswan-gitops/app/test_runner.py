@@ -31,6 +31,7 @@ from app.services.requirement_verdicts import (
 )
 from app.services.testable_requirements import (
     Requirement,
+    find_tested_requirement_ids,
     read_requirements,
     read_testing_config,
     requirement_token,
@@ -520,6 +521,13 @@ async def execute_run(
             logger.warning("wake before tests failed for %s/%s: %s", copy, bp, e)
 
     by_id = {r.id: r for r in requirements}
+    # Which requirements actually have a test. A business process is scaffolded
+    # with two automations, so until someone writes a test and says which
+    # container it belongs in, `resolve_target` cannot tell them apart — and
+    # reporting that as a failure marks requirements red for a configuration
+    # nobody needs yet, and holds the deploy back on it.
+    tested = find_tested_requirement_ids(copy, bp, [r.id for r in requirements])
+
     targets: dict[str, _Target] = {}
     for req in requirements:
         target = resolve_target(req, cfg, members)
@@ -558,6 +566,13 @@ async def execute_run(
 
                 target = targets[req_id]
                 if target.error:
+                    # Where to run it only matters once there is something to
+                    # run. A requirement nobody has written a test for is
+                    # untested, not failing — the configuration becomes a real
+                    # problem the moment a test exists, and says so then.
+                    if req_id not in tested:
+                        result.verdict = VERDICT_NO_TEST
+                        continue
                     result.verdict = VERDICT_FAIL
                     result.output = target.error
                     continue

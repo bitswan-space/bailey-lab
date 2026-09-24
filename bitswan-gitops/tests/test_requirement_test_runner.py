@@ -304,6 +304,12 @@ async def test_misconfiguration_fails_the_requirement_with_the_reason(
         '[[requirement]]\nid = "REQ-AAAA"\n',
         'process-id = "x"\n\n[testing]\nframework = "go"\n',
     )
+    # A test exists, so where to run it is a question that now has to be
+    # answered — without one the requirement is merely untested.
+    (bp_dir / "backend").mkdir()
+    (bp_dir / "backend" / "app_test.go").write_text(
+        "func TestREQ_AAAA_Health(t *testing.T) {}\n"
+    )
     _install(monkeypatch, [_member("backend"), _member("frontend")], FakeDriver({}))
 
     run = await test_runner.execute_run("dev1", "shop")
@@ -698,3 +704,52 @@ async def test_a_legacy_runner_is_told_what_is_wrong_with_it(bp_dir, monkeypatch
     # the requirement meant the config that most needs explaining never got it.
     assert "-json" in result.output
     assert "drop `runner`" in result.output
+
+
+# ---- a freshly scaffolded business process ----------------------------------
+#
+# A BP is created with two automations (a frontend and a backend) and no
+# [testing] section, so the container for a test is ambiguous. That is a real
+# configuration problem — but only once a test exists. Reporting it before then
+# marked every requirement red and held the deploy back on a setting nobody
+# needed yet, which is what broke the e2e walkthrough.
+
+
+async def test_untested_requirements_in_an_unconfigured_bp_are_not_failures(
+    bp_dir, monkeypatch
+):
+    _write(
+        bp_dir,
+        '[[requirement]]\nid = "REQ-AAAA"\ndescription = "VAT matches the PO"\n\n'
+        '[[requirement]]\nid = "REQ-BBBB"\ndescription = "Held for approval"\n\n'
+        '[[requirement]]\nid = "REQ-CCCC"\ndescription = "No duplicate posting"\n',
+        'process-id = "x"\nname = "bp"\n',  # no [testing] at all
+    )
+    _install(monkeypatch, [_member("backend"), _member("frontend")], FakeDriver({}))
+
+    run = await test_runner.execute_run("dev1", "shop")
+
+    assert [r.verdict for r in run.results.values()] == [VERDICT_NO_TEST] * 3
+    # And so the deploy gate lets this business process through.
+    assert run.is_green()
+
+
+async def test_the_ambiguity_is_reported_once_a_test_exists(bp_dir, monkeypatch):
+    _write(
+        bp_dir,
+        '[[requirement]]\nid = "REQ-AAAA"\n\n[[requirement]]\nid = "REQ-BBBB"\n',
+        'process-id = "x"\n',  # still no [testing]
+    )
+    (bp_dir / "backend").mkdir()
+    (bp_dir / "backend" / "app_test.go").write_text(
+        "func TestREQ_AAAA_Health(t *testing.T) {}\n"
+    )
+    _install(monkeypatch, [_member("backend"), _member("frontend")], FakeDriver({}))
+
+    run = await test_runner.execute_run("dev1", "shop")
+
+    # The one with a test cannot be run, and says exactly why.
+    assert run.results["REQ-AAAA"].verdict == VERDICT_FAIL
+    assert "ambiguous" in run.results["REQ-AAAA"].output
+    # The one without is simply untested.
+    assert run.results["REQ-BBBB"].verdict == VERDICT_NO_TEST
