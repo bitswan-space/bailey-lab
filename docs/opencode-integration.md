@@ -69,8 +69,10 @@ the Claude extension use; sshd's ForceCommand never runs for it.
   re-applies `X-Forwarded-Email/-Groups/-Access-Token` to every request and
   browsers add cookies and `Authorization`; none of it crosses into the
   coding-agent container, where model-chosen code runs.
-- `?directory=` (and `location[directory]`) must point inside
-  `/workspace/copies/`. Sessions the dashboard creates are scoped to the BP
+- `?directory=` (and `location[directory]`) must name the copies tree: its
+  root, `/workspace/copies` (the server's working directory, which the UI
+  names as its default location on every load, sometimes as an empty value),
+  or a path inside it. Sessions the dashboard creates are scoped to the BP
   clone; the UI's own project picker can open other directories, and the
   agent can `cd` anywhere its uid allows, as with Claude Code — this is not a
   sandbox.
