@@ -32,10 +32,15 @@ type sidecarService interface {
 // resyncs on an interval. Blocks (run it in its own goroutine).
 func startServiceReconciler() {
 	reconcileEnabledServices()
+	syncOpenCodeProviderFiles()
 	t := time.NewTicker(serviceReconcileInterval)
 	defer t.Stop()
 	for range t.C {
 		reconcileEnabledServices()
+		// The server-wide OpenCode provider file rides the same tick: a
+		// workspace enabled or restored since the setting was saved gets its
+		// copy within a minute. Idempotent — it writes only on a change.
+		syncOpenCodeProviderFiles()
 	}
 }
 

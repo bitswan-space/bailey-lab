@@ -1,0 +1,442 @@
+package daemon
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/bitswan-space/bitswan-workspaces/internal/services"
+)
+
+// A server-wide default model provider for OpenCode.
+//
+// OpenCode, the second coding agent in every workspace's Coding Agent tab,
+// takes provider credentials from the environment of its `opencode serve`
+// process (ANTHROPIC_API_KEY makes the anthropic provider appear, and so on)
+// and its default model from the `model` key of its config. Without either,
+// each person connects a provider in OpenCode's own UI, and until they do
+// OpenCode answers through its built-in hosted provider.
+//
+// This setting hands every workspace one key instead:
+//
+//	console  POST /bailey/api/admin/opencode-provider
+//	  → server_settings[opencode_default_provider]           (bailey.db; the key never leaves the server)
+//	  → <ws>/coding-agent-home/.bitswan/opencode-provider.env (every workspace with the agent enabled;
+//	                                                            /home/agent/.bitswan/… inside the container)
+//	  → bitswan-opencode-server `start` sources it and starts `opencode serve` with the
+//	    provider's env var set and a generated config carrying `model` — and, when
+//	    restricted, a policy that hides every other provider.
+//
+// A file in the agent's home rather than compose environment: nothing to
+// regenerate and no container to restart when the key changes, the key never
+// lands in the world-readable compose file, and every server started after a
+// change picks it up (a running one on its next start). The file is written on
+// save, when the agent is enabled for a workspace, and on every reconcile tick;
+// it is removed the same way when the setting is disabled or cleared.
+//
+// Exposure, and the console says so: everything in the agent container runs
+// as the agent user, so every coding-agent run in every workspace can read the
+// key. That is what "every workspace uses this key" means.
+
+// openCodeProvider is one entry of the fixed table the console offers. The ids
+// and env names are OpenCode's own: its catalogue (models.dev) keys providers
+// by these ids and names the env var each one reads its key from. Re-check
+// them on an OpenCode bump (docs/opencode-integration.md, upgrade section).
+type openCodeProvider struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Env  string `json:"env"`
+	// ModelHint is a model id the provider serves today, as the console's
+	// placeholder; the admin types the one they want.
+	ModelHint string `json:"model_hint"`
+}
+
+var openCodeProviders = []openCodeProvider{
+	{ID: "anthropic", Name: "Anthropic", Env: "ANTHROPIC_API_KEY", ModelHint: "claude-sonnet-4-5"},
+	{ID: "openai", Name: "OpenAI", Env: "OPENAI_API_KEY", ModelHint: "gpt-5"},
+	{ID: "google", Name: "Google Gemini", Env: "GEMINI_API_KEY", ModelHint: "gemini-2.5-pro"},
+	{ID: "openrouter", Name: "OpenRouter", Env: "OPENROUTER_API_KEY", ModelHint: "anthropic/claude-sonnet-4.5"},
+	{ID: "mistral", Name: "Mistral", Env: "MISTRAL_API_KEY", ModelHint: "mistral-large-latest"},
+	{ID: "groq", Name: "Groq", Env: "GROQ_API_KEY", ModelHint: "llama-3.3-70b-versatile"},
+	{ID: "xai", Name: "xAI", Env: "XAI_API_KEY", ModelHint: "grok-4.7"},
+	{ID: "deepseek", Name: "DeepSeek", Env: "DEEPSEEK_API_KEY", ModelHint: "deepseek-v4-pro"},
+	{ID: "opencode", Name: "OpenCode Zen", Env: "OPENCODE_API_KEY", ModelHint: "gpt-5"},
+}
+
+func openCodeProviderByID(id string) (openCodeProvider, bool) {
+	for _, p := range openCodeProviders {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return openCodeProvider{}, false
+}
+
+// openCodeProviderConfig is the stored setting: one JSON blob under
+// settingOpenCodeProvider, the way the SSO setting is kept. The key stays
+// inside it; nothing but the env file ever reads it back out.
+type openCodeProviderConfig struct {
+	Enabled   bool   `json:"enabled"`
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	APIKey    string `json:"api_key"`
+	Restrict  bool   `json:"restrict"`
+	UpdatedAt string `json:"updated_at"`
+	UpdatedBy string `json:"updated_by"`
+}
+
+func getOpenCodeProvider() (openCodeProviderConfig, error) {
+	raw, err := dbGetSetting(settingOpenCodeProvider)
+	if err != nil {
+		return openCodeProviderConfig{}, err
+	}
+	if strings.TrimSpace(raw) == "" {
+		return openCodeProviderConfig{}, nil
+	}
+	var c openCodeProviderConfig
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		return openCodeProviderConfig{}, fmt.Errorf("stored OpenCode provider setting is corrupt: %w", err)
+	}
+	return c, nil
+}
+
+func setOpenCodeProvider(c openCodeProviderConfig, by string) error {
+	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	c.UpdatedBy = by
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return dbSetSetting(settingOpenCodeProvider, string(b), by)
+}
+
+// hasControlChars reports a byte that no provider id, model id or API key
+// contains — and that a line-oriented env file must never be handed.
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
+// validateOpenCodeProvider checks a setting about to be stored. An enabled
+// setting needs all three of provider, model and key; a disabled one may be
+// partial (it keeps whatever was there for a one-click re-enable), but what it
+// carries must still be well-formed.
+func validateOpenCodeProvider(c openCodeProviderConfig) error {
+	if c.Provider != "" || c.Enabled {
+		if _, ok := openCodeProviderByID(c.Provider); !ok {
+			return fmt.Errorf("choose a provider from the list")
+		}
+	}
+	if c.Enabled && c.Model == "" {
+		return fmt.Errorf("a model is required — it is the one OpenCode uses unless a person picks another")
+	}
+	if strings.Contains(c.Model, "#") || strings.ContainsAny(c.Model, " \t") || hasControlChars(c.Model) {
+		return fmt.Errorf("the model id may not contain spaces or '#'")
+	}
+	if c.Enabled && c.APIKey == "" {
+		return fmt.Errorf("an API key is required")
+	}
+	if hasControlChars(c.APIKey) {
+		return fmt.Errorf("the API key contains characters that cannot be part of a key")
+	}
+	return nil
+}
+
+// --- the file in each workspace's agent home ---------------------------------
+
+const openCodeProviderEnvFile = "opencode-provider.env"
+
+// openCodeProviderEnvPath is where a workspace's agent finds the file. The
+// coding-agent compose mounts coding-agent-home at /home/agent, so inside the
+// container this is /home/agent/.bitswan/opencode-provider.env — the path
+// bitswan-opencode-server reads.
+func openCodeProviderEnvPath(workspacePath string) string {
+	return filepath.Join(workspacePath, "coding-agent-home", ".bitswan", openCodeProviderEnvFile)
+}
+
+// shellSingleQuote quotes s for a POSIX shell. Inside single quotes nothing
+// expands, and an embedded quote becomes '\”. The file is sourced by bash,
+// where a double-quoted $, backtick or backslash would expand or run — so it
+// is never strconv.Quote.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// renderOpenCodeProviderEnv is the file for c, or "" when there should be no
+// file at all (disabled or incomplete). One NAME='value' per line: the
+// BITSWAN_OPENCODE_* lines tell the launcher what to generate, the last line
+// is the provider's own env var, the only place the key ever appears.
+func renderOpenCodeProviderEnv(c openCodeProviderConfig) string {
+	if !c.Enabled {
+		return ""
+	}
+	p, ok := openCodeProviderByID(c.Provider)
+	if !ok || c.Model == "" || c.APIKey == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("# Written by the Bailey automation server from the server-wide OpenCode\n")
+	b.WriteString("# provider setting; overwritten on every change. bitswan-opencode-server\n")
+	b.WriteString("# sources this file when it starts a server.\n")
+	fmt.Fprintf(&b, "BITSWAN_OPENCODE_PROVIDER=%s\n", shellSingleQuote(p.ID))
+	fmt.Fprintf(&b, "BITSWAN_OPENCODE_PROVIDER_ENV=%s\n", shellSingleQuote(p.Env))
+	fmt.Fprintf(&b, "BITSWAN_OPENCODE_MODEL=%s\n", shellSingleQuote(c.Model))
+	fmt.Fprintf(&b, "BITSWAN_OPENCODE_RESTRICT=%s\n", shellSingleQuote(strconv.FormatBool(c.Restrict)))
+	fmt.Fprintf(&b, "%s=%s\n", p.Env, shellSingleQuote(c.APIKey))
+	return b.String()
+}
+
+// The agent user inside the coding-agent image; services.CodingAgentService
+// hands it the agent home the same way when the agent is enabled.
+const agentUID, agentGID = 1000, 1000
+
+// chownToAgent gives the agent user a path the daemon wrote into the agent's
+// home. Mirrors CodingAgentService.Enable: plain chown as root, sudo otherwise.
+// A variable so tests, which need no root, can watch it instead.
+var chownToAgent = func(path string) error {
+	if os.Geteuid() == 0 {
+		return os.Chown(path, agentUID, agentGID)
+	}
+	out, err := exec.Command("sudo", "chown", strconv.Itoa(agentUID)+":"+strconv.Itoa(agentGID), path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// openCodeProviderSyncMu serialises syncs: the reconcile tick and a console
+// save can run at once, and each must see the setting as it is when it runs,
+// or the tick could put a just-replaced key back until the next tick.
+var openCodeProviderSyncMu sync.Mutex
+
+// syncOpenCodeProviderFiles brings every workspace's copy of the provider
+// file in line with the setting. Per-workspace failures are logged and skipped:
+// one broken workspace must not keep the others from getting the key.
+func syncOpenCodeProviderFiles() {
+	openCodeProviderSyncMu.Lock()
+	defer openCodeProviderSyncMu.Unlock()
+	cfg, err := getOpenCodeProvider()
+	if err != nil {
+		fmt.Printf("opencode provider: could not read the setting: %v\n", err)
+		return
+	}
+	content := renderOpenCodeProviderEnv(cfg)
+	names, err := listWorkspaceNames()
+	if err != nil {
+		fmt.Printf("opencode provider: could not list workspaces: %v\n", err)
+		return
+	}
+	for _, ws := range names {
+		if err := syncOpenCodeProviderFileWith(ws, content); err != nil {
+			fmt.Printf("opencode provider: workspace '%s': %v\n", ws, err)
+		}
+	}
+}
+
+// syncOpenCodeProviderFileForWorkspace is the one-workspace form, for the
+// moment the agent is enabled in a workspace.
+func syncOpenCodeProviderFileForWorkspace(ws string) error {
+	openCodeProviderSyncMu.Lock()
+	defer openCodeProviderSyncMu.Unlock()
+	cfg, err := getOpenCodeProvider()
+	if err != nil {
+		return err
+	}
+	return syncOpenCodeProviderFileWith(ws, renderOpenCodeProviderEnv(cfg))
+}
+
+func syncOpenCodeProviderFileWith(ws, content string) error {
+	// A recovery is replacing the workspace directory, and a trashed workspace
+	// has no running agent; neither is touched (listWorkspaceNames lists both).
+	if workspaceUnderRecovery(ws) || IsWorkspaceTrashed(ws) {
+		return nil
+	}
+	svc, err := services.NewCodingAgentService(ws)
+	if err != nil || !svc.IsEnabled() {
+		return nil
+	}
+	return writeOpenCodeProviderFile(svc.WorkspacePath, content)
+}
+
+// writeOpenCodeProviderFile puts content at the workspace's provider path, or
+// removes the file when content is empty. A workspace whose agent home does
+// not exist is skipped: Enable creates the home, this never does.
+//
+// It writes only on a change, through a temp file in the same directory, and
+// hands the directory and the file to the agent user before the rename. The
+// daemon runs as root and the container's own chown of /home/agent runs only
+// when the container starts, so a root-owned 0600 file dropped into a running
+// container would be unreadable by the agent — and the next server would
+// start without the provider, silently.
+func writeOpenCodeProviderFile(workspacePath, content string) error {
+	home := filepath.Join(workspacePath, "coding-agent-home")
+	if st, err := os.Stat(home); err != nil || !st.IsDir() {
+		return nil
+	}
+	path := openCodeProviderEnvPath(workspacePath)
+	if content == "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", path, err)
+		}
+		return nil
+	}
+	if cur, err := os.ReadFile(path); err == nil && string(cur) == content {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := chownToAgent(dir); err != nil {
+		return fmt.Errorf("chown %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, "."+openCodeProviderEnvFile+".*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	fail := func(err error) error {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return fail(err)
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fail(err)
+	}
+	if err := chownToAgent(tmpPath); err != nil {
+		return fail(fmt.Errorf("chown %s: %w", tmpPath, err))
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fail(fmt.Errorf("rename into place: %w", err))
+	}
+	return nil
+}
+
+// --- the admin API --------------------------------------------------------------
+
+// openCodeProviderDTO is what the console sees. The key itself is never in it;
+// key_set and the last few characters are enough to tell which key is stored.
+type openCodeProviderDTO struct {
+	Enabled   bool               `json:"enabled"`
+	Provider  string             `json:"provider"`
+	Model     string             `json:"model"`
+	Restrict  bool               `json:"restrict"`
+	KeySet    bool               `json:"key_set"`
+	KeyHint   string             `json:"key_hint,omitempty"`
+	UpdatedAt string             `json:"updated_at,omitempty"`
+	UpdatedBy string             `json:"updated_by,omitempty"`
+	Providers []openCodeProvider `json:"providers"`
+}
+
+func openCodeProviderDTOFrom(c openCodeProviderConfig) openCodeProviderDTO {
+	d := openCodeProviderDTO{
+		Enabled:   c.Enabled,
+		Provider:  c.Provider,
+		Model:     c.Model,
+		Restrict:  c.Restrict,
+		KeySet:    c.APIKey != "",
+		UpdatedAt: c.UpdatedAt,
+		UpdatedBy: c.UpdatedBy,
+		Providers: openCodeProviders,
+	}
+	if n := len(c.APIKey); n >= 12 {
+		d.KeyHint = c.APIKey[n-4:]
+	}
+	return d
+}
+
+func writeOpenCodeProviderDTO(w http.ResponseWriter) {
+	c, err := getOpenCodeProvider()
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, openCodeProviderDTOFrom(c))
+}
+
+// GET /bailey/api/admin/opencode-provider
+func handleOpenCodeProviderGet(w http.ResponseWriter, r *http.Request) {
+	writeOpenCodeProviderDTO(w)
+}
+
+// openCodeProviderRequest is the POST body. A blank api_key keeps the stored
+// key (the console never has it to send back); enabled:false keeps everything
+// and removes the files, so one click brings it back; clear:true forgets the
+// setting, key included. There are no DELETE routes in the dispatcher, so
+// clearing is a POST like the default-images setting.
+type openCodeProviderRequest struct {
+	Enabled  bool   `json:"enabled"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	APIKey   string `json:"api_key"`
+	Restrict bool   `json:"restrict"`
+	Clear    bool   `json:"clear"`
+}
+
+// POST /bailey/api/admin/opencode-provider
+func handleOpenCodeProviderSet(w http.ResponseWriter, r *http.Request, by string) {
+	var req openCodeProviderRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+		writeJSONError(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Clear {
+		if err := dbDeleteSetting(settingOpenCodeProvider); err != nil {
+			writeJSONError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		syncOpenCodeProviderFiles()
+		_ = recordEvent(by, "opencode.provider.clear", "")
+		writeOpenCodeProviderDTO(w)
+		return
+	}
+
+	existing, err := getOpenCodeProvider()
+	if err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	c := openCodeProviderConfig{
+		Enabled:  req.Enabled,
+		Provider: strings.TrimSpace(req.Provider),
+		Model:    strings.TrimSpace(req.Model),
+		APIKey:   strings.TrimSpace(req.APIKey),
+		Restrict: req.Restrict,
+	}
+	if c.APIKey == "" {
+		c.APIKey = existing.APIKey
+	}
+	if err := validateOpenCodeProvider(c); err != nil {
+		writeJSONCodeError(w, err.Error(), "invalid_config", http.StatusBadRequest)
+		return
+	}
+	if err := setOpenCodeProvider(c, by); err != nil {
+		writeJSONError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	syncOpenCodeProviderFiles()
+	if c.Enabled {
+		_ = recordEvent(by, "opencode.provider.configure", c.Provider+"/"+c.Model)
+	} else {
+		_ = recordEvent(by, "opencode.provider.disable", c.Provider)
+	}
+	writeOpenCodeProviderDTO(w)
+}

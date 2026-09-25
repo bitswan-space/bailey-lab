@@ -309,6 +309,18 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleSSOTest(w, r)
 			return
 		}
+	case "/bailey/api/admin/opencode-provider":
+		switch r.Method {
+		case http.MethodGet:
+			handleOpenCodeProviderGet(w, r)
+			return
+		case http.MethodPost:
+			handleOpenCodeProviderSet(w, r, email)
+			return
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 	case "/bailey/api/admin/siem":
 		switch r.Method {
 		case http.MethodGet:

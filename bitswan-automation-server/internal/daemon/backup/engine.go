@@ -294,11 +294,18 @@ func resticStep(ctx context.Context, restic *Restic, tags []string, path string,
 // restore can reproduce from the registry. The directory itself is recreated on
 // recovery by ensureWorkspaceVolumeDirs — an empty one is all the dashboard
 // needs to download into.
+//
+// Also excluded: coding-agent-home/.bitswan/opencode-provider.env, the copy of
+// the server-wide OpenCode provider key the daemon writes into every workspace
+// (daemon/opencode_provider.go). The setting in bailey.db is the source of
+// truth and the daemon regenerates the file within a minute of a recovery, so
+// capturing it would only let a restore resurrect a key that was rotated since.
 func (e *Engine) backupWorkspace(ctx context.Context, restic *Restic, ws string, log func(string)) WorkspaceReport {
 	report := WorkspaceReport{}
 
 	report["files"] = resticStep(ctx, restic, []string{"files", "ws:" + ws}, workspaceDir(ws),
-		filepath.Join(workspaceDir(ws), "claude-extension"))
+		filepath.Join(workspaceDir(ws), "claude-extension"),
+		filepath.Join(workspaceDir(ws), "coding-agent-home", ".bitswan", "opencode-provider.env"))
 
 	client, wctx, err := driverForWorkspace(ws)
 	if err != nil {

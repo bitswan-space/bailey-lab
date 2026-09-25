@@ -17,6 +17,8 @@ import (
 const (
 	settingDefaultGitopsImage    = "default_gitops_image"
 	settingDefaultDashboardImage = "default_dashboard_image"
+	// The server-wide default model provider for OpenCode (opencode_provider.go).
+	settingOpenCodeProvider = "opencode_default_provider"
 )
 
 // dbGetSetting returns ("", nil) when the key is absent — distinguish

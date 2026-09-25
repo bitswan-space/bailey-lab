@@ -828,6 +828,12 @@ func (s *Server) enableCodingAgentService(req ServiceEnableRequest) error {
 	if err := agentService.Enable(secret, image, metadata.Domain, devConfig); err != nil {
 		return err
 	}
+	// Hand the new agent home the server-wide OpenCode provider (if one is
+	// set) before the first server starts in it, rather than a minute later
+	// on the reconcile tick.
+	if err := syncOpenCodeProviderFileForWorkspace(req.Workspace); err != nil {
+		fmt.Printf("Warning: could not write the OpenCode provider file for '%s': %v\n", req.Workspace, err)
+	}
 
 	return agentService.StartContainer()
 }
