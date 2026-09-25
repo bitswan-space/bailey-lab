@@ -170,23 +170,79 @@ dashboard only.
 2.0.16 in this workspace: with nothing connected, `GET /api/provider` lists
 only `opencode` (OpenCode's hosted models), and a prompt sent to a fresh
 session was answered by it — code and prompt left the workspace for a
-third-party service without anyone configuring anything. Whether that default
-is acceptable is a workspace policy question. The switch is one statement in
-`opencode.default.json`:
+third-party service without anyone configuring anything. The server-wide
+provider below, with its restrict toggle on, is the switch: a denied provider
+disappears from the catalogue and model selection even with valid credentials,
+the built-in one included.
 
-```json
-"experimental": { "policies": [{ "action": "provider.use", "resource": "opencode", "effect": "deny" }] }
-```
+## Server-wide default provider
 
-A denied provider disappears from the catalog and model selection even with
-valid credentials. The same mechanism (`provider.use` deny `*`, then allow a
-list) restricts a workspace to approved providers; not wired up yet.
+An admin can give every workspace's OpenCode one LLM API key in the Bailey
+console (Admin → Coding agents), so nobody has to bring a key and the
+organisation decides where prompts go. The pieces, in the order a key travels:
+
+- **The setting** — one JSON blob in the daemon's `server_settings` table
+  (`opencode_default_provider`: enabled, provider id, model id, key, restrict,
+  updated by/at), read and written through `GET`/`POST
+  /bailey/api/admin/opencode-provider`, admin only
+  (`internal/daemon/opencode_provider.go`). The response never carries the key,
+  only that one is stored and its last four characters. A blank key on save
+  keeps the stored one; `enabled: false` keeps everything and removes the
+  files; `clear: true` forgets it all. The provider list is a fixed table in
+  the daemon — id, name, env var, a model hint — and the ids and env names are
+  OpenCode's own, from its catalogue at models.dev.
+- **The file** — `<ws>/coding-agent-home/.bitswan/opencode-provider.env`,
+  which the agent sees as `/home/agent/.bitswan/opencode-provider.env`. One
+  `NAME='value'` line per setting, POSIX single-quoted because the launcher
+  sources it with bash: `BITSWAN_OPENCODE_PROVIDER`,
+  `BITSWAN_OPENCODE_PROVIDER_ENV`, `BITSWAN_OPENCODE_MODEL`,
+  `BITSWAN_OPENCODE_RESTRICT`, then the provider's own env var
+  (`ANTHROPIC_API_KEY='…'`) — the only place the key appears. The daemon
+  writes it on save, when the agent is enabled in a workspace, and on every
+  reconcile tick (60 s); only on a change, mode 600, owned by the agent user
+  (the container's own chown runs only at its start), through a temp file and
+  a rename. It removes the file when the setting is off. Workspaces in the
+  trash or under recovery are left alone, and a missing agent home is never
+  created. The file is excluded from workspace backups: the setting is the
+  source of truth and the sync regenerates it after a recovery.
+- **The launcher** — `bitswan-opencode-server start` sources the file when it
+  is there and complete, exports the provider's env var for `opencode serve`,
+  and writes `$CLAUDE_CONFIG_DIR/opencode/opencode.generated.json`: the
+  document `OPENCODE_CONFIG` names (the image config) plus
+  `model: "<provider>/<model>"` and, when restricted, `experimental.policies`
+  with `provider.use` deny `*` then allow the provider — the last matching
+  statement wins. `OPENCODE_CONFIG` then points at the generated file. No
+  file: the image config, as before. The key is never written anywhere — not
+  server.json, not the generated config, not the script's output — because
+  `GET /api/config` is reachable from the browser through the forwarder.
+  `BITSWAN_OPENCODE_PROVIDER_FILE` overrides the file's path for running the
+  script outside the container.
+
+Checked on 2.0.16 with the script and the pinned binary: the server's
+environment carries the key byte for byte (a quote, `$`, a backslash and
+backticks included); `GET /api/provider` lists the provider next to the
+built-in `opencode` one, or alone when restricted; `GET /api/model/default`
+is the configured model for a location without a config of its own. A BP's
+own `opencode.json` merges on top and can set another `model` — for that BP,
+and only among the providers the policy allows. A location's catalogue loads
+a few seconds after the location is first touched: the first `/api/provider`
+answer for a new directory is empty, then a `provider.updated` event follows.
+
+What it does not do: a running server keeps the environment it started with.
+The dashboard stops idle servers after `OPENCODE_IDLE_TIMEOUT_MS` (30 minutes)
+and a server with active sessions runs until it goes idle, so a new or rotated
+key reaches each person's server on its next start, not at once; the console
+says so. The exposure is that of any credential in the agent container:
+everything there runs as the agent user, so every coding-agent run in every
+workspace can read the key. Claude Code is not affected — it has a sign-in of
+its own.
 
 ## Known limits
 
 - Everything in the coding-agent container runs as one uid, so a malicious run
-  could read another user's `server.json` and drive that server — exactly as it
-  could read another user's Claude credentials today. Env or stdin transport
+  could read another user's `server.json` and drive that server, or read the
+  server-wide provider key — exactly as it could read another user's Claude
+  credentials today. Env or stdin transport
   would not help (`/proc/<pid>/environ` is readable too). Per-user uids or a
   dedicated origin would be the hardening.
 - The OpenCode UI shares the dashboard's origin, like the Claude webview does
@@ -222,7 +278,11 @@ What the dashboard depends on for a given version, all in one place each:
   routes were read out of the build's own router (`Unrecognised route!` is what
   it throws for anything else); check them again after a bump.
 - `bitswan-coding-agent/bitswan-opencode-server` — `GET /api/info` as the health
-  probe, and the v2 config keys in `opencode.default.json`.
+  probe, the v2 config keys in `opencode.default.json`, and for the
+  server-wide provider: `model: "provider/model"`, the policy statement shape
+  (`{action: "provider.use", resource, effect}` under `experimental`, so
+  re-check it first), and the provider ids and env var names in the daemon's
+  table (`internal/daemon/opencode_provider.go`) against models.dev.
 - `server/src/services/opencode-shim.ts` — the window-scoped storage prefix
   and the colour-scheme key. In the bundle, window-scoped storage resolves as
   `platform === 'desktop' ? windowID : 'browser'` and names its store
