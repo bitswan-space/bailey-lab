@@ -87,12 +87,8 @@ func TestOpenCodeProviderEnv_RenderQuotesForTheShell(t *testing.T) {
 		}
 	}
 
-	// Every provider in the table renders its own env var, and the table is
-	// complete enough for the console to show it.
+	// Every provider in the table renders its own env var.
 	for _, p := range openCodeProviders {
-		if p.ID == "" || p.Name == "" || p.Env == "" || p.ModelHint == "" {
-			t.Errorf("incomplete provider entry %+v", p)
-		}
 		r := renderOpenCodeProviderEnv(openCodeProviderConfig{Enabled: true, Provider: p.ID, Model: "m", APIKey: "k"})
 		if !strings.Contains(r, "\n"+p.Env+"='k'\n") || !strings.Contains(r, "BITSWAN_OPENCODE_PROVIDER_ENV='"+p.Env+"'\n") {
 			t.Errorf("%s: env var %s missing from:\n%s", p.ID, p.Env, r)
@@ -308,5 +304,47 @@ func TestOpenCodeProvider_SyncWritesOnlyWhereAnAgentRuns(t *testing.T) {
 		if _, err := os.Stat(openCodeProviderEnvPath(dir)); err == nil {
 			t.Errorf("%s: file still there after disable", name)
 		}
+	}
+}
+
+/*
+The table is generated from models.dev and checked in; this keeps a
+regeneration honest: every entry usable, no duplicates, the familiar few
+present and marked, and nothing that needs more than one key.
+*/
+func TestOpenCodeCatalog_IsSane(t *testing.T) {
+	seen := map[string]bool{}
+	popular := 0
+	for _, p := range openCodeProviders {
+		if p.ID == "" || p.Name == "" || p.Env == "" {
+			t.Errorf("incomplete entry %+v", p)
+		}
+		if seen[p.ID] {
+			t.Errorf("duplicate id %q", p.ID)
+		}
+		seen[p.ID] = true
+		if p.Popular {
+			popular++
+		}
+	}
+	for _, id := range []string{"anthropic", "openai", "google", "openrouter", "mistral", "groq", "xai", "deepseek", "opencode"} {
+		p, ok := openCodeProviderByID(id)
+		if !ok || !p.Popular || p.ModelHint == "" {
+			t.Errorf("%s: missing, not popular or without a model hint (%+v)", id, p)
+		}
+	}
+	if popular != 9 {
+		t.Errorf("popular providers = %d, want 9", popular)
+	}
+	if p, _ := openCodeProviderByID("google"); p.Env != "GOOGLE_API_KEY" {
+		t.Errorf("google reads its key from %q; its several env names are alternatives and the first is expected", p.Env)
+	}
+	for _, id := range []string{"amazon-bedrock", "azure", "google-vertex"} {
+		if _, ok := openCodeProviderByID(id); ok {
+			t.Errorf("%s needs more than one key and must not be offered", id)
+		}
+	}
+	if len(openCodeProviders) < 100 || len(openCodeProviders) > openCodeCatalogueSize {
+		t.Errorf("table has %d entries of a %d-provider catalogue", len(openCodeProviders), openCodeCatalogueSize)
 	}
 }

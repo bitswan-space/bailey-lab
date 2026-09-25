@@ -3,7 +3,7 @@ import React from 'react';
 const { C: SC, Icon: SIcon, Btn: SBtn, Pill: SPill } = window.WD_SHELL;
 const {
   Card: SCard, PageHeader: SPageHeader, TextInput: STextInput, EmptyState: SEmpty,
-  Toggle: SToggle, Select: SSelect,
+  Toggle: SToggle,
 } = window.SC_UI;
 const { Api: SApi } = window.SC_API;
 const { useState: useS, useEffect: useSE } = React;
@@ -32,6 +32,30 @@ function Note({ tone, children }) {
       background: warn ? '#fffbeb' : SC.surface, border: `1px solid ${warn ? SC.amber + '55' : SC.border}` }}>
       <SIcon name="shield-alert" size={15} color={warn ? SC.amber : SC.red} style={{ marginTop: 1, flex: '0 0 auto' }} />
       <span style={{ fontSize: 12, color: SC.fg, lineHeight: '17px' }}>{children}</span>
+    </div>
+  );
+}
+
+// The provider select: OpenCode's whole single-key catalogue is a couple of
+// hundred entries, so the familiar few come first and the rest follow in one
+// alphabetical group. A native select keeps type-to-jump for the long tail.
+function ProviderSelect({ value, providers, onChange }) {
+  const popular = providers.filter((p) => p.popular);
+  const rest = providers.filter((p) => !p.popular);
+  const opt = (p) => <option key={p.id} value={p.id}>{p.name}</option>;
+  return (
+    <div style={{ position: 'relative', maxWidth: 320 }}>
+      <select value={value} onChange={(e) => onChange(e.target.value)} style={{
+        height: 36, width: '100%', padding: '0 32px 0 12px', border: `1px solid ${SC.border}`,
+        borderRadius: 8, background: '#fff', fontFamily: 'inherit', fontSize: 13.5, color: SC.fg,
+        outline: 'none', cursor: 'pointer', appearance: 'none', WebkitAppearance: 'none',
+      }}>
+        <option value="">Choose a provider…</option>
+        {popular.length > 0 && <optgroup label="Popular">{popular.map(opt)}</optgroup>}
+        <optgroup label={popular.length > 0 ? `All providers (${rest.length})` : 'Providers'}>{rest.map(opt)}</optgroup>
+      </select>
+      <SIcon name="chevron-down" size={14} color={SC.mutedFg}
+        style={{ position: 'absolute', right: 11, top: 11, pointerEvents: 'none' }} />
     </div>
   );
 }
@@ -109,14 +133,12 @@ function OpenCodeProviderCard({ toast }) {
         </div>
       </div>
 
-      <Row label="Provider">
-        <SSelect value={cfg.provider || ''} onChange={(v) => patch({ provider: v })}
-          options={[{ value: '', label: 'Choose a provider…' }, ...providers.map((p) => ({ value: p.id, label: p.name }))]}
-          style={{ maxWidth: 320 }} />
+      <Row label="Provider" hint="Everything OpenCode's catalogue lists that takes one API key.">
+        <ProviderSelect value={cfg.provider || ''} providers={providers} onChange={(v) => patch({ provider: v })} />
       </Row>
       <Row label="Model" hint="The provider's own model id. OpenCode uses it unless a person picks another.">
         <STextInput value={cfg.model || ''} onChange={(v) => patch({ model: v })} mono
-          placeholder={provider ? provider.model_hint : 'choose a provider first'} style={{ maxWidth: 320 }} />
+          placeholder={provider ? (provider.model_hint || 'model id') : 'choose a provider first'} style={{ maxWidth: 320 }} />
       </Row>
       <Row label="API key" hint={cfg.key_set ? `A key ending in …${cfg.key_hint || ''} is stored. Leave blank to keep it.` : 'Required.'}>
         <STextInput value={key} onChange={setKey} type="password" autoComplete="new-password" mono
