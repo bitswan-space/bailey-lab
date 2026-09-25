@@ -70,6 +70,67 @@ export OPENCODE_CONFIG="${OPENCODE_CONFIG:-/etc/bitswan/opencode.json}"
 # model runs through it. Same reason claude-process-wrapper sources it.
 [ -f /etc/profile.d/bitswan-agent.sh ] && . /etc/profile.d/bitswan-agent.sh
 
+# The server-wide default provider, when an admin set one in the Bailey
+# console. The automation server writes this file into every workspace's agent
+# home (internal/daemon/opencode_provider.go): the provider's API key as that
+# provider's own env var, plus BITSWAN_OPENCODE_* lines saying what to make of
+# it. It is read on every start, so a changed key reaches the next server
+# started; a running server keeps the environment it started with.
+PROVIDER_ENV_FILE="${BITSWAN_OPENCODE_PROVIDER_FILE:-/home/agent/.bitswan/opencode-provider.env}"
+GENERATED_CONFIG="$ROOT/opencode.generated.json"
+
+# Exports the provider's key for the server and points OPENCODE_CONFIG at a
+# generated copy of the image config that names the default model and, when
+# the admin restricted OpenCode to that provider, carries a policy hiding every
+# other one (deny * then allow the id; the last matching statement wins). No
+# file, or an unusable one: the image config stands and people connect their
+# own provider, as before. The key goes into the server's environment and
+# nowhere else — not server.json, not the generated config, not this script's
+# output — because GET /api/config is reachable from the browser.
+apply_provider() {
+    rm -f "$GENERATED_CONFIG"
+    [ -r "$PROVIDER_ENV_FILE" ] || return 0
+    local provider env model restrict
+    set -a
+    # shellcheck disable=SC1090
+    . "$PROVIDER_ENV_FILE"
+    set +a
+    provider="${BITSWAN_OPENCODE_PROVIDER:-}"
+    env="${BITSWAN_OPENCODE_PROVIDER_ENV:-}"
+    model="${BITSWAN_OPENCODE_MODEL:-}"
+    restrict="${BITSWAN_OPENCODE_RESTRICT:-false}"
+    if [ -z "$provider" ] || [ -z "$env" ] || [ -z "$model" ] || [ -z "${!env:-}" ]; then
+        echo "bitswan-opencode-server: $PROVIDER_ENV_FILE is incomplete; starting without a default provider" >&2
+        return 0
+    fi
+    if python3 - "$OPENCODE_CONFIG" "$GENERATED_CONFIG" "$provider" "$model" "$restrict" <<'PY'
+import json, os, sys
+base, out, provider, model, restrict = sys.argv[1:6]
+try:
+    with open(base) as f:
+        cfg = json.load(f)
+except FileNotFoundError:
+    cfg = {}
+cfg["model"] = provider + "/" + model
+if restrict == "true":
+    exp = cfg.setdefault("experimental", {})
+    kept = [s for s in exp.get("policies", []) if not (isinstance(s, dict) and s.get("action") == "provider.use")]
+    exp["policies"] = kept + [
+        {"action": "provider.use", "resource": "*", "effect": "deny"},
+        {"action": "provider.use", "resource": provider, "effect": "allow"},
+    ]
+tmp = out + ".tmp"
+with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+    json.dump(cfg, f, indent=2)
+os.replace(tmp, out)
+PY
+    then
+        export OPENCODE_CONFIG="$GENERATED_CONFIG"
+    else
+        echo "bitswan-opencode-server: could not write $GENERATED_CONFIG; starting with the image config" >&2
+    fi
+}
+
 read_field() {
     python3 -c 'import json, sys
 try:
@@ -156,6 +217,8 @@ start() {
     # Whatever server.json described is gone (or never answered): clean up.
     kill_pid "$(read_field pid)"
     rm -f "$SERVER_JSON"
+
+    apply_provider
 
     local port pw version pid
     port=$(free_port)
