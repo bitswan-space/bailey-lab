@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyMultipart from '@fastify/multipart';
+import fastifyReplyFrom from '@fastify/reply-from';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import type { GitopsClient } from './services/gitops.js';
@@ -18,6 +19,7 @@ import { registerDataExplorerRoutes } from './routes/data-explorer.js';
 import { registerCopyRoutes } from './routes/copies.js';
 import { registerCopyFilesRoutes } from './routes/copy-files.js';
 import { registerVscodeSidebarRoutes } from './routes/vscode-sidebar.js';
+import { forwardShell, registerOpenCodeRoutes } from './routes/opencode.js';
 import { registerMeRoutes } from './routes/me.js';
 import { registerTaskRoutes } from './routes/tasks.js';
 import { registerWorkspaceSettingsRoutes } from './routes/workspace-settings.js';
@@ -62,6 +64,13 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   }
 
   await app.register(fastifyWebsocket);
+  // Reverse proxying, for the OpenCode panel (routes/opencode.ts). No body
+  // timeout: OpenCode's event stream stays open for as long as the panel is,
+  // and undici's default would cut it after five minutes. No retries beyond
+  // the default idempotent methods, so a prompt is never sent twice.
+  await app.register(fastifyReplyFrom, {
+    undici: { bodyTimeout: 0, headersTimeout: 60_000 },
+  });
   // Multipart for the file-upload endpoint in routes/copy-files.ts.
   // The 5 MiB per-file default applies only to routes that don't override it;
   // attachment uploads (routes/copy-files.ts) raise it per-request to 80% of
@@ -90,6 +99,10 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
   registerEventRoutes(app, { gitops });
   registerPublicEndpointRoutes(app);
   registerVscodeSidebarRoutes(app, { workspaceRoot: WORKSPACE_ROOT });
+  // OpenCode's API forwarder registers a wildcard under /api; it must come
+  // after every dashboard /api route so those keep winning (static routes beat
+  // wildcards in the router regardless, this just keeps the intent visible).
+  await registerOpenCodeRoutes(app);
 
   // Hourly reaper for pasted terminal images (see services/agent-uploads.ts).
   startAgentUploadsSweeper(app, { workspaceRoot: WORKSPACE_ROOT });
@@ -130,15 +143,18 @@ export async function buildServer({ gitops }: BuildServerOptions): Promise<Fasti
     },
   });
 
-  app.setNotFoundHandler((req, reply) => {
+  app.setNotFoundHandler(async (req, reply) => {
+    // The OpenCode panel is an iframe on this origin: its pages and static
+    // files arrive here, since the dashboard has no routes for them, and go
+    // to the caller's OpenCode server when the caller has chosen OpenCode.
+    if (await forwardShell(app, req, reply)) return reply;
     if (req.method !== 'GET' || req.url.startsWith('/ws') || req.url.startsWith('/api')) {
-      reply.code(404).send({ error: 'not found' });
-      return;
+      return reply.code(404).send({ error: 'not found' });
     }
     // The SPA fallback serves index.html for every app route; it must never
     // be cached (see the policy above).
     reply.header('Cache-Control', 'no-cache');
-    reply.sendFile('index.html');
+    return reply.sendFile('index.html');
   });
 
   return app;
