@@ -38,7 +38,13 @@ export function sidebarEnabled(): boolean {
   }
 }
 
-function configRoot(): string {
+/**
+ * The root of the per-user directories shared with the coding-agent container
+ * (one per gate-verified email, named by `configDirNameFor`). Claude Code's
+ * config, the user's OpenCode server and the dashboard's own per-user
+ * preferences all live under it.
+ */
+export function configRoot(): string {
   return process.env.SIDEBAR_CONFIG_ROOT || '/claude-config';
 }
 

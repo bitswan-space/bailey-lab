@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { GitopsClient } from '../services/gitops.js';
 import { copyNameForEmail, emailFromRequest, fwRoleFromRequest } from '../lib/user.js';
+import { isAgentKind, readPreferences, writePreferences } from '../services/user-preferences.js';
 
 export interface MeRoutesOptions {
   gitops: GitopsClient | null;
@@ -115,6 +116,31 @@ export function registerMeRoutes(
     }
 
     const role = await fwRoleFromRequest(req, gitops, app.log);
-    return { email, copy, role };
+    const preferences = await readPreferences(email);
+    return { email, copy, role, preferences };
+  });
+
+  /**
+   * `PUT /api/me/preferences` — the signed-in user's own dashboard settings;
+   * today just which coding agent the Coding Agent tab shows. Stored
+   * server-side, per user, so the choice follows them across browsers.
+   */
+  app.put<{ Body: { codingAgent?: string } }>('/api/me/preferences', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const email = await emailFromRequest(req, app.log);
+    if (!email) {
+      return reply.code(401).send({ error: 'not authenticated' });
+    }
+    const codingAgent = req.body?.codingAgent;
+    if (!isAgentKind(codingAgent)) {
+      return reply.code(400).send({ error: 'codingAgent must be "claude-code" or "opencode"' });
+    }
+    try {
+      const preferences = await writePreferences(email, { codingAgent });
+      return { preferences };
+    } catch (err) {
+      app.log.warn({ err }, 'could not save user preferences');
+      return reply.code(500).send({ error: 'could not save preferences' });
+    }
   });
 }
