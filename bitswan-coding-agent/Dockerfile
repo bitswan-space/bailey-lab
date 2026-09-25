@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     dtach \
     vim \
     gnupg \
+    openssl \
     && mkdir -p /run/sshd \
     && rm -rf /var/lib/apt/lists/*
 
@@ -96,6 +97,44 @@ ENV PATH="${CLAUDE_CODE_PREFIX}/bin:${CLAUDE_CODE_BUNDLED_PREFIX}/bin:${PATH}"
 ARG CLAUDE_CODE_VERSION=2.1.268
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
+# OpenCode — the second coding agent the dashboard offers (#270). Unlike Claude
+# Code it IS baked in: OpenCode is MIT-licensed, so shipping the binary inside
+# this image is fine, and baking it spares every workspace a first-start
+# download.
+#
+# It comes from the npm registry, not from GitHub releases and not from the
+# official ghcr.io/anomalyco/opencode image. The 2.x line is published as
+# @opencode/cli-linux-<arch> on npm — the vendor's own installer
+# (opencode.ai/v2/install) downloads exactly this tarball — while GitHub
+# releases stopped at 1.x, and the ghcr image is Alpine with a musl-linked
+# binary that cannot run on this glibc base. The tarball is fetched directly
+# rather than through `npm install -g @opencode/cli`, whose launcher needs a
+# postinstall step and puts a Node shim in front of the binary.
+#
+# Pinned by version AND by the registry's sha512 integrity, per architecture,
+# because upstream publishes no separate checksums. The dashboard depends on
+# this version's URL surface (API under /api/*, assets under /_assets/*) — see
+# docs/opencode-integration.md before bumping. One `opencode serve` runs per
+# user, started by /usr/local/bin/bitswan-opencode-server (below).
+ARG OPENCODE_VERSION=2.0.16
+ARG OPENCODE_SHA512_AMD64=BVmvVddA7c4VhSXgTiGtZB9pU+xTyFgsd56KkvQoYMydqy8xfzPGu9BRwQVCG/RTxGhRAwda/MYEWarddscIUg==
+ARG OPENCODE_SHA512_ARM64=BThpExec9wEIhC4U9iRY/jWecM8bVOVuYw2YTYYZ/qNn2r/RljDG2flngDmCZFM1cC6miu2kqOgPkVnVeqaapQ==
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        arm64) target=linux-arm64; expected="$OPENCODE_SHA512_ARM64" ;; \
+        *)     target=linux-x64;   expected="$OPENCODE_SHA512_AMD64" ;; \
+    esac; \
+    curl -fsSL -o /tmp/opencode.tgz \
+        "https://registry.npmjs.org/@opencode/cli-${target}/-/cli-${target}-${OPENCODE_VERSION}.tgz"; \
+    actual="$(openssl dgst -sha512 -binary /tmp/opencode.tgz | base64 -w0)"; \
+    if [ "$actual" != "$expected" ]; then \
+        echo "opencode ${OPENCODE_VERSION} (${target}): sha512 mismatch — got ${actual}" >&2; exit 1; \
+    fi; \
+    tar -xzf /tmp/opencode.tgz -C /tmp package/bin/opencode; \
+    install -m 0755 /tmp/package/bin/opencode /usr/local/bin/opencode; \
+    rm -rf /tmp/opencode.tgz /tmp/package; \
+    opencode --version
+
 # sshd sessions do not inherit this image's env: login shells get PATH from
 # /etc/profile (which overwrites it) plus /etc/profile.d/bitswan-agent.sh,
 # written by the entrypoint; non-login `ssh <host> <command>` sessions get it
@@ -123,6 +162,19 @@ RUN mkdir -p /workspace/copies /var/log/agent-sessions \
 # copied into (or drifting inside) user working trees. Teams can layer their
 # own CLAUDE.md at the copy or BP level; Claude merges all levels.
 COPY CLAUDE.md /workspace/CLAUDE.md
+# The same guidance for OpenCode, which reads AGENTS.md only (2.x has no
+# CLAUDE.md fallback) and does not look above a BP clone's git root — so this
+# copy is not found by walking up either. bitswan-opencode-server links it in
+# as each user's global instruction file ($XDG_CONFIG_HOME/opencode/AGENTS.md),
+# which OpenCode loads for every session.
+COPY CLAUDE.md /workspace/AGENTS.md
+
+# OpenCode's image-level configuration, selected with OPENCODE_CONFIG by
+# bitswan-opencode-server: every permission allowed (parity with Claude Code's
+# bypass mode), the browser MCP server, no session sharing to opencode.ai, no
+# self-update away from the pinned version. A user's global opencode.json and
+# a BP's own opencode.json merge on top of it.
+COPY opencode.default.json /etc/bitswan/opencode.json
 
 # Default per-copy .mcp.json — the entrypoint and the session wrapper seed it
 # into copies that have none, as a bootstrap the user owns and may extend with
@@ -134,7 +186,11 @@ COPY mcp.default.json /etc/bitswan/mcp.json
 # Copy session wrapper script
 COPY agent-session-wrapper /usr/local/bin/agent-session-wrapper
 COPY seed-copy-mcp /usr/local/bin/seed-copy-mcp
-RUN chmod +x /usr/local/bin/agent-session-wrapper /usr/local/bin/seed-copy-mcp
+# Per-user OpenCode server lifecycle, run by the dashboard over the wrapper's
+# one-shot ssh path. See the script's header.
+COPY bitswan-opencode-server /usr/local/bin/bitswan-opencode-server
+RUN chmod +x /usr/local/bin/agent-session-wrapper /usr/local/bin/seed-copy-mcp \
+    /usr/local/bin/bitswan-opencode-server
 
 # Copy entrypoint
 COPY entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh

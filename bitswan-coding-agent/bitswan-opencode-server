@@ -1,0 +1,223 @@
+#!/bin/bash
+# One OpenCode server per user, inside the coding-agent container.
+#
+# The dashboard offers OpenCode next to Claude Code (#270). Its web UI and its
+# API are served by a single `opencode serve` process, and that process IS the
+# agent: it runs the model's shell commands. So, like `claude`, it runs here and
+# nowhere else — the dashboard only ever reaches it through an SSH port-forward
+# to the loopback port this script reports.
+#
+# One server per user, not per workspace: OpenCode keeps provider credentials,
+# sessions and settings in its XDG directories, so one shared process would
+# hand every user the first user's account. The per-user root is derived from
+# CLAUDE_CONFIG_DIR, which agent-session-wrapper (sshd's ForceCommand) sets for
+# every dashboard-driven session from the gate-verified email. That directory
+# is a volume shared with the dashboard container, so the dashboard can read
+# server.json from it as well as from this script's stdout.
+#
+# Invoked by the dashboard as a one-shot ssh command:
+#   ssh agent@<ws>-gitops -p 2222 bitswan-opencode-server start|status|stop
+#
+# `start` is idempotent and prints server.json — {version, port, username,
+# password, pid, started_at} — for the server that is now running. Exit codes:
+#   0 running · 1 failed to come up · 2 usage · 3 no owner · 127 not installed
+set -u
+
+usage() {
+    echo "usage: bitswan-opencode-server start|status|stop" >&2
+    exit 2
+}
+
+cmd="${1:-}"
+[ -n "$cmd" ] || usage
+
+# Refuse to run without an owner. The wrapper always sets CLAUDE_CONFIG_DIR
+# (it refuses sessions without SSH_USER_EMAIL); a bare invocation would put a
+# server, and whoever's credentials end up in it, under nobody's name.
+if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
+    echo "bitswan-opencode-server: CLAUDE_CONFIG_DIR is not set; refusing to run a server with no owner" >&2
+    exit 3
+fi
+
+ROOT="$CLAUDE_CONFIG_DIR/opencode"
+SERVER_JSON="$ROOT/server.json"
+PID_FILE="$ROOT/server.pid"
+LOCK="$ROOT/lock"
+mkdir -p "$ROOT/config/opencode" "$ROOT/data" "$ROOT/cache" "$ROOT/state"
+
+# Standing guidance. OpenCode 2.x reads AGENTS.md only — no CLAUDE.md fallback —
+# and, for a workspace outside $HOME, walks up no further than the project's
+# git root. Every BP clone is its own git root, so the /workspace/AGENTS.md the
+# image ships is never found by walking up. The one file OpenCode always loads
+# is the user's global instruction file; point it at the image's copy so the
+# guidance stays current with the image. Never replace a file the user put
+# there themselves.
+if [ ! -e "$ROOT/config/opencode/AGENTS.md" ] && [ -f /workspace/AGENTS.md ]; then
+    ln -s /workspace/AGENTS.md "$ROOT/config/opencode/AGENTS.md"
+fi
+
+export XDG_CONFIG_HOME="$ROOT/config"
+export XDG_DATA_HOME="$ROOT/data"
+export XDG_CACHE_HOME="$ROOT/cache"
+export XDG_STATE_HOME="$ROOT/state"
+# Image-level defaults (permissions, MCP, no sharing, no self-update). A user's
+# own global config and any project opencode.json merge on top of it.
+export OPENCODE_CONFIG="${OPENCODE_CONFIG:-/etc/bitswan/opencode.json}"
+
+# The one-shot ssh path runs `bash -c`, not a login shell, so profile.d is not
+# sourced and the agent's environment (PATH, BITSWAN_GITOPS_*, the Playwright
+# paths) would be missing from the server — and from every shell command the
+# model runs through it. Same reason claude-process-wrapper sources it.
+[ -f /etc/profile.d/bitswan-agent.sh ] && . /etc/profile.d/bitswan-agent.sh
+
+read_field() {
+    python3 -c 'import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get(sys.argv[2], "")
+except Exception:
+    v = ""
+print("" if v is None else v)' "$SERVER_JSON" "$1" 2>/dev/null
+}
+
+healthy() { # <port> <password>
+    curl -fsS -o /dev/null --max-time 3 -u "opencode:$2" "http://127.0.0.1:$1/api/info" 2>/dev/null
+}
+
+# A pid from server.json is trusted only if it still belongs to an opencode
+# process: server.json lives on a persistent volume, pids do not survive a
+# container recreation, and a recycled pid must not pass for a live server.
+pid_is_opencode() { # <pid>
+    [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] && tr '\0' ' ' < "/proc/$1/cmdline" | grep -q 'opencode'
+}
+
+# Prints server.json if it describes a live, healthy server; fails otherwise.
+current() {
+    [ -f "$SERVER_JSON" ] || return 1
+    local pid port pw
+    pid=$(read_field pid)
+    port=$(read_field port)
+    pw=$(read_field password)
+    [ -n "$pid" ] && [ -n "$port" ] && [ -n "$pw" ] || return 1
+    pid_is_opencode "$pid" || return 1
+    healthy "$port" "$pw" || return 1
+    cat "$SERVER_JSON"
+}
+
+free_port() {
+    python3 -c 'import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()'
+}
+
+write_server_json() { # <version> <port> <password> <pid>
+    python3 - "$SERVER_JSON" "$@" <<'PY'
+import json, os, sys, datetime
+path, version, port, password, pid = sys.argv[1:6]
+tmp = path + ".tmp"
+with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+    json.dump({
+        "version": version,
+        "port": int(port),
+        "username": "opencode",
+        "password": password,
+        "pid": int(pid),
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    }, f)
+os.replace(tmp, path)
+PY
+}
+
+kill_pid() { # <pid>
+    local pid="$1"
+    pid_is_opencode "$pid" || return 0
+    kill -TERM "$pid" 2>/dev/null || return 0
+    for _ in $(seq 1 20); do
+        kill -0 "$pid" 2>/dev/null || return 0
+        sleep 0.25
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+}
+
+start() {
+    # Two dashboard requests can race to start the same user's server; the
+    # lock turns the loser into a reader of the winner's server.json.
+    exec 9>"$LOCK"
+    flock 9
+
+    if current; then
+        return 0
+    fi
+    if ! command -v opencode >/dev/null 2>&1; then
+        echo "bitswan-opencode-server: opencode is not installed in this image" >&2
+        exit 127
+    fi
+    # Whatever server.json described is gone (or never answered): clean up.
+    kill_pid "$(read_field pid)"
+    rm -f "$SERVER_JSON"
+
+    local port pw version pid
+    port=$(free_port)
+    pw=$(head -c 64 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
+    version=$(opencode --version 2>/dev/null | sed -nE 's/.*v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+
+    # A new session (setsid) so the server outlives this ssh command and never
+    # gets the SIGHUP its session end would send. The wrapper shell records its
+    # own pid and then becomes the server (exec), so the pid file names the
+    # opencode process itself whether or not setsid had to fork. Output goes
+    # nowhere: OpenCode keeps its own log under $XDG_DATA_HOME/opencode/log.
+    rm -f "$PID_FILE"
+    (
+        # The lock descriptor must not travel into the server: flock(2) locks
+        # belong to the open file, and a child holding a copy would keep the
+        # lock for as long as the server runs — every later start or stop
+        # would wait on it forever.
+        exec 9>&-
+        cd /workspace/copies 2>/dev/null || cd /
+        OPENCODE_SERVER_PASSWORD="$pw" setsid bash -c \
+            'printf "%s" "$$" > "$1"; exec opencode serve --hostname 127.0.0.1 --port "$2"' \
+            _ "$PID_FILE" "$port" >/dev/null 2>&1 </dev/null &
+    )
+
+    for _ in $(seq 1 120); do
+        pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        if [ -n "$pid" ] && healthy "$port" "$pw"; then
+            write_server_json "${version:-unknown}" "$port" "$pw" "$pid"
+            cat "$SERVER_JSON"
+            return 0
+        fi
+        if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+            echo "bitswan-opencode-server: opencode exited during startup (see $XDG_DATA_HOME/opencode/log)" >&2
+            exit 1
+        fi
+        sleep 0.5
+    done
+    echo "bitswan-opencode-server: opencode did not answer on port $port within 60s" >&2
+    kill_pid "$(cat "$PID_FILE" 2>/dev/null || true)"
+    exit 1
+}
+
+status() {
+    if current >/dev/null; then
+        python3 -c 'import json, sys
+d = json.load(open(sys.argv[1])); d["healthy"] = True; print(json.dumps(d))' "$SERVER_JSON"
+    else
+        echo '{"healthy": false}'
+    fi
+}
+
+stop() {
+    exec 9>"$LOCK"
+    flock 9
+    kill_pid "$(read_field pid)"
+    rm -f "$SERVER_JSON" "$PID_FILE"
+    echo '{"stopped": true}'
+}
+
+case "$cmd" in
+    start) start ;;
+    status) status ;;
+    stop) stop ;;
+    *) usage ;;
+esac
