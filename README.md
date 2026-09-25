@@ -20,7 +20,7 @@ To get Bailey4Enterprise, visit [bitswan.ai](https://www.bitswan.ai/).
 | Component | Description |
 |---|---|
 | [`bitswan-automation-server`](bitswan-automation-server/) | CLI app and daemon for managing the Bitswan automation server and workspace deployments |
-| [`bitswan-coding-agent`](bitswan-coding-agent/) | Secure container for running a coding agent of your choice, such as Claude or opencode |
+| [`bitswan-coding-agent`](bitswan-coding-agent/) | Secure container for running the coding agent of your choice — Claude Code or OpenCode, picked per user in the dashboard (see [docs/opencode-integration.md](docs/opencode-integration.md)) |
 | [`bitswan-gitops`](bitswan-gitops/) | Service that manages the deployment, management, and monitoring of Bitswan automations |
 | [`bitswan-workspace-dashboard`](bitswan-workspace-dashboard/) | Web dashboard for working with your workspace, including an in-browser terminal |
 

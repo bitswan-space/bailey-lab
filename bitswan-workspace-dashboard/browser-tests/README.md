@@ -39,6 +39,8 @@ into the tab order, that `Tab` still escapes rather than being trapped, that
 focus on `<body>`.
 
 `agent-panel-persistence.mjs` — the Coding Agent panel surviving navigation.
+(The panel now hosts either Claude Code or OpenCode, keyed by the person's choice
+as well as the BP; the persistence contract is the same for both.)
 The panel is an iframe hosting the Claude Code webview, and the extension
 behind it reads a reloaded page as a fresh client: it closes every live
 channel, so a reload kills the running agent. The test drives the real
