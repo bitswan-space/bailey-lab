@@ -1,4 +1,3 @@
-import { promises as dns } from 'node:dns';
 import type { FastifyInstance } from 'fastify';
 import { spawnPty } from '../services/pty.js';
 import { handleTerminalConnection } from '../services/terminal-session.js';
@@ -11,6 +10,7 @@ import {
   type SessionKind,
 } from '../services/agent-prompts.js';
 import { emailFromRequest } from '../lib/user.js';
+import { SSH_KEY, agentSshTarget, waitForAgentDns } from '../services/agent-ssh.js';
 
 export interface CodingAgentRoutesOptions {
   gitops: GitopsClient | null;
@@ -26,30 +26,12 @@ function bashSingleQuoteEscape(s: string): string {
   return s.replace(/'/g, "'\\''");
 }
 
-const SSH_KEY = '/workspace/.ssh/id_ed25519';
-
-export interface AgentSshTarget {
-  host: string;
-  port: number;
-}
-
-export function agentSshTarget(): AgentSshTarget {
-  // Allow an explicit override for setups where the coding-agent's sshd is
-  // directly reachable (e.g. a dev compose without the isolated networks).
-  const override = process.env.CODING_AGENT_HOST;
-  if (override) {
-    return { host: override, port: Number(process.env.CODING_AGENT_SSH_PORT ?? 22) };
-  }
-  // The agent sits on the isolated `<ws>-agent` bridge (shared only with
-  // gitops) that this dashboard is deliberately NOT part of — the agent runs
-  // untrusted code and the dashboard trusts X-Forwarded-Email, so putting
-  // them on one network would let the agent forge identities. Instead gitops
-  // (dual-homed) runs a raw TCP proxy on :2222 to the agent's sshd; SSH auth
-  // and encryption stay end-to-end. See bitswan-gitops
-  // app/services/agent_ssh_proxy.py.
-  const ws = process.env.BITSWAN_WORKSPACE_NAME ?? 'default';
-  return { host: `${ws}-gitops`, port: 2222 };
-}
+/**
+ * The ssh target and key live in services/agent-ssh.ts now, shared with the
+ * OpenCode integration; re-exported so existing importers (and the tests) keep
+ * working.
+ */
+export { agentSshTarget, type AgentSshTarget } from '../services/agent-ssh.js';
 
 /**
  * How long a `--resume` has to survive before we stop treating its non-zero
@@ -192,26 +174,6 @@ function idleTimeoutMs(): number {
   if (raw === undefined) return 30 * 60 * 1000;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : 30 * 60 * 1000;
-}
-
-/**
- * Wait until DNS resolves the SSH target hostname (normally the gitops
- * container carrying the agent-ssh proxy; the agent itself is on a network
- * this container can't see). The container takes a moment to register with
- * docker's embedded DNS after it starts — without this poll, the first
- * session attempt after a cold start can fail with "Could not resolve
- * hostname".
- */
-async function waitForAgentDns(host: string, attempts = 15, delayMs = 1000): Promise<boolean> {
-  for (let i = 0; i < attempts; i++) {
-    try {
-      await dns.lookup(host);
-      return true;
-    } catch {
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  return false;
 }
 
 /**
