@@ -105,16 +105,15 @@ export function WorkspaceView({
   onTakeMain,
 }: WorkspaceViewProps) {
   const bpInWt = !!(wt && bp && bp.copies.includes(wt.name));
-  // Opening the agent, optionally with something to say. A running session has
-  // no command for typing into it, so a prompt is handed over the only way the
-  // extension offers: it opens a conversation with the text already in the
-  // composer — delivered straight to the panel when one is attached, parked
-  // for the next one when not. The person reads it and presses send.
+  // Opening the agent, optionally with something to say. How the prompt gets
+  // there depends on the person's agent — into Claude Code's composer for them
+  // to send, or as the first message of a new OpenCode conversation; see
+  // lib/agent-handoff.ts. Either way the tab is opened.
   const showAgents = useCallback(
     (prompt?: string) => {
       onTab('agent');
       if (!prompt || !wt || !bp) return;
-      handOffToAgent(wt.name, bp.name, prompt).catch(() =>
+      handOffToAgent(wt.name, bp.name, { text: prompt }).catch(() =>
         toast.error('Couldn’t hand the prompt to the agent — type it yourself.'),
       );
     },

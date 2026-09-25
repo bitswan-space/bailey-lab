@@ -10,8 +10,12 @@ import {
   type ReactNode,
 } from 'react';
 import { AgentSidebar } from '@/components/agents/AgentSidebar';
+import { OpenCodePanel } from '@/components/agents/OpenCodePanel';
+import { useAgentChoice } from '@/hooks/useAgentChoice';
+import type { AgentKind } from '@/lib/agentKind';
 import {
   agentScopeKey,
+  dropOtherKinds,
   rememberAgentPanel,
   sameAgentScope,
   type AgentPanelEntry,
@@ -21,17 +25,23 @@ import {
 /**
  * Keeps the Coding Agent panels alive across navigation.
  *
- * A panel is an iframe hosting the Claude Code webview. Unmounting it, or
- * moving it in the DOM, reloads that page — and the extension reads a reloaded
- * page as a fresh client, closing every live channel and cutting off whatever
- * the agent was doing. Rendering the panel from whichever AgentFilesTab is on
- * screen did exactly that on every BP switch.
+ * A panel is an iframe hosting an agent's UI — the Claude Code webview, or the
+ * OpenCode web UI. Unmounting it, or moving it in the DOM, reloads that page —
+ * and the Claude extension reads a reloaded page as a fresh client, closing
+ * every live channel and cutting off whatever the agent was doing. Rendering
+ * the panel from whichever AgentFilesTab is on screen did exactly that on
+ * every BP switch.
  *
  * So the panels are rendered here instead, from a provider that sits above
  * every switch in the app, and positioned over whichever pane is currently
  * asking for one — the way the terminal sessions used to be. The container
  * never changes parent or position in the tree, so React has no reason to
  * touch an iframe: switching BPs only flips which child is `display: block`.
+ *
+ * Which agent a panel hosts comes from the person's choice (`useAgentChoice`),
+ * not from the pane: panes ask for "the agent for this BP", and the provider
+ * knows which one that is. Switching agents in Settings drops the other
+ * agent's panels.
  *
  * See `@/lib/agentPanels` for which panels stay mounted, and why the order of
  * the list is load-bearing.
@@ -44,9 +54,15 @@ interface PaneRect {
   height: number;
 }
 
-/** The pane currently asking for a panel, and which panel it wants. */
+/** A pane's scope: a business process inside one copy; the agent is the provider's to add. */
+interface PaneScope {
+  copy: string;
+  bp: string;
+}
+
+/** The pane currently asking for a panel, and which BP it wants. */
 interface BoundPane {
-  scope: AgentPanelScope;
+  scope: PaneScope;
   pane: HTMLElement;
 }
 
@@ -55,7 +71,7 @@ interface AgentPanelsContextValue {
    * Show `scope`'s panel over `pane`, mounting it if this is the first time.
    * Callers re-run this whenever the scope or the element changes.
    */
-  showPanel(scope: AgentPanelScope, pane: HTMLElement): void;
+  showPanel(scope: PaneScope, pane: HTMLElement): void;
   /**
    * Stop showing whatever `pane` was showing. The panel itself stays mounted
    * and connected — that is the whole point — it is just no longer visible.
@@ -99,6 +115,8 @@ export function useAgentPanelPane(
 
 /** Mounts the agent panels and keeps them positioned. See the file comment. */
 export function AgentPanelProvider({ children }: { children: ReactNode }) {
+  const choice = useAgentChoice();
+  const kind: AgentKind | undefined = choice.state === 'chosen' ? choice.kind : undefined; // eslint-disable-line no-restricted-syntax -- undefined = no agent chosen yet
   const [panels, setPanels] = useState<AgentPanelEntry[]>([]);
   // eslint-disable-next-line no-restricted-syntax -- null = no pane is asking for a panel
   const [bound, setBound] = useState<BoundPane | null>(null);
@@ -107,19 +125,39 @@ export function AgentPanelProvider({ children }: { children: ReactNode }) {
   // Monotonic tick that orders panels for eviction. A counter rather than a
   // clock: two switches inside the same millisecond still have an order.
   const tick = useRef(0);
+  // The agent to mount for a pane that asks now. A ref, so `showPanel` keeps a
+  // stable identity and the panes' effects do not re-run on every choice.
+  const kindRef = useRef(kind);
+  kindRef.current = kind;
 
-  const showPanel = useCallback((scope: AgentPanelScope, pane: HTMLElement) => {
+  const showPanel = useCallback((scope: PaneScope, pane: HTMLElement) => {
+    setBound((prev) =>
+      prev && prev.pane === pane && prev.scope.copy === scope.copy && prev.scope.bp === scope.bp
+        ? prev
+        : { scope, pane },
+    );
+    const k = kindRef.current;
+    if (!k) return;
     tick.current += 1;
     const shownAt = tick.current;
-    setPanels((live) => rememberAgentPanel(live, scope, shownAt));
-    setBound((prev) =>
-      prev && prev.pane === pane && sameAgentScope(prev.scope, scope) ? prev : { scope, pane },
-    );
+    setPanels((live) => rememberAgentPanel(live, { kind: k, ...scope }, shownAt));
   }, []);
 
   const hidePanel = useCallback((pane: HTMLElement) => {
     setBound((prev) => (prev && prev.pane === pane ? null : prev));
   }, []);
+
+  // The person switched agents (or chose one for the first time): the other
+  // agent's panels go, and the pane that is asking gets the new agent's panel.
+  useEffect(() => {
+    if (!kind) return;
+    setPanels((live) => dropOtherKinds(live, kind));
+    if (bound) {
+      tick.current += 1;
+      const shownAt = tick.current;
+      setPanels((live) => rememberAgentPanel(live, { kind, ...bound.scope }, shownAt));
+    }
+  }, [kind, bound]);
 
   // Track the bound pane's box so the fixed-position layer can sit exactly on
   // it. ResizeObserver catches the pane changing size (a window resize, the
@@ -152,10 +190,12 @@ export function AgentPanelProvider({ children }: { children: ReactNode }) {
     [showPanel, hidePanel],
   );
 
+  const shown: AgentPanelScope | undefined = bound && kind ? { kind, ...bound.scope } : undefined; // eslint-disable-line no-restricted-syntax -- undefined = nothing to show
+
   return (
     <AgentPanelsContext.Provider value={value}>
       {children}
-      <AgentPanelLayer panels={panels} shown={bound?.scope} rect={rect} />
+      <AgentPanelLayer panels={panels} shown={shown} rect={rect} />
     </AgentPanelsContext.Provider>
   );
 }
@@ -208,7 +248,11 @@ function AgentPanelLayer({
             style={{ display: on ? 'block' : 'none', pointerEvents: on ? 'auto' : 'none' }}
             aria-hidden={!on}
           >
-            <AgentSidebar copy={scope.copy} bp={scope.bp} />
+            {scope.kind === 'opencode' ? (
+              <OpenCodePanel copy={scope.copy} bp={scope.bp} />
+            ) : (
+              <AgentSidebar copy={scope.copy} bp={scope.bp} />
+            )}
           </div>
         );
       })}

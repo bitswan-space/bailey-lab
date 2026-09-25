@@ -8,6 +8,8 @@ import type {
   SnapshotTask,
 } from '@/types';
 import { authHeader, clearAccessToken } from './auth-token';
+import type { AgentKind } from './agentKind';
+import type { OpenCodeStatusResponse } from './opencodeAvailability';
 import { notifySessionExpired, SessionExpiredError } from './session';
 
 // When the oauth2-proxy SESSION expires, it answers API calls with a 302 to the
@@ -1246,15 +1248,29 @@ export interface OpenedAudit {
   report_path: string;
 }
 
+/** The signed-in user's own dashboard settings; today, which coding agent they use. */
+export interface UserPreferences {
+  codingAgent?: AgentKind;
+}
+
+/** What `/api/me` says about the signed-in user. */
+export interface Me {
+  email: string;
+  copy: string;
+  created?: boolean;
+  role?: 'admin' | 'auditor' | 'member';
+  preferences?: UserPreferences;
+}
+
 export const api = {
   /**
    * Identify the logged-in user and ensure their personal copy exists
    * (created on first login, reused after). The client auto-selects `copy`.
    */
-  getMe: () =>
-    getJson<{ email: string; copy: string; created?: boolean; role?: 'admin' | 'auditor' | 'member' }>(
-      '/api/me',
-    ),
+  getMe: () => getJson<Me>('/api/me'),
+  /** Save the signed-in user's own settings (see `Me.preferences`). */
+  setPreferences: (prefs: { codingAgent: AgentKind }) =>
+    putJson<{ preferences: UserPreferences }>('/api/me/preferences', prefs),
 
   createBusinessProcess: (body: CreateBusinessProcessRequest) =>
     postJson<CreateBusinessProcessResponse>('/api/business-processes', body),
@@ -1662,6 +1678,31 @@ export const api = {
      */
     sidebarStatus: () =>
       getJson<{ available: boolean }>('/api/coding-agent/sidebar/status'),
+    /**
+     * Whether the caller's OpenCode server is up, and the conversation to open
+     * for this BP (its latest, or one created for it). The server is started
+     * on demand, so the call itself can take a while; see
+     * `lib/opencodeAvailability.ts` for the states.
+     */
+    opencodeStatus: (copy: string, bp: string) =>
+      getJson<OpenCodeStatusResponse>(
+        `/api/coding-agent/opencode/status?copy=${encodeURIComponent(copy)}&bp=${encodeURIComponent(bp)}`,
+      ),
+    /**
+     * Hand OpenCode a task: a new conversation for the BP with the prompt as
+     * its first message — sent, not prefilled (OpenCode's API cannot prefill
+     * its UI). Returns that conversation's id.
+     */
+    opencodePrompt: (
+      copy: string,
+      bp: string,
+      task: { kind: 'sync' | 'merge-parent' | 'write-tests' | 'automation'; parent?: string } | { text: string },
+    ) =>
+      postJson<{ sessionId: string }>('/api/coding-agent/opencode/prompt', {
+        copy,
+        bp,
+        ...task,
+      }),
   },
 
   /**

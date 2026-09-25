@@ -367,24 +367,22 @@ export function AdvancedMenu({
               </>
             )}
 
-            {role === 'admin' && (
-              <>
-                <div className="my-1 h-px bg-border" aria-hidden />
-                {sectionLabel('Workspace')}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOpen(false);
-                    onOpenSettings();
-                  }}
-                  className={rowClass(false)}
-                >
-                  <Settings className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                  <span className="min-w-0 flex-1 truncate">Settings</span>
-                  <span className="text-[10px] text-muted-foreground">admin</span>
-                </button>
-              </>
-            )}
+            {/* Settings hold everyone's own preferences (which coding agent)
+                and, for admins, the workspace-wide ones. */}
+            <div className="my-1 h-px bg-border" aria-hidden />
+            {sectionLabel(role === 'admin' ? 'Workspace' : 'You')}
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onOpenSettings();
+              }}
+              className={rowClass(false)}
+            >
+              <Settings className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+              <span className="min-w-0 flex-1 truncate">Settings</span>
+              {role === 'admin' && <span className="text-[10px] text-muted-foreground">admin</span>}
+            </button>
           </div>
         </PopoverContent>
       </Popover>

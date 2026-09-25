@@ -1,14 +1,17 @@
+import type { AgentKind } from '@/lib/agentKind';
+
 /**
  * Which coding-agent panels stay mounted, and in what order.
  *
- * The Coding Agent tab is an iframe hosting the Claude Code webview, and the
- * extension behind it treats a client `init` that carries no channel id as
- * "the client reloaded": it closes every live channel, aborting whatever the
- * agent was in the middle of. That is the right call in VS Code, where the
- * webview's context is retained and a channel-less init only ever follows a
- * window reload. Here the page is ours to keep, and we were throwing it away
- * on every BP switch — so coming back to a BP killed the run that had been
- * going on while you were away, leaving a conversation that reads as finished.
+ * The Coding Agent tab is an iframe — the Claude Code webview, or the OpenCode
+ * web UI — and reloading it is expensive at best and destructive at worst: the
+ * Claude extension treats a client `init` that carries no channel id as "the
+ * client reloaded" and closes every live channel, aborting whatever the agent
+ * was in the middle of. That is the right call in VS Code, where the webview's
+ * context is retained and a channel-less init only ever follows a window
+ * reload. Here the page is ours to keep, and we were throwing it away on every
+ * BP switch — so coming back to a BP killed the run that had been going on
+ * while you were away, leaving a conversation that reads as finished.
  *
  * So the panels live above the BP switch: each scope the user has opened the
  * chat pane for keeps its page mounted (hidden when it is not the one being
@@ -17,8 +20,9 @@
  * browser (the client's test runner only covers `lib/*.test.ts`).
  */
 
-/** One panel's scope: a business process inside one copy. */
+/** One panel's scope: which agent, for a business process inside one copy. */
 export interface AgentPanelScope {
+  kind: AgentKind;
   copy: string;
   bp: string;
 }
@@ -35,22 +39,22 @@ export interface AgentPanelEntry {
 /**
  * How many panels stay alive at once.
  *
- * Each one is a full Claude Code webview — a multi-megabyte bundle, a
- * websocket, and an extension host process behind it — so this is not free.
- * Four covers the BPs a person actually moves between in a sitting; the least
- * recently shown panel beyond that is dropped, and revisiting it reloads, i.e.
- * it falls back to exactly the behaviour every scope had before.
+ * Each one is a full agent UI — a multi-megabyte bundle, a websocket or event
+ * stream, and a process behind it — so this is not free. Four covers the BPs a
+ * person actually moves between in a sitting; the least recently shown panel
+ * beyond that is dropped, and revisiting it reloads, i.e. it falls back to
+ * exactly the behaviour every scope had before.
  */
 export const MAX_LIVE_AGENT_PANELS = 4;
 
 /** Whether two scopes name the same panel. */
 export function sameAgentScope(a: AgentPanelScope, b: AgentPanelScope): boolean {
-  return a.copy === b.copy && a.bp === b.bp;
+  return a.kind === b.kind && a.copy === b.copy && a.bp === b.bp;
 }
 
 /** Stable React key for a scope. */
 export function agentScopeKey(scope: AgentPanelScope): string {
-  return `${scope.copy} ${scope.bp}`;
+  return `${scope.kind} ${scope.copy} ${scope.bp}`;
 }
 
 /**
@@ -78,6 +82,17 @@ export function rememberAgentPanel(
   }
   const kept = live.length + 1 > cap ? dropLeastRecent(live, cap - 1) : live;
   return [...kept, { scope, shownAt }];
+}
+
+/**
+ * The panels of one agent only — what stays when the person switches agents in
+ * Settings. The other agent's panels are dropped rather than kept hidden: they
+ * would hold a process each for a UI the person has just said they do not
+ * want, and switching back reloads them the way any evicted panel reloads.
+ */
+export function dropOtherKinds(live: AgentPanelEntry[], kind: AgentKind): AgentPanelEntry[] {
+  const kept = live.filter((e) => e.scope.kind === kind);
+  return kept.length === live.length ? live : kept;
 }
 
 /** The `keep` most recently shown entries, in their original order. */

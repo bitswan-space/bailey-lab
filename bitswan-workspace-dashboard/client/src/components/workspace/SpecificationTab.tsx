@@ -636,9 +636,9 @@ export function SpecificationTab({
       await doSave(false);
       try {
         if (agentCta) {
-          await handOffToAgent(copy, bp.id, agentCta.prompt);
+          await handOffToAgent(copy, bp.id, { text: agentCta.prompt });
         } else {
-          await api.codingAgent.handOffTask(copy, bp.id, 'automation');
+          await handOffToAgent(copy, bp.id, { kind: 'automation' });
         }
       } catch (err) {
         toast.error(`Could not hand the task to the agent: ${String(err)}`);

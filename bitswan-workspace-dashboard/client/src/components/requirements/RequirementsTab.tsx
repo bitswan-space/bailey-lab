@@ -34,7 +34,8 @@ import { TreegridLegend } from './TreegridLegend';
 import { VERDICT_TONES } from '@/lib/testStatus';
 import { useUrlParam } from '@/lib/urlState';
 import { cn } from '@/lib/utils';
-import { api, type Requirement, type RequirementTestResult } from '@/lib/api';
+import type { Requirement, RequirementTestResult } from '@/lib/api';
+import { handOffToAgent } from '@/lib/agent-handoff';
 
 interface Props {
   copy: string;
@@ -185,7 +186,7 @@ export function RequirementsTab({ copy, bp, onShowAgents }: Props) {
   // on the hand-off: a panel with an empty box is recoverable, being left on
   // this tab wondering what happened is not.
   const onStartCanned = (kind: 'write-tests' | 'automation') => {
-    api.codingAgent.handOffTask(copy, bp, kind).catch((err: unknown) => {
+    handOffToAgent(copy, bp, { kind }).catch((err: unknown) => {
       toast.error(`Could not hand the task to the agent: ${String(err)}`);
     });
     onShowAgents();
