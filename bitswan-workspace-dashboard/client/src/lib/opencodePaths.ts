@@ -45,3 +45,14 @@ export function isOpenCodeRoute(pathname: string): boolean {
     SEGMENT_RE.test(parts[3] ?? '')
   );
 }
+
+/**
+ * The `name` of a BP's OpenCode panel iframe. The dashboard's storage shim,
+ * injected into OpenCode's pages, reads it to give each panel its own
+ * window-scoped state (open tabs) — the web build otherwise shares one tab
+ * list across every frame on the origin. The prefix must match the server's
+ * `PANEL_NAME_PREFIX` (services/opencode-shim.ts).
+ */
+export function opencodePanelName(copy: string, bp: string): string {
+  return `bitswan-opencode:${copy}/${bp}`;
+}

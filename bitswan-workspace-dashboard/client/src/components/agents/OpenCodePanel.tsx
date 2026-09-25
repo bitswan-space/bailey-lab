@@ -9,7 +9,7 @@ import {
   shouldKeepPolling,
   type OpenCodeState,
 } from '@/lib/opencodeAvailability';
-import { isOpenCodeRoute, sessionPath } from '@/lib/opencodePaths';
+import { isOpenCodeRoute, opencodePanelName, sessionPath } from '@/lib/opencodePaths';
 import { SessionExpiredError } from '@/lib/session';
 
 interface OpenCodePanelProps {
@@ -144,6 +144,9 @@ export function OpenCodePanel({ copy, bp }: OpenCodePanelProps) {
       <iframe
         ref={frameRef}
         title="OpenCode"
+        // Read by the storage shim the server injects into OpenCode's pages:
+        // it keeps this panel's open tabs apart from the other BPs' panels.
+        name={opencodePanelName(copy, bp)}
         src={mountedEntry.current}
         onLoad={onLoad}
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals"

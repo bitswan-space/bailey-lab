@@ -111,6 +111,25 @@ the Claude extension use; sshd's ForceCommand never runs for it.
   so the script trusts a pid only if `/proc/<pid>/cmdline` is opencode and the
   server answers with its password.
 
+## Per-panel tabs
+
+OpenCode keeps its open-tab strip in "window-scoped" storage. The desktop app
+gives every window its own id; the web build uses the fixed id `browser`, so
+every frame on one origin shares one tab list under the localStorage prefix
+`opencode.window.browser.dat:`. With one panel per BP on the dashboard's
+origin, each panel showed the tabs the others had opened.
+
+So the dashboard serves OpenCode's page routes itself (`serveDocument` in
+`routes/opencode.ts`) and injects a small shim ahead of OpenCode's scripts
+(`services/opencode-shim.ts`). The shim reads the panel's scope from
+`window.name` — the iframe's `name`, `bitswan-opencode:<copy>/<bp>` — and
+shadows `window.localStorage` with a wrapper that rewrites only the
+window-scoped keys to `opencode.window.<scope>.dat:`. Each panel is then its
+own "window"; theme, settings, the server list and the last-used project keep
+their keys and stay shared. OpenCode's own CSP allows its inline theme script
+by hash, so the shim's hash is added to `script-src` the same way (the gate
+replaces that header on inner hosts anyway).
+
 ## Configuration
 
 `/etc/bitswan/opencode.json` (`OPENCODE_CONFIG`) holds the image-level defaults:
@@ -195,6 +214,11 @@ What the dashboard depends on for a given version, all in one place each:
   it throws for anything else); check them again after a bump.
 - `bitswan-coding-agent/bitswan-opencode-server` — `GET /api/info` as the health
   probe, and the v2 config keys in `opencode.default.json`.
+- `server/src/services/opencode-shim.ts` — the window-scoped storage prefix.
+  In the bundle, window-scoped storage resolves as
+  `platform === 'desktop' ? windowID : 'browser'` and names its store
+  `opencode.window.<id>.dat`; if either changes, the per-panel tabs silently
+  become shared again.
 
 After a bump: run the pinned binary with `serve`, fetch `/openapi.json`, and
 diff the path list against the above; then walk the verification list in the

@@ -20,6 +20,7 @@ import {
   touchServer,
   type OpenCodeConnection,
 } from '../services/opencode-server.js';
+import { cspAllowingShim, injectStorageShim } from '../services/opencode-shim.js';
 import { readPreferences } from '../services/user-preferences.js';
 import { isValidBpId, isValidCopyName } from '../services/workspace.js';
 
@@ -115,6 +116,41 @@ async function forwardApi(app: FastifyInstance, req: FastifyRequest, reply: Fast
 }
 
 /**
+ * One of OpenCode's pages, served by the dashboard with the storage shim
+ * injected (see services/opencode-shim.ts). Pages are small and rare, so the
+ * body is buffered rather than streamed; everything else about the response
+ * — status, content type, OpenCode's own CSP with the shim allowed — is kept.
+ */
+async function serveDocument(req: FastifyRequest, reply: FastifyReply, conn: OpenCodeConnection): Promise<FastifyReply> {
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${conn.baseUrl}${req.url}`, {
+      headers: outboundHeaders(req.headers, {
+        host: `127.0.0.1:${conn.localPort}`,
+        authorization: conn.authorization,
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    forgetServer(conn.email);
+    return reply.code(502).send({ error: `OpenCode is not answering: ${err instanceof Error ? err.message : String(err)}` });
+  }
+  const type = upstream.headers.get('content-type') ?? 'application/octet-stream';
+  reply.code(upstream.status).header('content-type', type);
+  const csp = upstream.headers.get('content-security-policy');
+  if (!upstream.ok || !type.startsWith('text/html')) {
+    if (csp) reply.header('content-security-policy', csp);
+    return reply.send(Buffer.from(await upstream.arrayBuffer()));
+  }
+  // OpenCode's index.html carries no cache policy; heuristic caching would
+  // pin a browser to an old bundle across an upgrade.
+  reply.header('cache-control', 'no-cache');
+  reply.header('x-content-type-options', 'nosniff');
+  if (csp) reply.header('content-security-policy', cspAllowingShim(csp));
+  return reply.send(injectStorageShim(await upstream.text()));
+}
+
+/**
  * The OpenCode UI's own pages and static files, for the SPA fallback in
  * server.ts. Returns false when the request is not OpenCode's, or the caller
  * has not chosen OpenCode, so the dashboard's own 404/SPA handling runs.
@@ -144,7 +180,8 @@ export async function forwardShell(
     return true;
   }
   touchServer(email);
-  await proxyTo(req, reply, ensured.conn);
+  if (kind === 'document' && req.method === 'GET') await serveDocument(req, reply, ensured.conn);
+  else await proxyTo(req, reply, ensured.conn);
   return true;
 }
 

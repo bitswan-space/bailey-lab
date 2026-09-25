@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { encodeBase64Url, isOpenCodeRoute, sessionPath } from './opencodePaths.ts';
+import { encodeBase64Url, isOpenCodeRoute, opencodePanelName, sessionPath } from './opencodePaths.ts';
 
 const origin = 'https://ws-dashboard--inner.example.com';
 
@@ -30,4 +30,8 @@ test('home and the dashboard’s own pages are not', () => {
   assert.equal(isOpenCodeRoute(`/server/${encodeBase64Url(origin)}`), false);
   assert.equal(isOpenCodeRoute(`/server/${encodeBase64Url(origin)}/session`), false);
   assert.equal(isOpenCodeRoute('/server/not base64/session/ses_1'), false);
+});
+
+test('a panel is named after its BP, with the prefix the storage shim looks for', () => {
+  assert.equal(opencodePanelName('alice-acme-com', 'orders'), 'bitswan-opencode:alice-acme-com/orders');
 });
