@@ -130,6 +130,15 @@ their keys and stay shared. OpenCode's own CSP allows its inline theme script
 by hash, so the shim's hash is added to `script-src` the same way (the gate
 replaces that header on inner hosts anyway).
 
+## Light mode by default
+
+OpenCode follows the OS colour scheme unless the person has picked one; the
+dashboard around the panel has no dark mode yet. The same injected script
+seeds the unprefixed `opencode-color-scheme` key to `light` when it is absent
+— the key both OpenCode's inline theme script and its app read, and the one
+the app writes when the person picks a scheme in OpenCode's settings, so the
+seed only ever applies to a first visit and a chosen scheme is kept.
+
 ## Configuration
 
 `/etc/bitswan/opencode.json` (`OPENCODE_CONFIG`) holds the image-level defaults:
@@ -214,11 +223,13 @@ What the dashboard depends on for a given version, all in one place each:
   it throws for anything else); check them again after a bump.
 - `bitswan-coding-agent/bitswan-opencode-server` — `GET /api/info` as the health
   probe, and the v2 config keys in `opencode.default.json`.
-- `server/src/services/opencode-shim.ts` — the window-scoped storage prefix.
-  In the bundle, window-scoped storage resolves as
+- `server/src/services/opencode-shim.ts` — the window-scoped storage prefix
+  and the colour-scheme key. In the bundle, window-scoped storage resolves as
   `platform === 'desktop' ? windowID : 'browser'` and names its store
   `opencode.window.<id>.dat`; if either changes, the per-panel tabs silently
-  become shared again.
+  become shared again. The theme reads `opencode-color-scheme` (values
+  `light`, `dark`, `system`); if that key or its values change, panels go
+  back to following the OS scheme.
 
 After a bump: run the pinned binary with `serve`, fetch `/openapi.json`, and
 diff the path list against the above; then walk the verification list in the

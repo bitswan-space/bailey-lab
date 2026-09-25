@@ -18,6 +18,13 @@ import crypto from 'node:crypto';
  * state — theme, settings, the server list, the last-used project — keeps its
  * keys and stays shared, exactly as it is shared between desktop windows.
  *
+ * The same script also seeds OpenCode's colour scheme to light when the
+ * person has not chosen one: OpenCode defaults to the OS preference, and the
+ * dashboard around the panel has no dark mode yet. Both the inline theme
+ * script and the app read the unprefixed `opencode-color-scheme` key and the
+ * app writes it when the person picks a scheme, so the seed only ever applies
+ * to a first visit.
+ *
  * Coupled to 2.0.16's storage naming; `docs/opencode-integration.md` says
  * what to re-check on a bump.
  */
@@ -28,7 +35,14 @@ export const PANEL_NAME_PREFIX = 'bitswan-opencode:';
 /** The localStorage prefix OpenCode's web build uses for window-scoped state. */
 export const WINDOW_STORAGE_PREFIX = 'opencode.window.browser.dat:';
 
+/** The key OpenCode's theme script and app read the colour scheme from: light, dark or system. */
+export const COLOR_SCHEME_KEY = 'opencode-color-scheme';
+
+/** The scheme a panel starts in when the person has not picked one. */
+export const DEFAULT_COLOR_SCHEME = 'light';
+
 /** The panel's scope from an iframe name, or undefined when it is not a panel. */
+// eslint-disable-next-line no-restricted-syntax -- undefined = not a panel
 export function panelScopeFromName(name: string): string | undefined {
   if (!name.startsWith(PANEL_NAME_PREFIX)) return undefined;
   const scope = name.slice(PANEL_NAME_PREFIX.length);
@@ -48,15 +62,20 @@ export function scopedStorageKey(key: string, scope: string): string {
 export const STORAGE_SHIM_SOURCE = `(function () {
   var NAME_PREFIX = ${JSON.stringify(PANEL_NAME_PREFIX)};
   var WINDOW_PREFIX = ${JSON.stringify(WINDOW_STORAGE_PREFIX)};
+  var SCHEME_KEY = ${JSON.stringify(COLOR_SCHEME_KEY)};
+  var DEFAULT_SCHEME = ${JSON.stringify(DEFAULT_COLOR_SCHEME)};
+  var real;
+  try { real = window.localStorage; } catch (e) { return; }
+  if (!real) return;
+  try {
+    if (real.getItem(SCHEME_KEY) === null) real.setItem(SCHEME_KEY, DEFAULT_SCHEME);
+  } catch (e) { /* storage full or blocked: OpenCode falls back to the OS scheme */ }
   var name = '';
   try { name = String(window.name || ''); } catch (e) { return; }
   if (name.indexOf(NAME_PREFIX) !== 0) return;
   var scope = name.slice(NAME_PREFIX.length);
   if (!scope) return;
   var mapped = 'opencode.window.' + scope + '.dat:';
-  var real;
-  try { real = window.localStorage; } catch (e) { return; }
-  if (!real) return;
   function map(key) {
     key = String(key);
     return key.indexOf(WINDOW_PREFIX) === 0 ? mapped + key.slice(WINDOW_PREFIX.length) : key;

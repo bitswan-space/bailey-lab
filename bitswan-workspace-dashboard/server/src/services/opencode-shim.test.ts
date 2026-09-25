@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { test } from 'node:test';
 import {
+  COLOR_SCHEME_KEY,
   STORAGE_SHIM_SOURCE,
   WINDOW_STORAGE_PREFIX,
   cspAllowingShim,
@@ -59,16 +60,15 @@ test('in a panel, the shim gives window-scoped keys a per-panel home and leaves 
   const { window, storage } = windowWithShim('bitswan-opencode:alice/orders');
   window.localStorage.setItem(`${WINDOW_STORAGE_PREFIX}tabs`, '["ses_1"]');
   window.localStorage.setItem('opencode.global.dat:theme', 'oc-2');
-  assert.deepEqual(
-    [...storage.map.keys()],
-    ['opencode.window.alice/orders.dat:tabs', 'opencode.global.dat:theme'],
-  );
+  // (The shim also seeds the colour scheme; that key is covered below.)
+  const stored = () => [...storage.map.keys()].filter((k) => k !== COLOR_SCHEME_KEY);
+  assert.deepEqual(stored(), ['opencode.window.alice/orders.dat:tabs', 'opencode.global.dat:theme']);
   assert.equal(window.localStorage.getItem(`${WINDOW_STORAGE_PREFIX}tabs`), '["ses_1"]');
   assert.equal(window.localStorage.getItem('opencode.global.dat:theme'), 'oc-2');
   window.localStorage.removeItem(`${WINDOW_STORAGE_PREFIX}tabs`);
-  assert.deepEqual([...storage.map.keys()], ['opencode.global.dat:theme']);
-  assert.equal(window.localStorage.key(0), 'opencode.global.dat:theme');
-  assert.equal(window.localStorage.length, 1);
+  assert.deepEqual(stored(), ['opencode.global.dat:theme']);
+  assert.equal(window.localStorage.key(1), 'opencode.global.dat:theme');
+  assert.equal(window.localStorage.length, 2);
 });
 
 test('two panels on one storage keep separate tabs', () => {
@@ -83,10 +83,30 @@ test('two panels on one storage keep separate tabs', () => {
   assert.equal(a.localStorage.getItem(`${WINDOW_STORAGE_PREFIX}tabs`), '["ses_orders"]');
 });
 
-test('outside a panel the shim does nothing', () => {
+test('outside a panel the shim leaves the tab keys alone', () => {
   const { window, storage } = windowWithShim('');
   window.localStorage.setItem(`${WINDOW_STORAGE_PREFIX}tabs`, 'x');
-  assert.deepEqual([...storage.map.keys()], [`${WINDOW_STORAGE_PREFIX}tabs`]);
+  assert.equal(storage.map.get(`${WINDOW_STORAGE_PREFIX}tabs`), 'x');
+});
+
+/**
+ * The dashboard around the panel has no dark mode, and OpenCode follows the
+ * OS preference unless told otherwise — so a first visit is told: light.
+ */
+test('a first visit starts in light mode; a chosen scheme is kept', () => {
+  const first = windowWithShim('bitswan-opencode:alice/orders');
+  assert.equal(first.storage.map.get(COLOR_SCHEME_KEY), 'light');
+  assert.equal(first.window.localStorage.getItem(COLOR_SCHEME_KEY), 'light');
+
+  const chosen = fakeStorage();
+  chosen.setItem(COLOR_SCHEME_KEY, 'dark');
+  const window: { name: string; localStorage: typeof chosen } = { name: 'bitswan-opencode:alice/orders', localStorage: chosen };
+  new Function('window', STORAGE_SHIM_SOURCE)(window);
+  assert.equal(chosen.map.get(COLOR_SCHEME_KEY), 'dark');
+
+  // The seed is about the dashboard's pages, not about being in a panel.
+  const plain = windowWithShim('');
+  assert.equal(plain.storage.map.get(COLOR_SCHEME_KEY), 'light');
 });
 
 test('the shim is the first thing in <head>, once', () => {
