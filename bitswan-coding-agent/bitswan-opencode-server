@@ -82,15 +82,20 @@ GENERATED_CONFIG="$ROOT/opencode.generated.json"
 # Exports the provider's key for the server and points OPENCODE_CONFIG at a
 # generated copy of the image config that names the default model and, when
 # the admin restricted OpenCode to that provider, carries a policy hiding every
-# other one (deny * then allow the id; the last matching statement wins). No
-# file, or an unusable one: the image config stands and people connect their
-# own provider, as before. The key goes into the server's environment and
-# nowhere else — not server.json, not the generated config, not this script's
-# output — because GET /api/config is reachable from the browser.
+# other one (deny * then allow the id; the last matching statement wins). An
+# endpoint URL becomes the provider's settings.baseURL — for a catalogue
+# provider that routes it through a proxy with its own models and package; a
+# custom provider (one not in the catalogue) also gets its display name,
+# runtime package, the env var its key is under, and its models or the
+# catalogue provider it inherits them from. No file, or an unusable one: the
+# image config stands and people connect their own provider, as before. The
+# key goes into the server's environment and nowhere else — not server.json,
+# not the generated config, not this script's output — because GET
+# /api/config is reachable from the browser.
 apply_provider() {
     rm -f "$GENERATED_CONFIG"
     [ -r "$PROVIDER_ENV_FILE" ] || return 0
-    local provider env model restrict
+    local provider env model restrict base_url custom c_name c_package c_canonical c_models
     set -a
     # shellcheck disable=SC1090
     . "$PROVIDER_ENV_FILE"
@@ -99,19 +104,43 @@ apply_provider() {
     env="${BITSWAN_OPENCODE_PROVIDER_ENV:-}"
     model="${BITSWAN_OPENCODE_MODEL:-}"
     restrict="${BITSWAN_OPENCODE_RESTRICT:-false}"
+    base_url="${BITSWAN_OPENCODE_BASE_URL:-}"
+    custom="${BITSWAN_OPENCODE_CUSTOM:-false}"
+    c_name="${BITSWAN_OPENCODE_CUSTOM_NAME:-}"
+    c_package="${BITSWAN_OPENCODE_CUSTOM_PACKAGE:-}"
+    c_canonical="${BITSWAN_OPENCODE_CUSTOM_CANONICAL:-}"
+    c_models="${BITSWAN_OPENCODE_CUSTOM_MODELS:-}"
     if [ -z "$provider" ] || [ -z "$env" ] || [ -z "$model" ] || [ -z "${!env:-}" ]; then
         echo "bitswan-opencode-server: $PROVIDER_ENV_FILE is incomplete; starting without a default provider" >&2
         return 0
     fi
-    if python3 - "$OPENCODE_CONFIG" "$GENERATED_CONFIG" "$provider" "$model" "$restrict" <<'PY'
+    if [ "$custom" = "true" ] && { [ -z "$base_url" ] || [ -z "$c_package" ]; }; then
+        echo "bitswan-opencode-server: $PROVIDER_ENV_FILE names a custom provider without an endpoint or package; starting without a default provider" >&2
+        return 0
+    fi
+    if python3 - "$OPENCODE_CONFIG" "$GENERATED_CONFIG" "$provider" "$model" "$restrict" "$env" \
+        "$base_url" "$custom" "$c_name" "$c_package" "$c_canonical" "$c_models" <<'PY'
 import json, os, sys
-base, out, provider, model, restrict = sys.argv[1:6]
+(base, out, provider, model, restrict, env,
+ base_url, custom, c_name, c_package, c_canonical, c_models) = sys.argv[1:13]
 try:
     with open(base) as f:
         cfg = json.load(f)
 except FileNotFoundError:
     cfg = {}
 cfg["model"] = provider + "/" + model
+if base_url or custom == "true":
+    prov = cfg.setdefault("providers", {}).setdefault(provider, {})
+    if base_url:
+        prov.setdefault("settings", {})["baseURL"] = base_url
+    if custom == "true":
+        prov["name"] = c_name or provider
+        prov["package"] = "@opencode/ai/providers/" + c_package
+        prov["env"] = [env]
+        if c_canonical:
+            prov["canonical"] = c_canonical
+        if c_models:
+            prov["models"] = {m["id"]: {"name": m.get("name") or m["id"]} for m in json.loads(c_models)}
 if restrict == "true":
     exp = cfg.setdefault("experimental", {})
     kept = [s for s in exp.get("policies", []) if not (isinstance(s, dict) and s.get("action") == "provider.use")]
