@@ -175,9 +175,9 @@ function Field({ label, hint, children, style }) {
   );
 }
 
-function TextInput({ value, onChange, placeholder, mono, type = 'text', autoFocus, style }) {
+function TextInput({ value, onChange, placeholder, mono, type = 'text', autoFocus, autoComplete, style }) {
   return (
-    <input type={type} value={value} placeholder={placeholder} autoFocus={autoFocus}
+    <input type={type} value={value} placeholder={placeholder} autoFocus={autoFocus} autoComplete={autoComplete}
       onChange={e => onChange(e.target.value)}
       style={{
         height: 36, padding: '0 12px', border: `1px solid ${C.border}`, borderRadius: 8,

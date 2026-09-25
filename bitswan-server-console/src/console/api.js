@@ -345,6 +345,13 @@ export const Api = {
   ssoGet: () => getJSON('/bailey/api/admin/sso'),
   ssoSet: (cfg) => postJSON('/bailey/api/admin/sso', cfg),
   ssoTest: (issuerUrl) => postJSON('/bailey/api/admin/sso/test', { issuer_url: issuerUrl }),
+  // Admin: the server-wide default model provider for OpenCode — one key every
+  // workspace's OpenCode starts with. GET never returns the key, only that one
+  // is stored and its last characters. POST saves: a blank api_key keeps the
+  // stored one, enabled:false keeps the key and turns the default off, and
+  // { clear: true } forgets it all (internal/daemon/opencode_provider.go).
+  openCodeProvider: () => getJSON('/bailey/api/admin/opencode-provider'),
+  setOpenCodeProvider: (body) => postJSON('/bailey/api/admin/opencode-provider', body),
   // Outstanding (unconsumed) invites, expired ones included (flagged).
   invites: () => getJSON('/bailey/api/people/invites'),
   revokeInvite: (email) => postJSON('/bailey/api/people/invites/revoke', { email }),

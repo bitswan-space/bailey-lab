@@ -31,6 +31,7 @@ import './console/views-resources.jsx';
 import './console/views-updates.jsx';
 import './console/views-backups.jsx';
 import './console/views-sso.jsx';
+import './console/views-agents.jsx';
 import './console/auth-scenes.jsx';
 import './console/console-app.jsx';
 
