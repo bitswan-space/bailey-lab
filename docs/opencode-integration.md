@@ -188,16 +188,29 @@ organisation decides where prompts go. The pieces, in the order a key travels:
   (`internal/daemon/opencode_provider.go`). The response never carries the key,
   only that one is stored and its last four characters. A blank key on save
   keeps the stored one; `enabled: false` keeps everything and removes the
-  files; `clear: true` forgets it all. The provider list is a fixed table in
-  the daemon — id, name, env var, a model hint — and the ids and env names are
-  OpenCode's own, from its catalogue at models.dev.
+  files; `clear: true` forgets it all. The provider list is OpenCode's own
+  catalogue (models.dev, what `/connect` shows) reduced to the providers whose
+  credential is a single API key in one env var — 210 of 223 at generation
+  time; Bedrock, Azure, Vertex and the other multi-value ones are left out —
+  checked in as `opencode_catalog.go` by `gen_opencode_catalog.go`, with the
+  nine familiar providers marked popular. Two ways past the catalogue: an
+  endpoint URL on a catalogue provider (its `settings.baseURL`, for a proxy
+  or gateway with the provider's own models and API), and a custom provider —
+  an id of its own, a display name, the API it speaks (one of OpenCode's
+  runtime packages: OpenAI-compatible, Anthropic-compatible, OpenAI,
+  Anthropic, Google), an endpoint, and either the models it serves or a
+  catalogue provider whose models it inherits (`canonical`).
 - **The file** — `<ws>/coding-agent-home/.bitswan/opencode-provider.env`,
   which the agent sees as `/home/agent/.bitswan/opencode-provider.env`. One
   `NAME='value'` line per setting, POSIX single-quoted because the launcher
   sources it with bash: `BITSWAN_OPENCODE_PROVIDER`,
   `BITSWAN_OPENCODE_PROVIDER_ENV`, `BITSWAN_OPENCODE_MODEL`,
-  `BITSWAN_OPENCODE_RESTRICT`, then the provider's own env var
-  (`ANTHROPIC_API_KEY='…'`) — the only place the key appears. The daemon
+  `BITSWAN_OPENCODE_RESTRICT`, an optional `BITSWAN_OPENCODE_BASE_URL`, for a
+  custom provider `BITSWAN_OPENCODE_CUSTOM='true'` with `_NAME`, `_PACKAGE`,
+  optionally `_CANONICAL`, and `_MODELS` (a JSON list of `{id, name}` inside
+  the quotes), then the env var the provider reads its key from — the
+  provider's own (`ANTHROPIC_API_KEY='…'`), or `BITSWAN_OPENCODE_API_KEY` for a
+  custom one — the only place the key appears. The daemon
   writes it on save, when the agent is enabled in a workspace, and on every
   reconcile tick (60 s); only on a change, mode 600, owned by the agent user
   (the container's own chown runs only at its start), through a temp file and
@@ -211,7 +224,10 @@ organisation decides where prompts go. The pieces, in the order a key travels:
   document `OPENCODE_CONFIG` names (the image config) plus
   `model: "<provider>/<model>"` and, when restricted, `experimental.policies`
   with `provider.use` deny `*` then allow the provider — the last matching
-  statement wins. `OPENCODE_CONFIG` then points at the generated file. No
+  statement wins. An endpoint URL becomes `providers.<id>.settings.baseURL`;
+  a custom provider's entry also carries `name`, `package`
+  (`@opencode/ai/providers/<style>`), `env: ["BITSWAN_OPENCODE_API_KEY"]`, and
+  `models` or `canonical`. `OPENCODE_CONFIG` then points at the generated file. No
   file: the image config, as before. The key is never written anywhere — not
   server.json, not the generated config, not the script's output — because
   `GET /api/config` is reachable from the browser through the forwarder.
@@ -224,7 +240,11 @@ backticks included); `GET /api/provider` lists the provider next to the
 built-in `opencode` one, or alone when restricted; `GET /api/model/default`
 is the configured model for a location without a config of its own. A BP's
 own `opencode.json` merges on top and can set another `model` — for that BP,
-and only among the providers the policy allows. A location's catalogue loads
+and only among the providers the policy allows. A custom OpenAI-compatible
+provider appears in `/api/provider` under its display name, is the default
+model's provider, and is the only provider left when restricted; an override
+on `anthropic` lands in its `settings.baseURL` with the provider still
+listed. A location's catalogue loads
 a few seconds after the location is first touched: the first `/api/provider`
 answer for a new directory is empty, then a `provider.updated` event follows.
 
@@ -281,15 +301,12 @@ What the dashboard depends on for a given version, all in one place each:
   probe, the v2 config keys in `opencode.default.json`, and for the
   server-wide provider: `model: "provider/model"`, the policy statement shape
   (`{action: "provider.use", resource, effect}` under `experimental`, so
-  re-check it first), and the provider ids and env var names in the daemon's
-  table (`internal/daemon/opencode_provider.go`) against models.dev.
-- `server/src/services/opencode-shim.ts` — the window-scoped storage prefix
-  and the colour-scheme key. In the bundle, window-scoped storage resolves as
-  `platform === 'desktop' ? windowID : 'browser'` and names its store
-  `opencode.window.<id>.dat`; if either changes, the per-panel tabs silently
-  become shared again. The theme reads `opencode-color-scheme` (values
-  `light`, `dark`, `system`); if that key or its values change, panels go
-  back to following the OS scheme.
+  re-check it first), the `providers.<id>` entry shape (`name`, `env`,
+  `package`, `canonical`, `settings.baseURL`, `models`), the package names
+  under `@opencode/ai/providers/` (`openCodePackages` in
+  `internal/daemon/opencode_provider.go`; the binary's strings list them), and
+  the catalogue: run `go generate ./internal/daemon/` in
+  bitswan-automation-server to refresh `opencode_catalog.go` from models.dev.
 
 After a bump: run the pinned binary with `serve`, fetch `/openapi.json`, and
 diff the path list against the above; then walk the verification list in the
