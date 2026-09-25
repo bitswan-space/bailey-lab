@@ -47,6 +47,12 @@ test('what is not OpenCode falls through to the dashboard', () => {
 test('directory query parameters must stay inside the copies tree', () => {
   assert.equal(directoryParamsAllowed(`/api/session?directory=${encodeURIComponent(dir)}`), true);
   assert.equal(directoryParamsAllowed('/api/session'), true);
+  // The UI names the server's own working directory — the copies root — as
+  // its default location on every load, and sometimes no directory at all.
+  assert.equal(directoryParamsAllowed('/api/location?location%5Bdirectory%5D='), true);
+  assert.equal(directoryParamsAllowed('/api/provider?location%5Bdirectory%5D=%2Fworkspace%2Fcopies'), true);
+  assert.equal(directoryParamsAllowed('/api/provider?directory=%2Fworkspace%2Fcopies%2F'), true);
+  assert.equal(directoryParamsAllowed('/api/provider?directory=%2Fworkspace%2Fcopies-other'), false);
   assert.equal(directoryParamsAllowed('/api/session?directory=%2Fhome%2Fagent'), false);
   assert.equal(directoryParamsAllowed('/api/session?directory=%2Fworkspace%2Fcopies%2Fa%2F..%2F..%2Fetc'), false);
   assert.equal(

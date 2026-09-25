@@ -74,9 +74,10 @@ export function classifyOpenCodePath(pathname: string): OpenCodePath {
 const DIRECTORY_PARAMS = ['directory', 'location[directory]'];
 
 /**
- * Whether every directory named in the query string is a path inside the
- * copies tree. OpenCode scopes API calls with `?directory=`; a call for a
- * directory the dashboard does not manage is refused rather than forwarded.
+ * Whether every directory named in the query string is inside the copies
+ * tree. OpenCode scopes API calls with `?directory=` / `location[directory]`;
+ * a call for a directory the dashboard does not manage is refused rather than
+ * forwarded.
  */
 export function directoryParamsAllowed(url: string): boolean {
   const search = url.includes('?') ? url.slice(url.indexOf('?')) : '';
@@ -89,8 +90,16 @@ export function directoryParamsAllowed(url: string): boolean {
   return true;
 }
 
-/** Whether one directory is inside the copies tree (and does not climb out of it). */
+/**
+ * Whether one directory is the copies tree or inside it, without climbing out.
+ *
+ * The root itself counts: it is the server's working directory, so OpenCode's
+ * UI names it as its default location on every load (`location[directory]=`,
+ * empty, means the same thing) — refusing those made every page load report
+ * "Request failed".
+ */
 export function directoryAllowed(directory: string): boolean {
+  if (directory === '' || directory === COPIES_ROOT) return true;
   if (!directory.startsWith(`${COPIES_ROOT}/`)) return false;
   return !directory.split('/').some((part) => part === '..');
 }
