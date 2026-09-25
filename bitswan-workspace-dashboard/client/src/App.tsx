@@ -1026,7 +1026,11 @@ function Shell() {
       // Where the caller wants to arrive, before anything can bail out: a
       // door that opens the code has to open it even when the copy behind it
       // is the one already in view.
-      if (opts?.landOn) handleTab(opts.landOn, opts.landOnView ? { sub: opts.landOnView } : undefined);
+      if (opts?.landOn)
+        handleTab(opts.landOn, {
+          ...(opts.landOnView ? { sub: opts.landOnView } : {}),
+          ...(opts.landOnParams ?? {}),
+        });
       const after = opts?.after;
       if (name === copy && !after) return;
       uiLock.lock(label, BUSY_TIMEOUT_SWITCH_MS, name);
@@ -1095,7 +1099,11 @@ function Shell() {
           proposedChanges={auditProposedChanges}
           onLeave={() =>
             myCopy
-              ? handleEnterCopy(myCopy, 'Leaving the audit…')
+              ? // Back where the audit is signed off: the frozen image's Audits.
+                handleEnterCopy(myCopy, 'Leaving the audit…', {
+                  landOn: 'deployments',
+                  landOnParams: { stage: 'staging', section: 'audits' },
+                })
               : undefined
           }
           onGoToDeploy={() => handleTab('deploy')}

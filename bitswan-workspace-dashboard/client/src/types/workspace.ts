@@ -105,9 +105,15 @@ export type FlowTab =
  *  work the destination is not usable without (a business process being
  *  cloned into it). `landOn` is where to arrive and `landOnView` the sub-view
  *  inside it — the audit door opens the code, not the page the button was on,
- *  and not the chat next to it either. */
+ *  and not the chat next to it either. `landOnParams` are further page
+ *  params of the destination (e.g. Deployments' `stage` and `section`). */
 export type EnterCopy = (
   name: string,
   label: string,
-  opts?: { after?: () => Promise<void>; landOn?: FlowTab; landOnView?: string },
+  opts?: {
+    after?: () => Promise<void>;
+    landOn?: FlowTab;
+    landOnView?: string;
+    landOnParams?: Record<string, string>;
+  },
 ) => void;
