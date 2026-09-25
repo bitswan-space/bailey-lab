@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -73,17 +75,82 @@ func openCodeProviderByID(id string) (openCodeProvider, bool) {
 	return openCodeProvider{}, false
 }
 
+// openCodePackage is one of OpenCode's runtime provider packages a custom
+// endpoint can be spoken to through, by the name after @opencode/ai/providers/.
+// The list is what 2.0.16 ships; re-check it on a bump.
+type openCodePackage struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+var openCodePackages = []openCodePackage{
+	{ID: "openai-compatible", Name: "OpenAI-compatible (chat completions)"},
+	{ID: "anthropic-compatible", Name: "Anthropic-compatible (messages)"},
+	{ID: "openai", Name: "OpenAI"},
+	{ID: "anthropic", Name: "Anthropic"},
+	{ID: "google", Name: "Google Gemini"},
+}
+
+func openCodePackageByID(id string) (openCodePackage, bool) {
+	for _, p := range openCodePackages {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return openCodePackage{}, false
+}
+
+// openCodeCustomModel is one model a custom provider serves. A custom provider
+// has no catalogue, so the admin names its models (unless it inherits them).
+type openCodeCustomModel struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+// openCodeCustomProvider describes a provider that is not in OpenCode's
+// catalogue: an endpoint of the admin's own — a company gateway, a self-hosted
+// model server — reached through one of OpenCode's runtime packages. Its id is
+// the setting's Provider, its endpoint the setting's BaseURL, and its key
+// travels under openCodeCustomKeyEnv.
+type openCodeCustomProvider struct {
+	Name      string                `json:"name"`
+	Package   string                `json:"package"`
+	Canonical string                `json:"canonical,omitempty"`
+	Models    []openCodeCustomModel `json:"models,omitempty"`
+}
+
+// openCodeCustomKeyEnv is the env var a custom provider reads its key from;
+// the launcher names it in the generated provider entry.
+const openCodeCustomKeyEnv = "BITSWAN_OPENCODE_API_KEY"
+
 // openCodeProviderConfig is the stored setting: one JSON blob under
 // settingOpenCodeProvider, the way the SSO setting is kept. The key stays
 // inside it; nothing but the env file ever reads it back out.
+//
+// Provider is a catalogue id, or the custom provider's own id when Custom is
+// set. BaseURL is optional for a catalogue provider (its endpoint override,
+// for a proxy or gateway) and required for a custom one.
 type openCodeProviderConfig struct {
-	Enabled   bool   `json:"enabled"`
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	APIKey    string `json:"api_key"`
-	Restrict  bool   `json:"restrict"`
-	UpdatedAt string `json:"updated_at"`
-	UpdatedBy string `json:"updated_by"`
+	Enabled   bool                    `json:"enabled"`
+	Provider  string                  `json:"provider"`
+	Model     string                  `json:"model"`
+	APIKey    string                  `json:"api_key"`
+	Restrict  bool                    `json:"restrict"`
+	BaseURL   string                  `json:"base_url,omitempty"`
+	Custom    *openCodeCustomProvider `json:"custom,omitempty"`
+	UpdatedAt string                  `json:"updated_at"`
+	UpdatedBy string                  `json:"updated_by"`
+}
+
+// keyEnv is the env var the provider reads its key from.
+func (c openCodeProviderConfig) keyEnv() string {
+	if c.Custom != nil {
+		return openCodeCustomKeyEnv
+	}
+	if p, ok := openCodeProviderByID(c.Provider); ok {
+		return p.Env
+	}
+	return ""
 }
 
 func getOpenCodeProvider() (openCodeProviderConfig, error) {
@@ -122,20 +189,84 @@ func hasControlChars(s string) bool {
 	return false
 }
 
+// customProviderIDRe is the shape of a custom provider id: it becomes the
+// prefix of every model reference (`<id>/<model>`) and a policy resource.
+var customProviderIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+func validModelID(id string) bool {
+	return id != "" && !strings.Contains(id, "#") && !strings.ContainsAny(id, " \t") && !hasControlChars(id)
+}
+
+// validateBaseURL accepts an absolute http(s) URL with a host and nothing a
+// shell line or a JSON string could trip over.
+func validateBaseURL(raw string) error {
+	if hasControlChars(raw) || strings.ContainsAny(raw, " \t\"'") {
+		return fmt.Errorf("the endpoint URL contains characters a URL cannot")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("the endpoint must be an http(s) URL, e.g. https://llm.example.com/v1")
+	}
+	return nil
+}
+
 // validateOpenCodeProvider checks a setting about to be stored. An enabled
-// setting needs all three of provider, model and key; a disabled one may be
-// partial (it keeps whatever was there for a one-click re-enable), but what it
-// carries must still be well-formed.
+// setting needs all of provider, model and key (and, for a custom provider,
+// an endpoint and models to offer); a disabled one may be partial — it keeps
+// whatever was there for a one-click re-enable — but what it carries must
+// still be well-formed.
 func validateOpenCodeProvider(c openCodeProviderConfig) error {
-	if c.Provider != "" || c.Enabled {
+	switch {
+	case c.Custom != nil:
+		if !customProviderIDRe.MatchString(c.Provider) {
+			return fmt.Errorf("a custom provider id is lowercase letters, digits, '-' and '_' (e.g. acme)")
+		}
+		if _, ok := openCodeProviderByID(c.Provider); ok {
+			return fmt.Errorf("%q is a provider in OpenCode's catalogue — choose it from the list, or give the custom provider another id", c.Provider)
+		}
+		if hasControlChars(c.Custom.Name) {
+			return fmt.Errorf("the display name contains characters it cannot")
+		}
+		if _, ok := openCodePackageByID(c.Custom.Package); !ok {
+			return fmt.Errorf("choose which API the endpoint speaks")
+		}
+		if c.Custom.Canonical != "" {
+			if _, ok := openCodeProviderByID(c.Custom.Canonical); !ok {
+				return fmt.Errorf("models can only be inherited from a provider in the catalogue")
+			}
+		}
+		listed := false
+		for _, m := range c.Custom.Models {
+			if !validModelID(m.ID) || hasControlChars(m.Name) {
+				return fmt.Errorf("a listed model needs an id without spaces or '#'")
+			}
+			listed = listed || m.ID == c.Model
+		}
+		if c.Enabled {
+			if c.BaseURL == "" {
+				return fmt.Errorf("a custom provider needs an endpoint URL")
+			}
+			if len(c.Custom.Models) == 0 && c.Custom.Canonical == "" {
+				return fmt.Errorf("list at least one model, or inherit the models of a catalogue provider")
+			}
+			if len(c.Custom.Models) > 0 && c.Custom.Canonical == "" && c.Model != "" && !listed {
+				return fmt.Errorf("the default model must be one of the listed models")
+			}
+		}
+	case c.Provider != "" || c.Enabled:
 		if _, ok := openCodeProviderByID(c.Provider); !ok {
 			return fmt.Errorf("choose a provider from the list")
+		}
+	}
+	if c.BaseURL != "" {
+		if err := validateBaseURL(c.BaseURL); err != nil {
+			return err
 		}
 	}
 	if c.Enabled && c.Model == "" {
 		return fmt.Errorf("a model is required — it is the one OpenCode uses unless a person picks another")
 	}
-	if strings.Contains(c.Model, "#") || strings.ContainsAny(c.Model, " \t") || hasControlChars(c.Model) {
+	if c.Model != "" && !validModelID(c.Model) {
 		return fmt.Errorf("the model id may not contain spaces or '#'")
 	}
 	if c.Enabled && c.APIKey == "" {
@@ -169,25 +300,43 @@ func shellSingleQuote(s string) string {
 
 // renderOpenCodeProviderEnv is the file for c, or "" when there should be no
 // file at all (disabled or incomplete). One NAME='value' per line: the
-// BITSWAN_OPENCODE_* lines tell the launcher what to generate, the last line
-// is the provider's own env var, the only place the key ever appears.
+// BITSWAN_OPENCODE_* lines tell the launcher what to generate — the provider
+// and model, an endpoint override, a custom provider's description — and the
+// last line is the env var the provider reads its key from, the only place
+// the key ever appears.
 func renderOpenCodeProviderEnv(c openCodeProviderConfig) string {
-	if !c.Enabled {
+	if !c.Enabled || validateOpenCodeProvider(c) != nil || c.APIKey == "" {
 		return ""
 	}
-	p, ok := openCodeProviderByID(c.Provider)
-	if !ok || c.Model == "" || c.APIKey == "" {
+	env := c.keyEnv()
+	if env == "" {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("# Written by the Bailey automation server from the server-wide OpenCode\n")
 	b.WriteString("# provider setting; overwritten on every change. bitswan-opencode-server\n")
 	b.WriteString("# sources this file when it starts a server.\n")
-	fmt.Fprintf(&b, "BITSWAN_OPENCODE_PROVIDER=%s\n", shellSingleQuote(p.ID))
-	fmt.Fprintf(&b, "BITSWAN_OPENCODE_PROVIDER_ENV=%s\n", shellSingleQuote(p.Env))
-	fmt.Fprintf(&b, "BITSWAN_OPENCODE_MODEL=%s\n", shellSingleQuote(c.Model))
-	fmt.Fprintf(&b, "BITSWAN_OPENCODE_RESTRICT=%s\n", shellSingleQuote(strconv.FormatBool(c.Restrict)))
-	fmt.Fprintf(&b, "%s=%s\n", p.Env, shellSingleQuote(c.APIKey))
+	line := func(name, value string) { fmt.Fprintf(&b, "%s=%s\n", name, shellSingleQuote(value)) }
+	line("BITSWAN_OPENCODE_PROVIDER", c.Provider)
+	line("BITSWAN_OPENCODE_PROVIDER_ENV", env)
+	line("BITSWAN_OPENCODE_MODEL", c.Model)
+	line("BITSWAN_OPENCODE_RESTRICT", strconv.FormatBool(c.Restrict))
+	if c.BaseURL != "" {
+		line("BITSWAN_OPENCODE_BASE_URL", c.BaseURL)
+	}
+	if c.Custom != nil {
+		line("BITSWAN_OPENCODE_CUSTOM", "true")
+		line("BITSWAN_OPENCODE_CUSTOM_NAME", c.Custom.Name)
+		line("BITSWAN_OPENCODE_CUSTOM_PACKAGE", c.Custom.Package)
+		if c.Custom.Canonical != "" {
+			line("BITSWAN_OPENCODE_CUSTOM_CANONICAL", c.Custom.Canonical)
+		}
+		if len(c.Custom.Models) > 0 {
+			models, _ := json.Marshal(c.Custom.Models)
+			line("BITSWAN_OPENCODE_CUSTOM_MODELS", string(models))
+		}
+	}
+	line(env, c.APIKey)
 	return b.String()
 }
 
@@ -328,15 +477,18 @@ func writeOpenCodeProviderFile(workspacePath, content string) error {
 // openCodeProviderDTO is what the console sees. The key itself is never in it;
 // key_set and the last few characters are enough to tell which key is stored.
 type openCodeProviderDTO struct {
-	Enabled   bool               `json:"enabled"`
-	Provider  string             `json:"provider"`
-	Model     string             `json:"model"`
-	Restrict  bool               `json:"restrict"`
-	KeySet    bool               `json:"key_set"`
-	KeyHint   string             `json:"key_hint,omitempty"`
-	UpdatedAt string             `json:"updated_at,omitempty"`
-	UpdatedBy string             `json:"updated_by,omitempty"`
-	Providers []openCodeProvider `json:"providers"`
+	Enabled   bool                    `json:"enabled"`
+	Provider  string                  `json:"provider"`
+	Model     string                  `json:"model"`
+	Restrict  bool                    `json:"restrict"`
+	BaseURL   string                  `json:"base_url,omitempty"`
+	Custom    *openCodeCustomProvider `json:"custom,omitempty"`
+	KeySet    bool                    `json:"key_set"`
+	KeyHint   string                  `json:"key_hint,omitempty"`
+	UpdatedAt string                  `json:"updated_at,omitempty"`
+	UpdatedBy string                  `json:"updated_by,omitempty"`
+	Providers []openCodeProvider      `json:"providers"`
+	Packages  []openCodePackage       `json:"packages"`
 }
 
 func openCodeProviderDTOFrom(c openCodeProviderConfig) openCodeProviderDTO {
@@ -345,10 +497,13 @@ func openCodeProviderDTOFrom(c openCodeProviderConfig) openCodeProviderDTO {
 		Provider:  c.Provider,
 		Model:     c.Model,
 		Restrict:  c.Restrict,
+		BaseURL:   c.BaseURL,
+		Custom:    c.Custom,
 		KeySet:    c.APIKey != "",
 		UpdatedAt: c.UpdatedAt,
 		UpdatedBy: c.UpdatedBy,
 		Providers: openCodeProviders,
+		Packages:  openCodePackages,
 	}
 	if n := len(c.APIKey); n >= 12 {
 		d.KeyHint = c.APIKey[n-4:]
@@ -376,12 +531,37 @@ func handleOpenCodeProviderGet(w http.ResponseWriter, r *http.Request) {
 // setting, key included. There are no DELETE routes in the dispatcher, so
 // clearing is a POST like the default-images setting.
 type openCodeProviderRequest struct {
-	Enabled  bool   `json:"enabled"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	APIKey   string `json:"api_key"`
-	Restrict bool   `json:"restrict"`
-	Clear    bool   `json:"clear"`
+	Enabled  bool                    `json:"enabled"`
+	Provider string                  `json:"provider"`
+	Model    string                  `json:"model"`
+	APIKey   string                  `json:"api_key"`
+	Restrict bool                    `json:"restrict"`
+	BaseURL  string                  `json:"base_url"`
+	Custom   *openCodeCustomProvider `json:"custom"`
+	Clear    bool                    `json:"clear"`
+}
+
+// tidyCustomProvider trims a submitted custom provider, drops empty model rows
+// and gives it a display name when none was typed.
+func tidyCustomProvider(id string, in *openCodeCustomProvider) *openCodeCustomProvider {
+	if in == nil {
+		return nil
+	}
+	out := &openCodeCustomProvider{
+		Name:      strings.TrimSpace(in.Name),
+		Package:   strings.TrimSpace(in.Package),
+		Canonical: strings.TrimSpace(in.Canonical),
+	}
+	if out.Name == "" {
+		out.Name = id
+	}
+	for _, m := range in.Models {
+		m.ID, m.Name = strings.TrimSpace(m.ID), strings.TrimSpace(m.Name)
+		if m.ID != "" || m.Name != "" {
+			out.Models = append(out.Models, m)
+		}
+	}
+	return out
 }
 
 // POST /bailey/api/admin/opencode-provider
@@ -413,7 +593,9 @@ func handleOpenCodeProviderSet(w http.ResponseWriter, r *http.Request, by string
 		Model:    strings.TrimSpace(req.Model),
 		APIKey:   strings.TrimSpace(req.APIKey),
 		Restrict: req.Restrict,
+		BaseURL:  strings.TrimSpace(req.BaseURL),
 	}
+	c.Custom = tidyCustomProvider(c.Provider, req.Custom)
 	if c.APIKey == "" {
 		c.APIKey = existing.APIKey
 	}

@@ -348,3 +348,135 @@ func TestOpenCodeCatalog_IsSane(t *testing.T) {
 		t.Errorf("table has %d entries of a %d-provider catalogue", len(openCodeProviders), openCodeCatalogueSize)
 	}
 }
+
+/*
+Two ways past the catalogue: an endpoint override on a catalogue provider (a
+proxy or gateway that keeps the provider's models and API), and a custom
+provider — an endpoint of the admin's own, with a name, an API style, and
+either a list of models or a catalogue provider to inherit them from.
+*/
+func TestOpenCodeProvider_CustomAndEndpointOverride(t *testing.T) {
+	override := openCodeProviderConfig{Enabled: true, Provider: "anthropic", Model: "claude-sonnet-4-5", APIKey: "k",
+		BaseURL: "https://llm-proxy.example.com/anthropic"}
+	if err := validateOpenCodeProvider(override); err != nil {
+		t.Fatalf("override rejected: %v", err)
+	}
+	got := renderOpenCodeProviderEnv(override)
+	if !strings.Contains(got, "BITSWAN_OPENCODE_BASE_URL='https://llm-proxy.example.com/anthropic'\n") ||
+		!strings.Contains(got, "\nANTHROPIC_API_KEY='k'\n") || strings.Contains(got, "BITSWAN_OPENCODE_CUSTOM") {
+		t.Fatalf("override rendered:\n%s", got)
+	}
+
+	custom := openCodeProviderConfig{Enabled: true, Provider: "acme", Model: "qwen3-coder", APIKey: "k'ey",
+		BaseURL: "https://llm.acme.example/v1",
+		Custom: &openCodeCustomProvider{Name: "Acme's AI", Package: "openai-compatible",
+			Models: []openCodeCustomModel{{ID: "qwen3-coder", Name: "Qwen 3 Coder"}, {ID: "glm-5"}}}}
+	if err := validateOpenCodeProvider(custom); err != nil {
+		t.Fatalf("custom rejected: %v", err)
+	}
+	got = renderOpenCodeProviderEnv(custom)
+	for _, want := range []string{
+		"BITSWAN_OPENCODE_PROVIDER='acme'\n",
+		"BITSWAN_OPENCODE_PROVIDER_ENV='BITSWAN_OPENCODE_API_KEY'\n",
+		"BITSWAN_OPENCODE_BASE_URL='https://llm.acme.example/v1'\n",
+		"BITSWAN_OPENCODE_CUSTOM='true'\n",
+		"BITSWAN_OPENCODE_CUSTOM_NAME='Acme'\\''s AI'\n",
+		"BITSWAN_OPENCODE_CUSTOM_PACKAGE='openai-compatible'\n",
+		`BITSWAN_OPENCODE_CUSTOM_MODELS='[{"id":"qwen3-coder","name":"Qwen 3 Coder"},{"id":"glm-5"}]'` + "\n",
+		"\nBITSWAN_OPENCODE_API_KEY='k'\\''ey'\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("custom rendering lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "CANONICAL") {
+		t.Errorf("a canonical line with nothing to inherit:\n%s", got)
+	}
+	if sh, err := exec.LookPath("sh"); err == nil {
+		path := filepath.Join(t.TempDir(), openCodeProviderEnvFile)
+		if err := os.WriteFile(path, []byte(got), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(sh, "-c", `. "$1" && printf '%s' "$BITSWAN_OPENCODE_CUSTOM_MODELS"`, "sh", path).Output()
+		if err != nil {
+			t.Fatalf("sourcing: %v", err)
+		}
+		var back []openCodeCustomModel
+		if err := json.Unmarshal(out, &back); err != nil || len(back) != 2 || back[0].Name != "Qwen 3 Coder" || back[1].ID != "glm-5" {
+			t.Fatalf("the shell read the models back as %q (%v)", out, err)
+		}
+	}
+
+	// Inheriting a catalogue provider's models needs no list and frees the default model.
+	inherit := openCodeProviderConfig{Enabled: true, Provider: "acme-anthropic", Model: "claude-sonnet-4-5", APIKey: "k",
+		BaseURL: "https://gw.example/anthropic", Custom: &openCodeCustomProvider{Package: "anthropic-compatible", Canonical: "anthropic"}}
+	if err := validateOpenCodeProvider(inherit); err != nil {
+		t.Fatalf("inheriting rejected: %v", err)
+	}
+	if got := renderOpenCodeProviderEnv(inherit); !strings.Contains(got, "BITSWAN_OPENCODE_CUSTOM_CANONICAL='anthropic'\n") || strings.Contains(got, "CUSTOM_MODELS") {
+		t.Fatalf("inheriting rendered:\n%s", got)
+	}
+
+	models := []openCodeCustomModel{{ID: "m"}}
+	bad := []openCodeProviderConfig{
+		// a catalogue id as a custom id
+		{Enabled: true, Provider: "anthropic", Model: "m", APIKey: "k", BaseURL: "https://x.example/v1", Custom: &openCodeCustomProvider{Package: "openai-compatible", Models: models}},
+		// an id that cannot prefix a model reference
+		{Enabled: true, Provider: "Acme AI", Model: "m", APIKey: "k", BaseURL: "https://x.example/v1", Custom: &openCodeCustomProvider{Package: "openai-compatible", Models: models}},
+		// no endpoint, and endpoints that are not http(s) URLs
+		{Enabled: true, Provider: "acme", Model: "m", APIKey: "k", Custom: &openCodeCustomProvider{Package: "openai-compatible", Models: models}},
+		{Enabled: true, Provider: "acme", Model: "m", APIKey: "k", BaseURL: "llm.example/v1", Custom: &openCodeCustomProvider{Package: "openai-compatible", Models: models}},
+		{Enabled: true, Provider: "acme", Model: "m", APIKey: "k", BaseURL: "ftp://llm.example/v1", Custom: &openCodeCustomProvider{Package: "openai-compatible", Models: models}},
+		// an API style OpenCode has no package for
+		{Enabled: true, Provider: "acme", Model: "m", APIKey: "k", BaseURL: "https://x.example/v1", Custom: &openCodeCustomProvider{Package: "grpc", Models: models}},
+		// nothing to offer: no models, nothing inherited
+		{Enabled: true, Provider: "acme", Model: "m", APIKey: "k", BaseURL: "https://x.example/v1", Custom: &openCodeCustomProvider{Package: "openai-compatible"}},
+		// a default model that is not one of the listed ones
+		{Enabled: true, Provider: "acme", Model: "other", APIKey: "k", BaseURL: "https://x.example/v1", Custom: &openCodeCustomProvider{Package: "openai-compatible", Models: models}},
+		// inheriting from something that is not in the catalogue
+		{Enabled: true, Provider: "acme", Model: "m", APIKey: "k", BaseURL: "https://x.example/v1", Custom: &openCodeCustomProvider{Package: "openai-compatible", Canonical: "nope"}},
+		// a catalogue provider with an override that is not a URL
+		{Enabled: true, Provider: "openai", Model: "gpt-5", APIKey: "k", BaseURL: "https://x example/v1"},
+		{Enabled: true, Provider: "openai", Model: "gpt-5", APIKey: "k", BaseURL: "https://x.example/v1'"},
+	}
+	for i, c := range bad {
+		if err := validateOpenCodeProvider(c); err == nil {
+			t.Errorf("bad case %d accepted: %+v", i, c)
+		}
+	}
+}
+
+func TestOpenCodeProvider_SaveCustomRoundTrip(t *testing.T) {
+	isolateOpenCodeProviderTest(t)
+	const key = "sk-custom-0123456789"
+	body := `{"enabled":true,"provider":" acme ","model":"qwen3-coder","api_key":"` + key + `","base_url":" https://llm.acme.example/v1 ","restrict":true,` +
+		`"custom":{"name":"","package":"openai-compatible","canonical":"","models":[{"id":" qwen3-coder ","name":"Qwen 3 Coder"},{"id":"","name":""}]}}`
+	w := dispatch(openCodeAdminJSON(http.MethodPost, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST custom = %d; %s", w.Code, w.Body.String())
+	}
+	d := decodeProviderDTO(t, w.Body.String())
+	if d.Provider != "acme" || d.BaseURL != "https://llm.acme.example/v1" || d.Custom == nil || !d.KeySet || !d.Restrict {
+		t.Fatalf("after custom save: %+v", d)
+	}
+	if d.Custom.Name != "acme" || d.Custom.Package != "openai-compatible" || len(d.Custom.Models) != 1 || d.Custom.Models[0].ID != "qwen3-coder" {
+		t.Fatalf("custom description not tidied: %+v", d.Custom)
+	}
+	if len(d.Packages) != len(openCodePackages) || strings.Contains(w.Body.String(), key[:10]) {
+		t.Fatalf("packages or key wrong in: %s", w.Body.String())
+	}
+
+	// A custom provider without an endpoint is refused.
+	if w := dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"acme","model":"m","base_url":"","custom":{"package":"openai-compatible","models":[{"id":"m"}]}}`)); w.Code != http.StatusBadRequest {
+		t.Errorf("custom without endpoint = %d, want 400; %s", w.Code, w.Body.String())
+	}
+
+	// Back to a catalogue provider: the custom description goes, the key stays.
+	w = dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"openai","model":"gpt-5","api_key":"","base_url":"","custom":null}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST catalogue = %d; %s", w.Code, w.Body.String())
+	}
+	if d = decodeProviderDTO(t, w.Body.String()); d.Custom != nil || d.BaseURL != "" || d.Provider != "openai" || !d.KeySet {
+		t.Fatalf("after switching back: %+v", d)
+	}
+}
