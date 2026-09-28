@@ -565,8 +565,10 @@ func sqliteVacuumInto(ctx context.Context, src, dst string) error {
 		return err
 	}
 	defer db.Close()
-	_, err = db.ExecContext(ctx, "VACUUM INTO ?", dst)
-	return err
+	if _, err = db.ExecContext(ctx, "VACUUM INTO ?", dst); err != nil {
+		return err
+	}
+	return os.Chmod(dst, 0o600)
 }
 
 // applyRetention prunes every series to the policy (port of gitops's
