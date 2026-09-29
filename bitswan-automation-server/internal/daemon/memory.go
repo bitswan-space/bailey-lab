@@ -465,10 +465,10 @@ func admitMemory(b memBudget, currentOnDemand []int, cfg memConfig, req admitReq
 			poolDelta = 0
 		}
 		addMB := req.AlwaysOnAddMB + poolDelta
-		if b.ReservedMB+addMB > totalMB {
+		if addMB > 0 && b.ReservedMB+addMB > totalMB {
 			return admitResult{ShortfallMB: b.ReservedMB + addMB - totalMB,
 				Detail: fmt.Sprintf("this promotion needs %d MB more reserved memory but only %d MB is unreserved",
-					addMB, freeMB)}
+					addMB, max(freeMB, 0))}
 		}
 		return admitResult{OK: true}
 	}

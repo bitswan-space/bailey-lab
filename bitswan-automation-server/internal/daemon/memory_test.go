@@ -181,6 +181,26 @@ func TestAdmitMemory(t *testing.T) {
 	}
 }
 
+func TestAdmitMemoryZeroDeltaPromoteOnOverReservedHost(t *testing.T) {
+	mib := int64(1024 * 1024)
+	cfg := memConfig{SystemReserveMB: 2048, WorkspaceReserveMB: 768, DefaultContainerMB: 50, OnDemandFloorMB: 1024, OnDemandTopN: 4}
+	over := memBudget{HostTotalBytes: int64(8*1024) * mib, ReservedMB: 8456, OnDemandPoolMB: 1024, AlwaysOnMB: 5000}
+	onDemand := []int{512, 128}
+
+	r := admitMemory(over, onDemand, cfg, admitRequest{Kind: "promote", OnDemandAddMB: []int{64}})
+	if !r.OK {
+		t.Errorf("a promote that adds no reservation must be admitted even when the host is over-reserved: %+v", r)
+	}
+
+	rGrow := admitMemory(over, onDemand, cfg, admitRequest{Kind: "promote", AlwaysOnAddMB: 100})
+	if rGrow.OK {
+		t.Errorf("an always-on promote that adds reservation on an over-reserved host must still be rejected: %+v", rGrow)
+	}
+	if rGrow.Detail != "" && strings.Contains(rGrow.Detail, "-") {
+		t.Errorf("rejection detail must not show a negative unreserved figure: %q", rGrow.Detail)
+	}
+}
+
 func TestPlanEvictions(t *testing.T) {
 	mb := int64(1024 * 1024)
 	// Pool = 200 MB. Running on-demand: instance A (old, 150MB) + B (new, 150MB) =
