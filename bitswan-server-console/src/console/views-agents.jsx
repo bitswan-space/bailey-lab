@@ -190,13 +190,15 @@ function SearchPicker({ value, entries, onChange, placeholder, searchPlaceholder
   );
 }
 
-// The provider entries: the admin's own endpoint first, the familiar few,
-// then the rest of the catalogue alphabetically.
+// The provider entries: the admin's own endpoint and servers first, the
+// familiar few, then the rest of the catalogue alphabetically.
 function providerEntries(providers) {
+  const rest = providers.filter((p) => !p.popular && !p.self_hosted);
   return [
     { id: CUSTOM, name: 'Custom endpoint', hint: 'an endpoint of your own', group: 'Your own' },
+    ...providers.filter((p) => p.self_hosted).map((p) => ({ ...p, hint: 'a server of your own', group: 'Your own' })),
     ...providers.filter((p) => p.popular).map((p) => ({ ...p, code: p.id, group: 'Popular' })),
-    ...providers.filter((p) => !p.popular).map((p) => ({ ...p, code: p.id, group: `All providers (${providers.filter((x) => !x.popular).length})` })),
+    ...rest.map((p) => ({ ...p, code: p.id, group: `All providers (${rest.length})` })),
   ];
 }
 
@@ -275,7 +277,7 @@ function CredentialFields({ vars, values, secrets, onChange, providerName }) {
         if (v.file) {
           hint = s.set ? 'A key file is stored. Leave blank to keep it.' : 'The JSON key file the provider issued for a service account.';
         } else if (v.secret) {
-          hint = s.set ? `One ending in …${s.hint || ''} is stored. Leave blank to keep it.` : 'Required.';
+          hint = s.set ? `One ending in …${s.hint || ''} is stored. Leave blank to keep it.` : (v.optional ? 'Optional. Leave empty if the server needs none.' : 'Required.');
         } else {
           hint = 'Required.';
         }
@@ -291,7 +293,7 @@ function CredentialFields({ vars, values, secrets, onChange, providerName }) {
             ) : (
               <STextInput value={values[v.name] || ''} onChange={(val) => onChange(v.name, val)} mono
                 type={v.secret ? 'password' : 'text'} autoComplete={v.secret ? 'new-password' : 'off'}
-                placeholder={v.secret ? (s.set ? '••••••••  (unchanged)' : `Paste the ${providerName} ${label.toLowerCase()}`) : label.toLowerCase()}
+                placeholder={v.secret ? (s.set ? '••••••••  (unchanged)' : (v.optional ? 'none' : `Paste the ${providerName} ${label.toLowerCase()}`)) : label.toLowerCase()}
                 style={{ maxWidth: v.secret ? undefined : 360 }} />
             )}
           </Row>
@@ -338,7 +340,8 @@ function OpenCodeProviderCard({ toast }) {
   const provider = custom ? null : (providers.find((p) => p.id === cfg.provider) || null);
   // The provider's variables: from the catalogue, or — with the catalogue
   // unreachable — as they were saved.
-  const vars = custom ? [{ name: CUSTOM_KEY, label: 'API key', secret: true }] : (provider ? provider.env : (cfg.provider ? cfg.vars || [] : []));
+  const vars = custom ? [{ name: CUSTOM_KEY, label: 'API key', secret: true, optional: true }] : (provider ? provider.env : (cfg.provider ? cfg.vars || [] : []));
+  const selfHosted = !custom && !!(provider ? provider.self_hosted : cfg.self_hosted);
   const patch = (p) => setCfg({ ...cfg, ...p });
   const patchCustom = (p) => patch({ custom: { ...custom, ...p } });
   const chosen = !!custom || !!cfg.provider;
@@ -479,7 +482,20 @@ function OpenCodeProviderCard({ toast }) {
         </>
       )}
 
-      {chosen && !custom && (
+      {chosen && !custom && selfHosted && (
+        <>
+          <Row label="Server URL" hint="Where the server answers, with /v1. OpenCode reads the model list from it.">
+            <STextInput value={cfg.base_url || ''} onChange={(v) => patch({ base_url: v })} mono
+              placeholder={provider && provider.id === 'ollama' ? 'http://ollama.internal:11434/v1' : 'http://gpu-host:8000/v1'} />
+          </Row>
+          <Row label="Model" hint="As the server names it. OpenCode uses it unless a person picks another.">
+            <STextInput value={cfg.model || ''} onChange={(v) => patch({ model: v })} mono
+              placeholder={provider && provider.id === 'ollama' ? 'qwen3:8b' : 'model id'} style={{ maxWidth: 360 }} />
+          </Row>
+        </>
+      )}
+
+      {chosen && !custom && !selfHosted && (
         <>
           <Row label="Model" hint="OpenCode uses it unless a person picks another.">
             {provider
