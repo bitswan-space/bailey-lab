@@ -352,6 +352,9 @@ export const Api = {
   // { clear: true } forgets it all (internal/daemon/opencode_provider.go).
   openCodeProvider: () => getJSON('/bailey/api/admin/opencode-provider'),
   setOpenCodeProvider: (body) => postJSON('/bailey/api/admin/opencode-provider', body),
+  // A catalogue provider's models, for the model picker (the whole catalogue is
+  // thousands of models, so they are fetched per provider).
+  openCodeProviderModels: (id) => getJSON('/bailey/api/admin/opencode-provider/models?provider=' + encodeURIComponent(id)),
   // Outstanding (unconsumed) invites, expired ones included (flagged).
   invites: () => getJSON('/bailey/api/people/invites'),
   revokeInvite: (email) => postJSON('/bailey/api/people/invites/revoke', { email }),

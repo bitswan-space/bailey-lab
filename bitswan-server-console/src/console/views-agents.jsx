@@ -12,14 +12,19 @@ const { useState: useS, useEffect: useSE, useRef: useSR, useMemo: useSM } = Reac
 // One card today: the default model provider for OpenCode. The daemon side is
 // internal/daemon/opencode_provider.go; how the setting reaches a workspace's
 // OpenCode servers is in docs/opencode-integration.md.
+//
+// The provider list is OpenCode's own catalogue (models.dev), read live by the
+// daemon; the fields for a provider are the environment variables the
+// catalogue says it reads — what OpenCode's /connect asks for.
 
 const CUSTOM = '__custom__';
+const CUSTOM_KEY = 'BITSWAN_OPENCODE_API_KEY';
 
 function Row({ label, hint, children }) {
   return (
     <div style={{ display: 'flex', gap: 16, padding: '13px 0', borderBottom: `1px solid ${SC.surface2}` }}>
       <div style={{ width: 190, flex: '0 0 auto' }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: SC.fg }}>{label}</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: SC.fg, wordBreak: 'break-word' }}>{label}</div>
         {hint && <div style={{ fontSize: 11.5, color: SC.muted, lineHeight: '16px', marginTop: 3 }}>{hint}</div>}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
@@ -38,9 +43,7 @@ function Note({ tone, children }) {
   );
 }
 
-// A native select, styled like the console's: it keeps type-to-jump, which the
-// long provider list needs, and takes option groups, which the shared Select
-// does not.
+// A native select, styled like the console's, for the short lists.
 function NativeSelect({ value, onChange, children, style }) {
   return (
     <div style={{ position: 'relative', maxWidth: 320, ...style }}>
@@ -52,23 +55,6 @@ function NativeSelect({ value, onChange, children, style }) {
       <SIcon name="chevron-down" size={14} color={SC.mutedFg}
         style={{ position: 'absolute', right: 11, top: 11, pointerEvents: 'none' }} />
     </div>
-  );
-}
-
-// The provider groups: OpenCode's whole single-key catalogue is a couple of
-// hundred entries, so the familiar few come first and the rest follow in one
-// alphabetical group. `withCustom` adds the admin's own endpoint on top.
-function ProviderOptions({ providers, withCustom, none }) {
-  const popular = providers.filter((p) => p.popular);
-  const rest = providers.filter((p) => !p.popular);
-  const opt = (p) => <option key={p.id} value={p.id}>{p.name}</option>;
-  return (
-    <>
-      <option value="">{none}</option>
-      {withCustom && <optgroup label="Your own"><option value={CUSTOM}>Custom endpoint…</option></optgroup>}
-      {popular.length > 0 && <optgroup label="Popular">{popular.map(opt)}</optgroup>}
-      <optgroup label={popular.length > 0 ? `All providers (${rest.length})` : 'Providers'}>{rest.map(opt)}</optgroup>
-    </>
   );
 }
 
@@ -88,13 +74,11 @@ const IconCheck = ({ size = 13, color = 'currentColor' }) => (
     strokeLinecap="round" strokeLinejoin="round" style={{ flex: '0 0 auto' }}><path d="M20 6 9 17l-5-5" /></svg>
 );
 
-const CUSTOM_ENTRY = { id: CUSTOM, name: 'Custom endpoint', hint: 'an endpoint of your own', group: 'Your own' };
-
-// The provider picker: a button that opens a popover with a search box over
-// OpenCode's whole single-key catalogue (a couple of hundred entries), the
-// familiar few first. Typing filters by name or id; Enter takes the
-// highlighted row, Escape and a click outside close it.
-function ProviderPicker({ value, providers, onChange }) {
+// A button that opens a popover with a search box over a long list. Entries
+// are {id, name, hint, group}; typing filters by name, id or hint, groups
+// show while the box is empty, Enter takes the highlighted row, Escape and a
+// click outside close it.
+function SearchPicker({ value, entries, onChange, placeholder, searchPlaceholder, emptyText, disabled, mono }) {
   const [open, setOpen] = useS(false);
   const [query, setQuery] = useS('');
   const [active, setActive] = useS(0);
@@ -102,14 +86,9 @@ function ProviderPicker({ value, providers, onChange }) {
   const inputRef = useSR(null);
   const listRef = useSR(null);
 
-  const entries = useSM(() => [
-    CUSTOM_ENTRY,
-    ...providers.filter((p) => p.popular).map((p) => ({ ...p, group: 'Popular' })),
-    ...providers.filter((p) => !p.popular).map((p) => ({ ...p, group: 'All providers' })),
-  ], [providers]);
   const q = query.trim().toLowerCase();
   const shown = q
-    ? entries.filter((e) => e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q) || (e.hint || '').includes(q))
+    ? entries.filter((e) => e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q) || (e.hint || '').toLowerCase().includes(q))
     : entries;
   const selected = entries.find((e) => e.id === value) || null;
 
@@ -139,22 +118,23 @@ function ProviderPicker({ value, providers, onChange }) {
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)); }
     else if (e.key === 'Enter' && shown[active]) { e.preventDefault(); pick(shown[active]); }
   };
+  const monoStyle = { fontSize: 11.5, color: SC.mutedFg, fontFamily: 'Geist Mono, monospace' };
 
   let lastGroup = null;
   return (
     <div ref={rootRef} style={{ position: 'relative', maxWidth: 360 }}>
-      <button type="button" onClick={() => setOpen((o) => !o)} aria-haspopup="listbox" aria-expanded={open} style={{
+      <button type="button" disabled={disabled} onClick={() => setOpen((o) => !o)} aria-haspopup="listbox" aria-expanded={open} style={{
         display: 'flex', alignItems: 'center', gap: 8, width: '100%', height: 36, padding: '0 10px 0 12px',
         border: `1px solid ${open ? SC.primary : SC.border}`, borderRadius: 8, background: '#fff',
         boxShadow: open ? `0 0 0 3px ${SC.primarySoft}` : 'none', fontFamily: 'inherit', fontSize: 13.5,
-        color: selected ? SC.fg : SC.muted, cursor: 'pointer', textAlign: 'left',
+        color: selected ? SC.fg : SC.muted, cursor: disabled ? 'not-allowed' : 'pointer', textAlign: 'left',
+        opacity: disabled ? 0.6 : 1,
       }}>
-        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {selected ? selected.name : 'Choose a provider'}
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          fontFamily: mono && selected ? 'Geist Mono, monospace' : 'inherit' }}>
+          {selected ? selected.name : (value || placeholder)}
         </span>
-        {selected && selected.id !== CUSTOM && (
-          <span style={{ fontSize: 11.5, color: SC.mutedFg, fontFamily: 'Geist Mono, monospace' }}>{selected.id}</span>
-        )}
+        {selected && selected.id !== selected.name && !mono && <span style={monoStyle}>{selected.id}</span>}
         <IconChevron color={SC.mutedFg} />
       </button>
 
@@ -168,7 +148,7 @@ function ProviderPicker({ value, providers, onChange }) {
             <div style={{ position: 'relative' }}>
               <span style={{ position: 'absolute', left: 9, top: 8 }}><IconSearch color={SC.mutedFg} /></span>
               <input ref={inputRef} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={onInputKey}
-                placeholder={`Search ${providers.length} providers…`} style={{
+                placeholder={searchPlaceholder} style={{
                   width: '100%', height: 30, paddingLeft: 28, paddingRight: 10, border: `1px solid ${SC.border}`,
                   borderRadius: 6, background: '#fff', fontFamily: 'inherit', fontSize: 12.5, color: SC.fg, outline: 'none',
                 }} />
@@ -176,12 +156,10 @@ function ProviderPicker({ value, providers, onChange }) {
           </div>
           <div ref={listRef} style={{ maxHeight: 300, overflowY: 'auto', padding: 6 }}>
             {shown.length === 0 && (
-              <div style={{ padding: '14px 10px', fontSize: 12.5, color: SC.muted }}>
-                No provider matches. Not in OpenCode's catalogue? Choose “Custom endpoint”.
-              </div>
+              <div style={{ padding: '14px 10px', fontSize: 12.5, color: SC.muted }}>{emptyText}</div>
             )}
             {shown.map((e, i) => {
-              const header = !q && e.group !== lastGroup ? e.group : null;
+              const header = !q && e.group && e.group !== lastGroup ? e.group : null;
               lastGroup = e.group;
               const isSel = e.id === value;
               const isAct = i === active;
@@ -197,10 +175,9 @@ function ProviderPicker({ value, providers, onChange }) {
                       background: isAct ? SC.surface2 : 'transparent', cursor: 'pointer',
                     }}>
                     <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: SC.fg, fontWeight: isSel ? 600 : 400,
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
-                    <span style={{ fontSize: 11, color: SC.mutedFg, fontFamily: 'Geist Mono, monospace' }}>
-                      {e.id === CUSTOM ? e.hint : e.id}
-                    </span>
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      fontFamily: mono ? 'Geist Mono, monospace' : 'inherit' }}>{mono ? e.id : e.name}</span>
+                    <span style={monoStyle}>{mono ? (e.name !== e.id ? e.name : '') : (e.hint || e.id)}</span>
                     <span style={{ width: 13, display: 'inline-flex' }}>{isSel && <IconCheck color={SC.primary} />}</span>
                   </div>
                 </React.Fragment>
@@ -211,6 +188,16 @@ function ProviderPicker({ value, providers, onChange }) {
       )}
     </div>
   );
+}
+
+// The provider entries: the admin's own endpoint first, the familiar few,
+// then the rest of the catalogue alphabetically.
+function providerEntries(providers) {
+  return [
+    { id: CUSTOM, name: 'Custom endpoint', hint: 'an endpoint of your own', group: 'Your own' },
+    ...providers.filter((p) => p.popular).map((p) => ({ ...p, group: 'Popular' })),
+    ...providers.filter((p) => !p.popular).map((p) => ({ ...p, group: `All providers (${providers.filter((x) => !x.popular).length})` })),
+  ];
 }
 
 // The models a custom endpoint serves, by the id it expects — OpenCode has no
@@ -241,10 +228,87 @@ function ModelsEditor({ models, onChange }) {
   );
 }
 
+// A model picker fed from the daemon's catalogue, per provider. Falls back to
+// a plain input while the list is loading or if it cannot be fetched.
+function ModelPicker({ providerId, value, onChange }) {
+  const [state, setState] = useS({ id: '', models: null, error: '' });
+  useSE(() => {
+    let cancelled = false;
+    setState({ id: providerId, models: null, error: '' });
+    SApi.openCodeProviderModels(providerId)
+      .then((r) => { if (!cancelled) setState({ id: providerId, models: r.models || [], error: '' }); })
+      .catch((e) => { if (!cancelled) setState({ id: providerId, models: [], error: e.message || 'Could not load the models.' }); });
+    return () => { cancelled = true; };
+  }, [providerId]);
+  const models = state.models || [];
+  if (state.error || (state.models && models.length === 0)) {
+    return (
+      <div>
+        <STextInput value={value} onChange={onChange} mono placeholder="model id" style={{ maxWidth: 360 }} />
+        <div style={{ fontSize: 11.5, color: SC.muted, marginTop: 6 }}>{state.error || 'The catalogue lists no models for this provider; type the id.'}</div>
+      </div>
+    );
+  }
+  return (
+    <SearchPicker mono value={value} onChange={onChange}
+      entries={models.map((m) => ({ id: m.id, name: m.name || m.id }))}
+      placeholder={state.models ? 'Choose a model' : 'Loading models…'} disabled={!state.models}
+      searchPlaceholder={`Search ${models.length} models…`} emptyText="No model matches." />
+  );
+}
+
+// One field per environment variable the provider reads. When every variable
+// is a secret they are alternative names for one key and a single field
+// suffices; otherwise the plain ones are settings the provider needs next to
+// its key (a resource name, a region) and each gets its own field.
+function CredentialFields({ vars, values, secrets, onChange, providerName }) {
+  const allSecret = vars.length > 0 && vars.every((v) => v.secret);
+  const shown = allSecret ? [vars[0]] : vars;
+  const stored = (name) => (secrets && secrets[name]) || { set: false };
+  return (
+    <>
+      {shown.map((v) => {
+        const label = allSecret ? 'API key' : <code style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>{v.name}</code>;
+        const s = stored(v.name);
+        let hint;
+        if (allSecret) {
+          hint = vars.length > 1
+            ? `Read from ${v.name}; ${vars.slice(1).map((x) => x.name).join(', ')} work too.`
+            : `Read from ${v.name}.`;
+          if (s.set) hint += ` One ending in …${s.hint || ''} is stored; leave blank to keep it.`;
+        } else if (v.file) {
+          hint = s.set ? 'A document is stored. Leave blank to keep it.' : 'The JSON document the provider issued (a service account).';
+        } else if (v.secret) {
+          hint = s.set ? `One ending in …${s.hint || ''} is stored. Leave blank to keep it.` : 'Secret.';
+        } else {
+          hint = 'Required, not secret.';
+        }
+        return (
+          <Row key={v.name} label={label} hint={hint}>
+            {v.file ? (
+              <textarea value={values[v.name] || ''} onChange={(e) => onChange(v.name, e.target.value)}
+                placeholder={s.set ? '(stored — paste a new document to replace it)' : '{ "type": "service_account", … }'}
+                rows={4} spellCheck={false} style={{
+                  width: '100%', padding: '8px 12px', border: `1px solid ${SC.border}`, borderRadius: 8, background: '#fff',
+                  fontFamily: 'Geist Mono, monospace', fontSize: 12, color: SC.fg, outline: 'none', resize: 'vertical',
+                }} />
+            ) : (
+              <STextInput value={values[v.name] || ''} onChange={(val) => onChange(v.name, val)} mono
+                type={v.secret ? 'password' : 'text'} autoComplete={v.secret ? 'new-password' : 'off'}
+                placeholder={v.secret ? (s.set ? '••••••••  (unchanged)' : `Paste the ${providerName} key`) : v.name.toLowerCase().replace(/_/g, ' ')}
+                style={{ maxWidth: v.secret ? undefined : 360 }} />
+            )}
+          </Row>
+        );
+      })}
+    </>
+  );
+}
+
 function OpenCodeProviderCard({ toast }) {
   const [cfg, setCfg] = useS(null);
   const [loadErr, setLoadErr] = useS('');
-  const [key, setKey] = useS('');
+  const [entered, setEntered] = useS({});
   const [busy, setBusy] = useS('');
   const [err, setErr] = useS('');
 
@@ -255,7 +319,10 @@ function OpenCodeProviderCard({ toast }) {
       // A fresh configuration starts with OpenCode as the default agent: the
       // point of giving the server a key is that nobody has to be asked.
       if (!r.updated_at) r.default_agent = true;
-      setCfg(r); setKey('');
+      // Stored plain settings and secret hints belong to the saved provider;
+      // switching to another one starts its fields empty.
+      r.saved_provider = r.provider;
+      setCfg(r); setEntered({});
     } catch (e) {
       setLoadErr(e.message || 'Could not load the OpenCode provider settings.');
     }
@@ -269,16 +336,26 @@ function OpenCodeProviderCard({ toast }) {
   const packages = cfg.packages || [];
   const custom = cfg.custom || null;
   const provider = custom ? null : (providers.find((p) => p.id === cfg.provider) || null);
+  // The provider's variables: from the catalogue, or — with the catalogue
+  // unreachable — as they were saved.
+  const vars = custom ? [{ name: CUSTOM_KEY, secret: true }] : (provider ? provider.env : (cfg.provider ? cfg.vars || [] : []));
   const patch = (p) => setCfg({ ...cfg, ...p });
   const patchCustom = (p) => patch({ custom: { ...custom, ...p } });
+  const chosen = !!custom || !!cfg.provider;
+  const sameAsSaved = cfg.provider === cfg.saved_provider;
 
   const chooseProvider = (v) => {
+    setEntered({});
     if (v === CUSTOM) {
       patch({ custom: custom || { name: '', package: 'openai-compatible', canonical: '', models: [] }, provider: '', model: '' });
     } else {
-      patch({ custom: null, provider: v });
+      patch({ custom: null, provider: v, model: v === cfg.provider ? cfg.model : '' });
     }
   };
+  // What the fields show: plain settings come back from the server, secrets
+  // only as typed here.
+  const fieldValues = { ...(sameAsSaved ? cfg.values || {} : {}), ...entered };
+  const setField = (name, value) => setEntered((e) => ({ ...e, [name]: value }));
 
   const listedModels = custom && !custom.canonical ? (custom.models || []).filter((m) => (m.id || '').trim()) : [];
 
@@ -286,41 +363,44 @@ function OpenCodeProviderCard({ toast }) {
     setBusy(doing); setErr('');
     try {
       const r = await SApi.setOpenCodeProvider(body);
-      setCfg(r); setKey('');
+      r.saved_provider = r.provider;
+      setCfg(r); setEntered({});
       toast(done, 'success');
     } catch (e) {
       setErr(e.message || 'Could not save the settings.');
     } finally { setBusy(''); }
   };
-  const save = (enabled) => submit({
-    enabled,
-    provider: (cfg.provider || '').trim(),
-    model: (cfg.model || '').trim(),
-    api_key: key,
-    restrict: !!cfg.restrict,
-    default_agent: !!cfg.default_agent,
-    base_url: (cfg.base_url || '').trim(),
-    custom: custom ? {
-      name: custom.name || '',
-      package: custom.package || '',
-      canonical: custom.canonical || '',
-      models: (custom.models || []).map((m) => ({ id: m.id || '', name: m.name || '' })),
-    } : null,
-  }, enabled ? 'save' : 'disable', enabled ? 'Default provider saved' : 'Default provider turned off');
+  const save = (enabled) => {
+    const values = {};
+    for (const v of vars) if (fieldValues[v.name] !== undefined) values[v.name] = fieldValues[v.name];
+    return submit({
+      enabled,
+      provider: (cfg.provider || '').trim(),
+      model: (cfg.model || '').trim(),
+      values,
+      restrict: !!cfg.restrict,
+      default_agent: !!cfg.default_agent,
+      base_url: (cfg.base_url || '').trim(),
+      custom: custom ? {
+        name: custom.name || '',
+        package: custom.package || '',
+        canonical: custom.canonical || '',
+        models: (custom.models || []).map((m) => ({ id: m.id || '', name: m.name || '' })),
+      } : null,
+    }, enabled ? 'save' : 'disable', enabled ? 'Default provider saved' : 'Default provider turned off');
+  };
   const remove = () => {
     const ok = window.confirm(
-      'Forget the stored API key and the provider choice?\n\n' +
+      'Forget the stored credentials and the provider choice?\n\n' +
       'OpenCode servers started from now on will have no default provider. ' +
       'Providers people connected themselves are untouched.');
     if (!ok) return;
     submit({ clear: true }, 'remove', 'Default provider removed');
   };
 
-  const status = cfg.enabled ? 'Enabled' : cfg.key_set ? 'Turned off' : 'Not configured';
-  // Until a provider (or a custom endpoint) is picked, the picker is the whole
-  // form: there is nothing to say about a model or a key yet.
-  const chosen = !!custom || !!cfg.provider;
-  const keyTarget = custom ? 'the endpoint below' : (provider ? provider.name : 'the provider');
+  const anySecretStored = Object.values(cfg.secrets || {}).some((s) => s.set);
+  const status = cfg.enabled ? 'Enabled' : anySecretStored ? 'Turned off' : 'Not configured';
+  const providerName = custom ? 'endpoint' : (provider ? provider.name : 'provider');
 
   return (
     <SCard>
@@ -337,13 +417,23 @@ function OpenCodeProviderCard({ toast }) {
       <div style={{ padding: 13, background: SC.surface, border: `1px solid ${SC.border}`, borderRadius: 10, margin: '10px 0 6px' }}>
         <div style={{ fontSize: 12.5, color: SC.fg, lineHeight: '18px' }}>
           OpenCode in every workspace on this server starts with this provider and model, so nobody has
-          to bring a key of their own. People can still connect other providers in OpenCode's own settings
-          unless you restrict that below. Claude Code is not affected — it has a sign-in of its own.
+          to bring a key of their own. The list is OpenCode's own catalogue — what its “connect provider”
+          offers, without the sign-in flows a person completes themselves. Claude Code is not affected.
         </div>
       </div>
 
-      <Row label="Provider" hint="Everything OpenCode's catalogue lists that takes one API key, or an endpoint of your own.">
-        <ProviderPicker value={custom ? CUSTOM : (cfg.provider || '')} providers={providers} onChange={chooseProvider} />
+      {cfg.catalog_error && (
+        <Note>
+          OpenCode's provider catalogue could not be loaded ({cfg.catalog_error}). The saved provider
+          still shows; choosing another needs the catalogue.
+        </Note>
+      )}
+
+      <Row label="Provider" hint="Everything OpenCode's catalogue lists, or an endpoint of your own.">
+        <SearchPicker value={custom ? CUSTOM : (cfg.provider || '')} entries={providerEntries(providers)} onChange={chooseProvider}
+          placeholder={cfg.provider || 'Choose a provider'} disabled={providers.length === 0 && !cfg.provider}
+          searchPlaceholder={`Search ${providers.length} providers…`}
+          emptyText="No provider matches. Not in OpenCode's catalogue? Choose “Custom endpoint”." />
       </Row>
 
       {chosen && custom && (
@@ -367,13 +457,14 @@ function OpenCodeProviderCard({ toast }) {
           </Row>
           <Row label="Models" hint="Either list the models the endpoint serves, or inherit a catalogue provider's models — for a gateway that fronts one.">
             <NativeSelect value={custom.canonical || ''} onChange={(v) => patchCustom({ canonical: v })} style={{ marginBottom: 10 }}>
-              <ProviderOptions providers={providers} none="List them here" />
+              <option value="">List them here</option>
+              {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </NativeSelect>
             {!custom.canonical && (
               <ModelsEditor models={custom.models || []} onChange={(models) => patchCustom({ models })} />
             )}
           </Row>
-          <Row label="Default model" hint={custom.canonical ? "A model id of the inherited provider." : "One of the listed models. OpenCode uses it unless a person picks another."}>
+          <Row label="Default model" hint={custom.canonical ? 'A model id of the inherited provider.' : 'One of the listed models. OpenCode uses it unless a person picks another.'}>
             {listedModels.length > 0 ? (
               <NativeSelect value={cfg.model || ''} onChange={(v) => patch({ model: v })}>
                 <option value="">Choose a model…</option>
@@ -389,9 +480,10 @@ function OpenCodeProviderCard({ toast }) {
 
       {chosen && !custom && (
         <>
-          <Row label="Model" hint="The provider's own model id. OpenCode uses it unless a person picks another.">
-            <STextInput value={cfg.model || ''} onChange={(v) => patch({ model: v })} mono
-              placeholder={provider ? (provider.model_hint || 'model id') : 'choose a provider first'} style={{ maxWidth: 320 }} />
+          <Row label="Model" hint="OpenCode uses it unless a person picks another.">
+            {provider
+              ? <ModelPicker providerId={provider.id} value={cfg.model || ''} onChange={(v) => patch({ model: v })} />
+              : <STextInput value={cfg.model || ''} onChange={(v) => patch({ model: v })} mono placeholder="model id" style={{ maxWidth: 360 }} />}
           </Row>
           <Row label="Endpoint URL" hint="Optional. Leave blank for the provider's own endpoint; set it to route through a proxy or gateway — the provider's models and API stay the same.">
             <STextInput value={cfg.base_url || ''} onChange={(v) => patch({ base_url: v })} mono
@@ -401,10 +493,7 @@ function OpenCodeProviderCard({ toast }) {
       )}
 
       {chosen && (<>
-      <Row label="API key" hint={cfg.key_set ? `A key ending in …${cfg.key_hint || ''} is stored. Leave blank to keep it.` : 'Required.'}>
-        <STextInput value={key} onChange={setKey} type="password" autoComplete="new-password" mono
-          placeholder={cfg.key_set ? '••••••••  (unchanged)' : `Paste the API key for ${keyTarget}`} />
-      </Row>
+      <CredentialFields vars={vars} values={fieldValues} secrets={sameAsSaved ? cfg.secrets : {}} onChange={setField} providerName={providerName} />
       <Row label="Other providers" hint="Whether OpenCode offers anything but this provider.">
         <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
           <SToggle label="Restrict OpenCode to this provider" on={!!cfg.restrict} onChange={(on) => patch({ restrict: on })} />
@@ -415,7 +504,6 @@ function OpenCodeProviderCard({ toast }) {
           </div>
         </div>
       </Row>
-
       <Row label="Default coding agent" hint="Whether workspaces open OpenCode for everyone, or ask each person to choose.">
         <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
           <SToggle label="Make OpenCode the default coding agent" on={!!cfg.default_agent} onChange={(on) => patch({ default_agent: on })} />
@@ -428,11 +516,11 @@ function OpenCodeProviderCard({ toast }) {
       </Row>
 
       <Note tone="warn">
-        The key is written into every workspace's coding-agent home, where every coding-agent run can read
-        it — treat it as shared with everyone who can use a coding agent on this server. An endpoint URL is
-        where every prompt and the key are sent, so it deserves the same care. It all applies to OpenCode
-        servers started from now on: a person's running server picks it up when it next starts, and idle
-        servers stop after 30 minutes.
+        The credentials are written into every workspace's coding-agent home, where every coding-agent run
+        can read them — treat them as shared with everyone who can use a coding agent on this server. An
+        endpoint URL is where every prompt and the credentials are sent, so it deserves the same care. It
+        all applies to OpenCode servers started from now on: a person's running server picks it up when it
+        next starts, and idle servers stop after 30 minutes.
       </Note>
 
       {err && <Note>{err}</Note>}
@@ -443,12 +531,12 @@ function OpenCodeProviderCard({ toast }) {
         </SBtn>
         {cfg.enabled && (
           <SBtn disabled={!!busy} onClick={() => save(false)}
-            title="Keeps the key. OpenCode servers started from now on get no default provider.">
+            title="Keeps the credentials. OpenCode servers started from now on get no default provider.">
             {busy === 'disable' ? 'Turning off…' : 'Turn off'}
           </SBtn>
         )}
-        {cfg.key_set && (
-          <SBtn variant="danger" disabled={!!busy} onClick={remove} title="Forgets the stored key and the provider choice.">
+        {anySecretStored && (
+          <SBtn variant="danger" disabled={!!busy} onClick={remove} title="Forgets the stored credentials and the provider choice.">
             {busy === 'remove' ? 'Removing…' : 'Remove'}
           </SBtn>
         )}
