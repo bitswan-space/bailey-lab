@@ -309,6 +309,11 @@ func (s *Server) handleBailey(w http.ResponseWriter, r *http.Request) {
 			handleSSOTest(w, r)
 			return
 		}
+	case "/bailey/api/admin/opencode-provider/models":
+		if r.Method == http.MethodGet {
+			handleOpenCodeProviderModels(w, r)
+			return
+		}
 	case "/bailey/api/admin/opencode-provider":
 		switch r.Method {
 		case http.MethodGet:
