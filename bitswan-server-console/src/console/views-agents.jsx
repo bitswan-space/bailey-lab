@@ -305,6 +305,10 @@ function OpenCodeProviderCard({ toast }) {
   const [cfg, setCfg] = useS(null);
   const [loadErr, setLoadErr] = useS('');
   const [entered, setEntered] = useS({});
+  // The URL override sits behind a switch so the field is not there to
+  // confuse anyone who does not route through a proxy; it opens on its own
+  // when an override is stored.
+  const [overrideOn, setOverrideOn] = useS(false);
   const [busy, setBusy] = useS('');
   const [err, setErr] = useS('');
 
@@ -318,7 +322,7 @@ function OpenCodeProviderCard({ toast }) {
       // Stored plain settings and secret hints belong to the saved provider;
       // switching to another one starts its fields empty.
       r.saved_provider = r.provider;
-      setCfg(r); setEntered({});
+      setCfg(r); setEntered({}); setOverrideOn(!!(r.base_url && !r.custom));
     } catch (e) {
       setLoadErr(e.message || 'Could not load the OpenCode provider settings.');
     }
@@ -345,7 +349,8 @@ function OpenCodeProviderCard({ toast }) {
     if (v === CUSTOM) {
       patch({ custom: custom || { name: '', package: 'openai-compatible', canonical: '', models: [] }, provider: '', model: '' });
     } else {
-      patch({ custom: null, provider: v, model: v === cfg.provider ? cfg.model : '' });
+      patch({ custom: null, provider: v, model: v === cfg.provider ? cfg.model : '', base_url: v === cfg.provider ? cfg.base_url : '' });
+      if (v !== cfg.provider) setOverrideOn(false);
     }
   };
   // What the fields show: plain settings come back from the server, secrets
@@ -481,9 +486,22 @@ function OpenCodeProviderCard({ toast }) {
               ? <ModelPicker providerId={provider.id} value={cfg.model || ''} onChange={(v) => patch({ model: v })} />
               : <STextInput value={cfg.model || ''} onChange={(v) => patch({ model: v })} mono placeholder="model id" style={{ maxWidth: 360 }} />}
           </Row>
-          <Row label="Endpoint URL" hint="Optional. Leave blank for the provider's own endpoint; set it to route through a proxy or gateway — the provider's models and API stay the same.">
-            <STextInput value={cfg.base_url || ''} onChange={(v) => patch({ base_url: v })} mono
-              placeholder="https://llm-proxy.example.com/anthropic" />
+          <Row label="URL override" hint="Only if requests should go through a proxy or gateway of your own instead of the provider's own endpoint.">
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <SToggle label="Send requests to a URL of your own" on={overrideOn}
+                onChange={(on) => { setOverrideOn(on); if (!on) patch({ base_url: '' }); }} />
+              <div style={{ fontSize: 12.5, color: SC.fg, lineHeight: '18px' }}>
+                {overrideOn
+                  ? 'On — requests go to the URL below. The provider\u2019s models and API stay the same.'
+                  : 'Off — requests go to the provider\u2019s own endpoint.'}
+              </div>
+            </div>
+            {overrideOn && (
+              <div style={{ marginTop: 10 }}>
+                <STextInput value={cfg.base_url || ''} onChange={(v) => patch({ base_url: v })} mono
+                  placeholder="https://llm-proxy.example.com/anthropic" autoFocus />
+              </div>
+            )}
           </Row>
         </>
       )}
