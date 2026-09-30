@@ -173,6 +173,40 @@ func TestOpenCodeCatalog_ReadsModelsDev(t *testing.T) {
 	}
 }
 
+// The console shows words, never variable names: the provider's own name is
+// dropped and the rest spelled out.
+func TestOpenCodeCatalog_LabelsAreWords(t *testing.T) {
+	for _, c := range []struct{ provider, name, want string }{
+		{"azure", "AZURE_RESOURCE_NAME", "Resource name"},
+		{"azure", "AZURE_API_KEY", "API key"},
+		{"amazon-bedrock", "AWS_REGION", "Region"},
+		{"amazon-bedrock", "AWS_ACCESS_KEY_ID", "Access key ID"},
+		{"amazon-bedrock", "AWS_SECRET_ACCESS_KEY", "Secret access key"},
+		{"amazon-bedrock", "AWS_BEARER_TOKEN_BEDROCK", "Bearer token"},
+		{"google-vertex", "GOOGLE_VERTEX_PROJECT", "Project"},
+		{"google-vertex", "GOOGLE_VERTEX_LOCATION", "Location"},
+		{"google-vertex", "GOOGLE_APPLICATION_CREDENTIALS", "Application credentials"},
+		{"cloudflare-ai-gateway", "CLOUDFLARE_ACCOUNT_ID", "Account ID"},
+		{"cloudflare-ai-gateway", "CLOUDFLARE_GATEWAY_ID", "Gateway ID"},
+		{"cloudflare-ai-gateway", "CLOUDFLARE_API_TOKEN", "API token"},
+		{"databricks", "DATABRICKS_HOST", "Host"},
+		{"snowflake-cortex", "SNOWFLAKE_CORTEX_PAT", "Personal access token"},
+		{"snowflake-cortex", "SNOWFLAKE_ACCOUNT", "Account"},
+		{"watsonx", "WATSONX_AI_APIKEY", "API key"},
+		{"watsonx", "WATSONX_AI_PROJECT_ID", "Project ID"},
+		{"neon", "NEON_AI_GATEWAY_BASE_URL", "Gateway base URL"},
+		{"infomaniak", "INFOMANIAK_PRODUCT_ID", "Product ID"},
+		{"privatemode-ai", "PRIVATEMODE_ENDPOINT", "Endpoint"},
+		{"anthropic", "ANTHROPIC_API_KEY", "API key"},
+		{"google", "GEMINI_API_KEY", "Gemini API key"},
+		{"huggingface", "HF_TOKEN", "Hugging Face token"},
+	} {
+		if got := labelForEnvVar(c.provider, c.name); got != c.want {
+			t.Errorf("%s/%s: label %q, want %q", c.provider, c.name, got, c.want)
+		}
+	}
+}
+
 /*
 The file is sourced by bash. A key that contains a quote, a dollar, a
 backslash or a backtick must come out of the shell exactly as it went in —

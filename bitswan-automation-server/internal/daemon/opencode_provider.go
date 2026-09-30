@@ -104,7 +104,7 @@ type openCodeCustomProvider struct {
 // the launcher names it in the generated provider entry.
 const openCodeCustomKeyEnv = "BITSWAN_OPENCODE_API_KEY"
 
-var openCodeCustomVars = []openCodeEnvVar{{Name: openCodeCustomKeyEnv, Secret: true}}
+var openCodeCustomVars = []openCodeEnvVar{{Name: openCodeCustomKeyEnv, Label: "API key", Secret: true}}
 
 // openCodeProviderConfig is the stored setting: one JSON blob under
 // settingOpenCodeProvider, the way the SSO setting is kept. The credentials
