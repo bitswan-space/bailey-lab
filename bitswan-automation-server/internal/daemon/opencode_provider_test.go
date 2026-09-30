@@ -480,3 +480,85 @@ func TestOpenCodeProvider_SaveCustomRoundTrip(t *testing.T) {
 		t.Fatalf("after switching back: %+v", d)
 	}
 }
+
+/*
+With the toggle on, every workspace's dashboard gets a defaults file naming
+OpenCode as the coding agent for people who have not chosen one — but only
+while the provider is enabled and complete, so nobody lands on an agent
+without a model. Without a claude-configs directory there is nowhere to put
+it yet; the next tick catches up.
+*/
+func TestOpenCodeProvider_DefaultAgentFile(t *testing.T) {
+	isolateOpenCodeProviderTest(t)
+	full := openCodeProviderConfig{Enabled: true, Provider: "openai", Model: "gpt-5", APIKey: "sk-0123456789abcdef", DefaultAgent: true}
+	if got := renderDashboardDefaults(full); got != "{\"codingAgent\": \"opencode\"}\n" {
+		t.Fatalf("rendered %q", got)
+	}
+	for _, c := range []openCodeProviderConfig{
+		{Enabled: true, Provider: "openai", Model: "gpt-5", APIKey: "k", DefaultAgent: false},
+		{Enabled: false, Provider: "openai", Model: "gpt-5", APIKey: "k", DefaultAgent: true},
+		{Enabled: true, Provider: "openai", Model: "", APIKey: "k", DefaultAgent: true},
+	} {
+		if renderDashboardDefaults(c) != "" {
+			t.Errorf("a defaults file for %+v", c)
+		}
+	}
+
+	withDashboard := mkWorkspaceDir(t, "withdash", true)
+	for _, d := range []string{"coding-agent-home", "claude-configs"} {
+		if err := os.MkdirAll(filepath.Join(withDashboard, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noDashboard := mkWorkspaceDir(t, "nodash", true)
+	if err := os.MkdirAll(filepath.Join(noDashboard, "coding-agent-home"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{withDashboard, noDashboard} {
+		if err := os.WriteFile(filepath.Join(dir, "deployment", "docker-compose-coding-agent.yml"), []byte("services: {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := setOpenCodeProvider(full, "boss@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	syncOpenCodeProviderFiles()
+	got, err := os.ReadFile(dashboardDefaultsPath(withDashboard))
+	if err != nil || string(got) != "{\"codingAgent\": \"opencode\"}\n" {
+		t.Fatalf("defaults file: %q, %v", got, err)
+	}
+	if st, _ := os.Stat(dashboardDefaultsPath(withDashboard)); st.Mode().Perm() != 0o644 {
+		t.Errorf("defaults file mode = %o, want 644 (it holds no secret)", st.Mode().Perm())
+	}
+	if _, err := os.Stat(dashboardDefaultsPath(noDashboard)); err == nil {
+		t.Errorf("a defaults file where the dashboard has no config root yet")
+	}
+	if _, err := os.Stat(openCodeProviderEnvPath(noDashboard)); err != nil {
+		t.Errorf("the provider file is still written without a dashboard root: %v", err)
+	}
+
+	// The toggle off: the defaults file goes, the provider file stays.
+	full.DefaultAgent = false
+	if err := setOpenCodeProvider(full, "boss@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	syncOpenCodeProviderFiles()
+	if _, err := os.Stat(dashboardDefaultsPath(withDashboard)); err == nil {
+		t.Errorf("defaults file still there with the toggle off")
+	}
+	if _, err := os.Stat(openCodeProviderEnvPath(withDashboard)); err != nil {
+		t.Errorf("provider file gone with the toggle off: %v", err)
+	}
+
+	// And it rides the API: saved, echoed, never the key.
+	w := dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"openai","model":"gpt-5","api_key":"","default_agent":true}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST = %d; %s", w.Code, w.Body.String())
+	}
+	if d := decodeProviderDTO(t, w.Body.String()); !d.DefaultAgent {
+		t.Fatalf("default_agent not echoed: %+v", d)
+	}
+	if _, err := os.Stat(dashboardDefaultsPath(withDashboard)); err != nil {
+		t.Errorf("defaults file not written on save: %v", err)
+	}
+}

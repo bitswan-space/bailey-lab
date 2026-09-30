@@ -131,15 +131,18 @@ const openCodeCustomKeyEnv = "BITSWAN_OPENCODE_API_KEY"
 // set. BaseURL is optional for a catalogue provider (its endpoint override,
 // for a proxy or gateway) and required for a custom one.
 type openCodeProviderConfig struct {
-	Enabled   bool                    `json:"enabled"`
-	Provider  string                  `json:"provider"`
-	Model     string                  `json:"model"`
-	APIKey    string                  `json:"api_key"`
-	Restrict  bool                    `json:"restrict"`
-	BaseURL   string                  `json:"base_url,omitempty"`
-	Custom    *openCodeCustomProvider `json:"custom,omitempty"`
-	UpdatedAt string                  `json:"updated_at"`
-	UpdatedBy string                  `json:"updated_by"`
+	Enabled  bool                    `json:"enabled"`
+	Provider string                  `json:"provider"`
+	Model    string                  `json:"model"`
+	APIKey   string                  `json:"api_key"`
+	Restrict bool                    `json:"restrict"`
+	BaseURL  string                  `json:"base_url,omitempty"`
+	Custom   *openCodeCustomProvider `json:"custom,omitempty"`
+	// DefaultAgent makes OpenCode the coding agent every workspace opens for
+	// people who have not chosen one themselves, instead of asking them.
+	DefaultAgent bool   `json:"default_agent"`
+	UpdatedAt    string `json:"updated_at"`
+	UpdatedBy    string `json:"updated_by"`
 }
 
 // keyEnv is the env var the provider reads its key from.
@@ -340,6 +343,26 @@ func renderOpenCodeProviderEnv(c openCodeProviderConfig) string {
 	return b.String()
 }
 
+// dashboardDefaultsFile is what the workspace dashboard reads for settings
+// that apply to everyone who has not chosen for themselves. It sits at the
+// root of the claude-configs subpath, which the dashboard mounts as its
+// config root (/claude-config); the per-user directories live next to it.
+const dashboardDefaultsFile = "dashboard-defaults.json"
+
+func dashboardDefaultsPath(workspacePath string) string {
+	return filepath.Join(workspacePath, "claude-configs", dashboardDefaultsFile)
+}
+
+// renderDashboardDefaults is the defaults file for c, or "" when there should
+// be none: OpenCode becomes the default coding agent only while the provider
+// is enabled and complete, so nobody is steered to an agent with no model.
+func renderDashboardDefaults(c openCodeProviderConfig) string {
+	if !c.DefaultAgent || renderOpenCodeProviderEnv(c) == "" {
+		return ""
+	}
+	return "{\"codingAgent\": \"opencode\"}\n"
+}
+
 // The agent user inside the coding-agent image; services.CodingAgentService
 // hands it the agent home the same way when the agent is enabled.
 const agentUID, agentGID = 1000, 1000
@@ -374,14 +397,13 @@ func syncOpenCodeProviderFiles() {
 		fmt.Printf("opencode provider: could not read the setting: %v\n", err)
 		return
 	}
-	content := renderOpenCodeProviderEnv(cfg)
 	names, err := listWorkspaceNames()
 	if err != nil {
 		fmt.Printf("opencode provider: could not list workspaces: %v\n", err)
 		return
 	}
 	for _, ws := range names {
-		if err := syncOpenCodeProviderFileWith(ws, content); err != nil {
+		if err := syncOpenCodeProviderFileWith(ws, cfg); err != nil {
 			fmt.Printf("opencode provider: workspace '%s': %v\n", ws, err)
 		}
 	}
@@ -396,10 +418,13 @@ func syncOpenCodeProviderFileForWorkspace(ws string) error {
 	if err != nil {
 		return err
 	}
-	return syncOpenCodeProviderFileWith(ws, renderOpenCodeProviderEnv(cfg))
+	return syncOpenCodeProviderFileWith(ws, cfg)
 }
 
-func syncOpenCodeProviderFileWith(ws, content string) error {
+// syncOpenCodeProviderFileWith brings one workspace's two files in line with
+// cfg: the provider file in the agent's home, and the dashboard's defaults
+// file that makes OpenCode the agent for people who have not chosen.
+func syncOpenCodeProviderFileWith(ws string, cfg openCodeProviderConfig) error {
 	// A recovery is replacing the workspace directory, and a trashed workspace
 	// has no running agent; neither is touched (listWorkspaceNames lists both).
 	if workspaceUnderRecovery(ws) || IsWorkspaceTrashed(ws) {
@@ -409,25 +434,45 @@ func syncOpenCodeProviderFileWith(ws, content string) error {
 	if err != nil || !svc.IsEnabled() {
 		return nil
 	}
-	return writeOpenCodeProviderFile(svc.WorkspacePath, content)
+	if err := writeOpenCodeProviderFile(svc.WorkspacePath, renderOpenCodeProviderEnv(cfg)); err != nil {
+		return err
+	}
+	return writeDashboardDefaultsFile(svc.WorkspacePath, renderDashboardDefaults(cfg))
 }
 
 // writeOpenCodeProviderFile puts content at the workspace's provider path, or
 // removes the file when content is empty. A workspace whose agent home does
-// not exist is skipped: Enable creates the home, this never does.
-//
-// It writes only on a change, through a temp file in the same directory, and
-// hands the directory and the file to the agent user before the rename. The
-// daemon runs as root and the container's own chown of /home/agent runs only
-// when the container starts, so a root-owned 0600 file dropped into a running
-// container would be unreadable by the agent — and the next server would
-// start without the provider, silently.
+// not exist is skipped: Enable creates the home, this never does. The file
+// is the agent user's alone (0600): it holds the key.
 func writeOpenCodeProviderFile(workspacePath, content string) error {
 	home := filepath.Join(workspacePath, "coding-agent-home")
 	if st, err := os.Stat(home); err != nil || !st.IsDir() {
 		return nil
 	}
-	path := openCodeProviderEnvPath(workspacePath)
+	return writeAgentOwnedFile(openCodeProviderEnvPath(workspacePath), content, 0o600)
+}
+
+// writeDashboardDefaultsFile puts content at the workspace's dashboard
+// defaults path, or removes the file when content is empty. A workspace with
+// no claude-configs directory yet (it appears with the dashboard's first
+// start) is skipped; the next tick catches it. Holding no secret, the file is
+// world-readable.
+func writeDashboardDefaultsFile(workspacePath, content string) error {
+	dir := filepath.Join(workspacePath, "claude-configs")
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return nil
+	}
+	return writeAgentOwnedFile(dashboardDefaultsPath(workspacePath), content, 0o644)
+}
+
+// writeAgentOwnedFile writes content to path with mode, or removes path when
+// content is empty. Only on a change, through a temp file in the same
+// directory, with the directory and the file handed to the agent user before
+// the rename. The daemon runs as root and the container's own chown of
+// /home/agent runs only when the container starts, so a root-owned 0600 file
+// dropped into a running container would be unreadable by the agent — and the
+// next server would start without the provider, silently.
+func writeAgentOwnedFile(path, content string, mode os.FileMode) error {
 	if content == "" {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove %s: %w", path, err)
@@ -444,7 +489,7 @@ func writeOpenCodeProviderFile(workspacePath, content string) error {
 	if err := chownToAgent(dir); err != nil {
 		return fmt.Errorf("chown %s: %w", dir, err)
 	}
-	tmp, err := os.CreateTemp(dir, "."+openCodeProviderEnvFile+".*")
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
@@ -454,7 +499,7 @@ func writeOpenCodeProviderFile(workspacePath, content string) error {
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		return fail(err)
 	}
 	if _, err := tmp.WriteString(content); err != nil {
@@ -477,33 +522,35 @@ func writeOpenCodeProviderFile(workspacePath, content string) error {
 // openCodeProviderDTO is what the console sees. The key itself is never in it;
 // key_set and the last few characters are enough to tell which key is stored.
 type openCodeProviderDTO struct {
-	Enabled   bool                    `json:"enabled"`
-	Provider  string                  `json:"provider"`
-	Model     string                  `json:"model"`
-	Restrict  bool                    `json:"restrict"`
-	BaseURL   string                  `json:"base_url,omitempty"`
-	Custom    *openCodeCustomProvider `json:"custom,omitempty"`
-	KeySet    bool                    `json:"key_set"`
-	KeyHint   string                  `json:"key_hint,omitempty"`
-	UpdatedAt string                  `json:"updated_at,omitempty"`
-	UpdatedBy string                  `json:"updated_by,omitempty"`
-	Providers []openCodeProvider      `json:"providers"`
-	Packages  []openCodePackage       `json:"packages"`
+	Enabled      bool                    `json:"enabled"`
+	Provider     string                  `json:"provider"`
+	Model        string                  `json:"model"`
+	Restrict     bool                    `json:"restrict"`
+	BaseURL      string                  `json:"base_url,omitempty"`
+	Custom       *openCodeCustomProvider `json:"custom,omitempty"`
+	DefaultAgent bool                    `json:"default_agent"`
+	KeySet       bool                    `json:"key_set"`
+	KeyHint      string                  `json:"key_hint,omitempty"`
+	UpdatedAt    string                  `json:"updated_at,omitempty"`
+	UpdatedBy    string                  `json:"updated_by,omitempty"`
+	Providers    []openCodeProvider      `json:"providers"`
+	Packages     []openCodePackage       `json:"packages"`
 }
 
 func openCodeProviderDTOFrom(c openCodeProviderConfig) openCodeProviderDTO {
 	d := openCodeProviderDTO{
-		Enabled:   c.Enabled,
-		Provider:  c.Provider,
-		Model:     c.Model,
-		Restrict:  c.Restrict,
-		BaseURL:   c.BaseURL,
-		Custom:    c.Custom,
-		KeySet:    c.APIKey != "",
-		UpdatedAt: c.UpdatedAt,
-		UpdatedBy: c.UpdatedBy,
-		Providers: openCodeProviders,
-		Packages:  openCodePackages,
+		Enabled:      c.Enabled,
+		Provider:     c.Provider,
+		Model:        c.Model,
+		Restrict:     c.Restrict,
+		BaseURL:      c.BaseURL,
+		Custom:       c.Custom,
+		DefaultAgent: c.DefaultAgent,
+		KeySet:       c.APIKey != "",
+		UpdatedAt:    c.UpdatedAt,
+		UpdatedBy:    c.UpdatedBy,
+		Providers:    openCodeProviders,
+		Packages:     openCodePackages,
 	}
 	if n := len(c.APIKey); n >= 12 {
 		d.KeyHint = c.APIKey[n-4:]
@@ -531,14 +578,15 @@ func handleOpenCodeProviderGet(w http.ResponseWriter, r *http.Request) {
 // setting, key included. There are no DELETE routes in the dispatcher, so
 // clearing is a POST like the default-images setting.
 type openCodeProviderRequest struct {
-	Enabled  bool                    `json:"enabled"`
-	Provider string                  `json:"provider"`
-	Model    string                  `json:"model"`
-	APIKey   string                  `json:"api_key"`
-	Restrict bool                    `json:"restrict"`
-	BaseURL  string                  `json:"base_url"`
-	Custom   *openCodeCustomProvider `json:"custom"`
-	Clear    bool                    `json:"clear"`
+	Enabled      bool                    `json:"enabled"`
+	Provider     string                  `json:"provider"`
+	Model        string                  `json:"model"`
+	APIKey       string                  `json:"api_key"`
+	Restrict     bool                    `json:"restrict"`
+	BaseURL      string                  `json:"base_url"`
+	Custom       *openCodeCustomProvider `json:"custom"`
+	DefaultAgent bool                    `json:"default_agent"`
+	Clear        bool                    `json:"clear"`
 }
 
 // tidyCustomProvider trims a submitted custom provider, drops empty model rows
@@ -588,12 +636,13 @@ func handleOpenCodeProviderSet(w http.ResponseWriter, r *http.Request, by string
 		return
 	}
 	c := openCodeProviderConfig{
-		Enabled:  req.Enabled,
-		Provider: strings.TrimSpace(req.Provider),
-		Model:    strings.TrimSpace(req.Model),
-		APIKey:   strings.TrimSpace(req.APIKey),
-		Restrict: req.Restrict,
-		BaseURL:  strings.TrimSpace(req.BaseURL),
+		Enabled:      req.Enabled,
+		Provider:     strings.TrimSpace(req.Provider),
+		Model:        strings.TrimSpace(req.Model),
+		APIKey:       strings.TrimSpace(req.APIKey),
+		Restrict:     req.Restrict,
+		BaseURL:      strings.TrimSpace(req.BaseURL),
+		DefaultAgent: req.DefaultAgent,
 	}
 	c.Custom = tidyCustomProvider(c.Provider, req.Custom)
 	if c.APIKey == "" {
