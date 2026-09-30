@@ -21,7 +21,9 @@ export function SettingsTab({ role }: SettingsTabProps) {
           <Settings className="size-5 text-primary" aria-hidden />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[17px] font-bold tracking-tight text-foreground">Settings</div>
+          <div className="text-[17px] font-bold tracking-tight text-foreground">
+            Workspace settings
+          </div>
           <p className="mt-1 max-w-xl text-[13px] leading-relaxed text-muted-foreground">
             {admin
               ? 'Your own preferences, then the admin-only settings for this workspace. The steps in the top bar take you back to your work.'
