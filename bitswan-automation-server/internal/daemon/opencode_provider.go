@@ -104,7 +104,7 @@ type openCodeCustomProvider struct {
 // the launcher names it in the generated provider entry.
 const openCodeCustomKeyEnv = "BITSWAN_OPENCODE_API_KEY"
 
-var openCodeCustomVars = []openCodeEnvVar{{Name: openCodeCustomKeyEnv, Label: "API key", Secret: true}}
+var openCodeCustomVars = []openCodeEnvVar{{Name: openCodeCustomKeyEnv, Label: "API key", Secret: true, Optional: true}}
 
 // openCodeProviderConfig is the stored setting: one JSON blob under
 // settingOpenCodeProvider, the way the SSO setting is kept. The credentials
@@ -125,6 +125,10 @@ type openCodeProviderConfig struct {
 	Restrict bool                    `json:"restrict"`
 	BaseURL  string                  `json:"base_url,omitempty"`
 	Custom   *openCodeCustomProvider `json:"custom,omitempty"`
+	// SelfHosted marks one of OpenCode's built-in providers for a server of
+	// your own (Ollama, LM Studio, vLLM): BaseURL is the server, the key is
+	// optional, and OpenCode discovers the models itself.
+	SelfHosted bool `json:"self_hosted,omitempty"`
 	// DefaultAgent makes OpenCode the coding agent every workspace opens for
 	// people who have not chosen one themselves, instead of asking them.
 	DefaultAgent bool   `json:"default_agent"`
@@ -253,6 +257,9 @@ func validateOpenCodeProvider(c openCodeProviderConfig) error {
 		if hasControlChars(c.Provider) || strings.ContainsAny(c.Provider, " \t/#'") {
 			return fmt.Errorf("that is not a provider id")
 		}
+		if c.SelfHosted && c.Enabled && c.BaseURL == "" {
+			return fmt.Errorf("a self-hosted server needs its URL")
+		}
 	}
 	if c.BaseURL != "" {
 		if err := validateBaseURL(c.BaseURL); err != nil {
@@ -282,15 +289,16 @@ func validateOpenCodeProvider(c openCodeProviderConfig) error {
 		if len(c.Vars) == 0 {
 			return fmt.Errorf("the provider's credentials are missing")
 		}
-		secret := false
+		secret, needSecret := false, false
 		for _, v := range c.Vars {
 			if v.Secret {
 				secret = secret || c.Values[v.Name] != ""
+				needSecret = needSecret || !v.Optional
 			} else if c.Values[v.Name] == "" {
-				return fmt.Errorf("%s is required", v.Name)
+				return fmt.Errorf("%s is required", v.Label)
 			}
 		}
-		if !secret {
+		if needSecret && !secret {
 			return fmt.Errorf("an API key is required")
 		}
 	}
@@ -340,10 +348,9 @@ func renderOpenCodeProviderEnv(c openCodeProviderConfig) string {
 	if !c.Enabled || validateOpenCodeProvider(c) != nil {
 		return ""
 	}
+	// Empty for a custom endpoint or self-hosted server without a key: the
+	// launcher then checks nothing and hands the provider no credential.
 	env := c.keyEnv()
-	if env == "" {
-		return ""
-	}
 	var b strings.Builder
 	b.WriteString("# Written by the Bailey automation server from the server-wide OpenCode\n")
 	b.WriteString("# provider setting; overwritten on every change. bitswan-opencode-server\n")
@@ -355,6 +362,9 @@ func renderOpenCodeProviderEnv(c openCodeProviderConfig) string {
 	line("BITSWAN_OPENCODE_RESTRICT", strconv.FormatBool(c.Restrict))
 	if c.BaseURL != "" {
 		line("BITSWAN_OPENCODE_BASE_URL", c.BaseURL)
+	}
+	if c.SelfHosted {
+		line("BITSWAN_OPENCODE_SELF_HOSTED", "true")
 	}
 	if c.Custom != nil {
 		line("BITSWAN_OPENCODE_CUSTOM", "true")
@@ -611,6 +621,7 @@ type openCodeProviderDTO struct {
 	Restrict     bool                           `json:"restrict"`
 	BaseURL      string                         `json:"base_url,omitempty"`
 	Custom       *openCodeCustomProvider        `json:"custom,omitempty"`
+	SelfHosted   bool                           `json:"self_hosted,omitempty"`
 	DefaultAgent bool                           `json:"default_agent"`
 	UpdatedAt    string                         `json:"updated_at,omitempty"`
 	UpdatedBy    string                         `json:"updated_by,omitempty"`
@@ -632,6 +643,7 @@ func openCodeProviderDTOFrom(c openCodeProviderConfig) openCodeProviderDTO {
 		Restrict:     c.Restrict,
 		BaseURL:      c.BaseURL,
 		Custom:       c.Custom,
+		SelfHosted:   c.SelfHosted,
 		DefaultAgent: c.DefaultAgent,
 		UpdatedAt:    c.UpdatedAt,
 		UpdatedBy:    c.UpdatedBy,
@@ -653,10 +665,12 @@ func openCodeProviderDTOFrom(c openCodeProviderConfig) openCodeProviderDTO {
 		}
 		d.Secrets[v.Name] = state
 	}
+	// Self-hosted servers need no catalogue and come first.
+	d.Providers = append(d.Providers, openCodeSelfHosted...)
 	if cat, err := loadOpenCodeCatalog(); err != nil {
 		d.CatalogError = err.Error()
 	} else {
-		d.Providers = cat.Providers
+		d.Providers = append(d.Providers, cat.Providers...)
 	}
 	return d
 }
@@ -790,7 +804,10 @@ func handleOpenCodeProviderSet(w http.ResponseWriter, r *http.Request, by string
 			return
 		}
 		c.Vars = p.Env
-		if c.Enabled && c.Model != "" {
+		c.SelfHosted = p.SelfHosted
+		// A self-hosted server's models are the server's; the catalogue
+		// cannot vouch for them.
+		if c.Enabled && c.Model != "" && !p.SelfHosted {
 			if cat, err := loadOpenCodeCatalog(); err == nil {
 				known := false
 				for _, m := range cat.Models[c.Provider] {

@@ -56,6 +56,30 @@ func openCodeCatalogCachePath() string {
 // manual key.
 var openCodeSignInOnly = map[string]bool{"github-copilot": true}
 
+// openCodeSelfHostedKeyEnv is the env var a self-hosted provider's optional
+// key travels under; the launcher hands it to the provider's settings.
+const openCodeSelfHostedKeyEnv = "BITSWAN_OPENCODE_API_KEY"
+
+// openCodeSelfHosted are OpenCode's built-in providers for servers of your
+// own — not catalogue entries: OpenCode discovers their models from the
+// server itself once it has a base URL, and a key is optional. They are
+// offered whether or not models.dev answers. The catalogue's own "lmstudio"
+// (a key-based listing) is dropped in favour of this one.
+var openCodeSelfHosted = []openCodeProvider{
+	{ID: "ollama", Name: "Ollama", SelfHosted: true, Env: []openCodeEnvVar{{Name: openCodeSelfHostedKeyEnv, Label: "API key", Secret: true, Optional: true}}},
+	{ID: "lmstudio", Name: "LM Studio", SelfHosted: true, Env: []openCodeEnvVar{{Name: openCodeSelfHostedKeyEnv, Label: "API key", Secret: true, Optional: true}}},
+	{ID: "vllm", Name: "vLLM", SelfHosted: true, Env: []openCodeEnvVar{{Name: openCodeSelfHostedKeyEnv, Label: "API key", Secret: true, Optional: true}}},
+}
+
+func openCodeSelfHostedByID(id string) (openCodeProvider, bool) {
+	for _, p := range openCodeSelfHosted {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return openCodeProvider{}, false
+}
+
 // openCodePopular is the short list the console shows before the rest.
 var openCodePopular = []string{"anthropic", "openai", "google", "openrouter", "mistral", "groq", "xai", "deepseek", "opencode"}
 
@@ -69,6 +93,9 @@ type openCodeEnvVar struct {
 	Label  string `json:"label"`
 	Secret bool   `json:"secret"`
 	File   bool   `json:"file,omitempty"`
+	// Optional marks a secret the provider works without — a self-hosted
+	// server or a custom endpoint that needs no key.
+	Optional bool `json:"optional,omitempty"`
 }
 
 // envWords spells out the tokens of a variable name that are not plain words.
@@ -139,6 +166,7 @@ type openCodeProvider struct {
 	Name       string           `json:"name"`
 	Env        []openCodeEnvVar `json:"env"`
 	Popular    bool             `json:"popular,omitempty"`
+	SelfHosted bool             `json:"self_hosted,omitempty"`
 	ModelCount int              `json:"model_count"`
 }
 
@@ -208,7 +236,7 @@ func parseModelsDev(raw []byte) (*openCodeCatalog, error) {
 	}
 	cat := &openCodeCatalog{Models: map[string][]openCodeModel{}}
 	for id, p := range full {
-		if openCodeSignInOnly[id] || len(p.Env) == 0 || p.Name == "" {
+		if _, selfHosted := openCodeSelfHostedByID(id); selfHosted || openCodeSignInOnly[id] || len(p.Env) == 0 || p.Name == "" {
 			continue
 		}
 		entry := openCodeProvider{ID: id, Name: p.Name, Popular: popular[id], ModelCount: len(p.Models)}
@@ -299,9 +327,13 @@ func readOpenCodeCatalogCache() (*openCodeCatalog, time.Time, error) {
 	return cat, st.ModTime().Add(-openCodeCatalogTTL), nil
 }
 
-// openCodeProviderByID looks a catalogue provider up; a sign-in-only one is
-// not found. The error is the catalogue being unavailable.
+// openCodeProviderByID looks a provider up: a self-hosted one first (they
+// need no catalogue), then the catalogue; a sign-in-only one is not found.
+// The error is the catalogue being unavailable.
 func openCodeProviderByID(id string) (openCodeProvider, bool, error) {
+	if p, ok := openCodeSelfHostedByID(id); ok {
+		return p, true, nil
+	}
 	cat, err := loadOpenCodeCatalog()
 	if err != nil {
 		return openCodeProvider{}, false, err

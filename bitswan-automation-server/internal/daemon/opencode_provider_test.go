@@ -32,7 +32,8 @@ const catalogFixture = `{
   "google-vertex": {"name": "Google Vertex", "env": ["GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_APPLICATION_CREDENTIALS"], "models": {"gemini-2.5-pro": {"name": "Gemini 2.5 Pro"}}},
   "amazon-bedrock": {"name": "Amazon Bedrock", "env": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_BEARER_TOKEN_BEDROCK"], "models": {"anthropic.claude-sonnet-4-5": {"name": "Claude Sonnet 4.5"}}},
   "github-copilot": {"name": "GitHub Copilot", "env": ["GITHUB_TOKEN"], "models": {"gpt-5": {"name": "GPT-5"}}},
-  "302ai": {"name": "302.AI", "env": ["302AI_API_KEY"], "models": {"MiniMax-M1": {"name": "MiniMax M1"}}}
+  "302ai": {"name": "302.AI", "env": ["302AI_API_KEY"], "models": {"MiniMax-M1": {"name": "MiniMax M1"}}},
+  "lmstudio": {"name": "LM Studio", "env": ["LMSTUDIO_API_KEY"], "models": {"qwen3-8b": {"name": "Qwen 3 8B"}}}
 }`
 
 // isolateOpenCodeProviderTest gives the test a HOME and a bailey.db of its own
@@ -117,6 +118,12 @@ func TestOpenCodeCatalog_ReadsModelsDev(t *testing.T) {
 	}
 	if _, ok := ids["302ai"]; !ok {
 		t.Errorf("the long tail is offered")
+	}
+	if _, ok := ids["lmstudio"]; ok {
+		t.Errorf("the catalogue's key-based LM Studio gives way to the self-hosted one")
+	}
+	if p, ok, err := openCodeProviderByID("lmstudio"); err != nil || !ok || !p.SelfHosted || !p.Env[0].Optional {
+		t.Errorf("lmstudio by id = %+v, %v, %v; want the self-hosted entry with an optional key", p, ok, err)
 	}
 	popular := 0
 	for _, p := range cat.Providers {
@@ -333,7 +340,7 @@ func TestOpenCodeProvider_SaveKeepDisableClear(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET = %d; %s", w.Code, w.Body.String())
 	}
-	if d := decodeProviderDTO(t, w.Body.String()); d.Enabled || len(d.Secrets) != 0 || len(d.Providers) != 13 || d.CatalogError != "" {
+	if d := decodeProviderDTO(t, w.Body.String()); d.Enabled || len(d.Secrets) != 0 || len(d.Providers) != 16 || !d.Providers[0].SelfHosted || d.CatalogError != "" {
 		t.Fatalf("fresh GET = %+v", d)
 	}
 
@@ -424,7 +431,7 @@ func TestOpenCodeProvider_SaveKeepDisableClear(t *testing.T) {
 	fetchModelsDev = func() ([]byte, error) { return nil, errors.New("offline") }
 	_ = os.Remove(openCodeCatalogCachePath())
 	w = dispatch(baileyReq(http.MethodGet, openCodeProviderPath, "boss@example.com", adminGrp))
-	if d = decodeProviderDTO(t, w.Body.String()); w.Code != http.StatusOK || d.CatalogError == "" || len(d.Providers) != 0 {
+	if d = decodeProviderDTO(t, w.Body.String()); w.Code != http.StatusOK || d.CatalogError == "" || len(d.Providers) != len(openCodeSelfHosted) {
 		t.Fatalf("GET offline = %d %+v", w.Code, d)
 	}
 	if w := dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"openai","model":"gpt-5","values":{"OPENAI_API_KEY":"k"}}`)); w.Code != http.StatusBadGateway {
@@ -770,5 +777,59 @@ func TestOpenCodeProvider_DefaultAgentFile(t *testing.T) {
 	}
 	if _, err := os.Stat(dashboardDefaultsPath(withDashboard)); err != nil {
 		t.Errorf("defaults file not written on save: %v", err)
+	}
+}
+
+/*
+A server of your own — Ollama, LM Studio, vLLM — is one of OpenCode's built-in
+providers: it needs its URL, works without a key, and OpenCode reads the
+models from the server itself, so the model is whatever the server calls it.
+A custom endpoint's key is optional too, as OpenCode says it is.
+*/
+func TestOpenCodeProvider_SelfHostedAndKeylessCustom(t *testing.T) {
+	isolateOpenCodeProviderTest(t)
+	w := dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"ollama","model":"qwen3:8b","values":{},"base_url":"http://ollama.internal:11434/v1"}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST ollama = %d; %s", w.Code, w.Body.String())
+	}
+	d := decodeProviderDTO(t, w.Body.String())
+	if !d.SelfHosted || d.Provider != "ollama" || d.Secrets[openCodeSelfHostedKeyEnv].Set || d.Model != "qwen3:8b" {
+		t.Fatalf("after ollama save: %+v", d)
+	}
+	c, _ := getOpenCodeProvider()
+	env := renderOpenCodeProviderEnv(c)
+	for _, want := range []string{"BITSWAN_OPENCODE_PROVIDER='ollama'\n", "BITSWAN_OPENCODE_PROVIDER_ENV=''\n", "BITSWAN_OPENCODE_SELF_HOSTED='true'\n", "BITSWAN_OPENCODE_BASE_URL='http://ollama.internal:11434/v1'\n"} {
+		if !strings.Contains(env, want) {
+			t.Errorf("ollama env lacks %q:\n%s", want, env)
+		}
+	}
+	if strings.Contains(env, "BITSWAN_OPENCODE_API_KEY=") {
+		t.Errorf("a key line with no key:\n%s", env)
+	}
+	// With a key, the launcher is told which variable carries it.
+	w = dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"ollama","model":"qwen3:8b","values":{"BITSWAN_OPENCODE_API_KEY":"tok-0123456789ab"},"base_url":"http://ollama.internal:11434/v1"}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST ollama with key = %d; %s", w.Code, w.Body.String())
+	}
+	c, _ = getOpenCodeProvider()
+	if env := renderOpenCodeProviderEnv(c); !strings.Contains(env, "BITSWAN_OPENCODE_PROVIDER_ENV='BITSWAN_OPENCODE_API_KEY'\n") || !strings.Contains(env, "BITSWAN_OPENCODE_API_KEY='tok-0123456789ab'\n") {
+		t.Errorf("ollama env with key:\n%s", env)
+	}
+	// No URL: nothing to talk to.
+	if w := dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"vllm","model":"m","values":{},"base_url":""}`)); w.Code != http.StatusBadRequest {
+		t.Errorf("self-hosted without URL = %d, want 400; %s", w.Code, w.Body.String())
+	}
+	// A keyless custom endpoint saves and renders without a key line.
+	w = dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"lab","model":"llama","values":{},"base_url":"http://lab.internal:8000/v1","custom":{"package":"openai-compatible","models":[{"id":"llama"}]}}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST keyless custom = %d; %s", w.Code, w.Body.String())
+	}
+	c, _ = getOpenCodeProvider()
+	if env := renderOpenCodeProviderEnv(c); env == "" || !strings.Contains(env, "BITSWAN_OPENCODE_PROVIDER_ENV=''\n") || strings.Contains(env, "BITSWAN_OPENCODE_API_KEY=") {
+		t.Errorf("keyless custom env:\n%s", env)
+	}
+	// A catalogue provider still needs its key.
+	if w := dispatch(openCodeAdminJSON(http.MethodPost, `{"enabled":true,"provider":"openai","model":"gpt-5","values":{}}`)); w.Code != http.StatusBadRequest {
+		t.Errorf("catalogue provider without key = %d, want 400", w.Code)
 	}
 }
