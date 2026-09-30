@@ -257,10 +257,11 @@ function ModelPicker({ providerId, value, onChange }) {
   );
 }
 
-// One field per environment variable the provider reads. When every variable
-// is a secret they are alternative names for one key and a single field
-// suffices; otherwise the plain ones are settings the provider needs next to
-// its key (a resource name, a region) and each gets its own field.
+// One field per value the provider needs, under the plain labels the daemon
+// derives from OpenCode's catalogue — never a variable name. When every value
+// is a secret they are alternative names for one key and a single "API key"
+// field suffices; otherwise the settings the provider needs next to its key
+// (a resource name, a region) each get a field.
 function CredentialFields({ vars, values, secrets, onChange, providerName }) {
   const allSecret = vars.length > 0 && vars.every((v) => v.secret);
   const shown = allSecret ? [vars[0]] : vars;
@@ -268,26 +269,21 @@ function CredentialFields({ vars, values, secrets, onChange, providerName }) {
   return (
     <>
       {shown.map((v) => {
-        const label = allSecret ? 'API key' : <code style={{ fontFamily: 'Geist Mono, monospace', fontSize: 12 }}>{v.name}</code>;
+        const label = allSecret ? 'API key' : (v.label || 'Value');
         const s = stored(v.name);
         let hint;
-        if (allSecret) {
-          hint = vars.length > 1
-            ? `Read from ${v.name}; ${vars.slice(1).map((x) => x.name).join(', ')} work too.`
-            : `Read from ${v.name}.`;
-          if (s.set) hint += ` One ending in …${s.hint || ''} is stored; leave blank to keep it.`;
-        } else if (v.file) {
-          hint = s.set ? 'A document is stored. Leave blank to keep it.' : 'The JSON document the provider issued (a service account).';
+        if (v.file) {
+          hint = s.set ? 'A key file is stored. Leave blank to keep it.' : 'The JSON key file the provider issued for a service account.';
         } else if (v.secret) {
-          hint = s.set ? `One ending in …${s.hint || ''} is stored. Leave blank to keep it.` : 'Secret.';
+          hint = s.set ? `One ending in …${s.hint || ''} is stored. Leave blank to keep it.` : 'Required.';
         } else {
-          hint = 'Required, not secret.';
+          hint = 'Required.';
         }
         return (
           <Row key={v.name} label={label} hint={hint}>
             {v.file ? (
               <textarea value={values[v.name] || ''} onChange={(e) => onChange(v.name, e.target.value)}
-                placeholder={s.set ? '(stored — paste a new document to replace it)' : '{ "type": "service_account", … }'}
+                placeholder={s.set ? '(stored — paste a new key file to replace it)' : '{ "type": "service_account", … }'}
                 rows={4} spellCheck={false} style={{
                   width: '100%', padding: '8px 12px', border: `1px solid ${SC.border}`, borderRadius: 8, background: '#fff',
                   fontFamily: 'Geist Mono, monospace', fontSize: 12, color: SC.fg, outline: 'none', resize: 'vertical',
@@ -295,7 +291,7 @@ function CredentialFields({ vars, values, secrets, onChange, providerName }) {
             ) : (
               <STextInput value={values[v.name] || ''} onChange={(val) => onChange(v.name, val)} mono
                 type={v.secret ? 'password' : 'text'} autoComplete={v.secret ? 'new-password' : 'off'}
-                placeholder={v.secret ? (s.set ? '••••••••  (unchanged)' : `Paste the ${providerName} key`) : v.name.toLowerCase().replace(/_/g, ' ')}
+                placeholder={v.secret ? (s.set ? '••••••••  (unchanged)' : `Paste the ${providerName} ${label.toLowerCase()}`) : label.toLowerCase()}
                 style={{ maxWidth: v.secret ? undefined : 360 }} />
             )}
           </Row>
@@ -338,7 +334,7 @@ function OpenCodeProviderCard({ toast }) {
   const provider = custom ? null : (providers.find((p) => p.id === cfg.provider) || null);
   // The provider's variables: from the catalogue, or — with the catalogue
   // unreachable — as they were saved.
-  const vars = custom ? [{ name: CUSTOM_KEY, secret: true }] : (provider ? provider.env : (cfg.provider ? cfg.vars || [] : []));
+  const vars = custom ? [{ name: CUSTOM_KEY, label: 'API key', secret: true }] : (provider ? provider.env : (cfg.provider ? cfg.vars || [] : []));
   const patch = (p) => setCfg({ ...cfg, ...p });
   const patchCustom = (p) => patch({ custom: { ...custom, ...p } });
   const chosen = !!custom || !!cfg.provider;
