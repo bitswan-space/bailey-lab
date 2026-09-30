@@ -95,7 +95,7 @@ GENERATED_CONFIG="$ROOT/opencode.generated.json"
 apply_provider() {
     rm -f "$GENERATED_CONFIG"
     [ -r "$PROVIDER_ENV_FILE" ] || return 0
-    local provider env model restrict base_url custom c_name c_package c_canonical c_models
+    local provider env model restrict base_url self_hosted custom c_name c_package c_canonical c_models
     set -a
     # shellcheck disable=SC1090
     . "$PROVIDER_ENV_FILE"
@@ -105,12 +105,15 @@ apply_provider() {
     model="${BITSWAN_OPENCODE_MODEL:-}"
     restrict="${BITSWAN_OPENCODE_RESTRICT:-false}"
     base_url="${BITSWAN_OPENCODE_BASE_URL:-}"
+    self_hosted="${BITSWAN_OPENCODE_SELF_HOSTED:-false}"
     custom="${BITSWAN_OPENCODE_CUSTOM:-false}"
     c_name="${BITSWAN_OPENCODE_CUSTOM_NAME:-}"
     c_package="${BITSWAN_OPENCODE_CUSTOM_PACKAGE:-}"
     c_canonical="${BITSWAN_OPENCODE_CUSTOM_CANONICAL:-}"
     c_models="${BITSWAN_OPENCODE_CUSTOM_MODELS:-}"
-    if [ -z "$provider" ] || [ -z "$env" ] || [ -z "$model" ] || [ -z "${!env:-}" ]; then
+    # PROVIDER_ENV names the variable the key is under; it is empty for a
+    # custom endpoint or a self-hosted server that needs none.
+    if [ -z "$provider" ] || [ -z "$model" ] || { [ -n "$env" ] && [ -z "${!env:-}" ]; }; then
         echo "bitswan-opencode-server: $PROVIDER_ENV_FILE is incomplete; starting without a default provider" >&2
         return 0
     fi
@@ -119,24 +122,29 @@ apply_provider() {
         return 0
     fi
     if python3 - "$OPENCODE_CONFIG" "$GENERATED_CONFIG" "$provider" "$model" "$restrict" "$env" \
-        "$base_url" "$custom" "$c_name" "$c_package" "$c_canonical" "$c_models" <<'PY'
+        "$base_url" "$self_hosted" "$custom" "$c_name" "$c_package" "$c_canonical" "$c_models" <<'PY'
 import json, os, sys
 (base, out, provider, model, restrict, env,
- base_url, custom, c_name, c_package, c_canonical, c_models) = sys.argv[1:13]
+ base_url, self_hosted, custom, c_name, c_package, c_canonical, c_models) = sys.argv[1:14]
 try:
     with open(base) as f:
         cfg = json.load(f)
 except FileNotFoundError:
     cfg = {}
 cfg["model"] = provider + "/" + model
-if base_url or custom == "true":
+if base_url or custom == "true" or self_hosted == "true":
     prov = cfg.setdefault("providers", {}).setdefault(provider, {})
     if base_url:
         prov.setdefault("settings", {})["baseURL"] = base_url
+    if self_hosted == "true" and env:
+        # A built-in self-hosted provider (Ollama, LM Studio, vLLM) takes its
+        # optional key as a setting; OpenCode resolves the {env:…} reference.
+        prov.setdefault("settings", {})["apiKey"] = "{env:" + env + "}"
     if custom == "true":
         prov["name"] = c_name or provider
         prov["package"] = "@opencode/ai/providers/" + c_package
-        prov["env"] = [env]
+        if env:
+            prov["env"] = [env]
         if c_canonical:
             prov["canonical"] = c_canonical
         if c_models:
