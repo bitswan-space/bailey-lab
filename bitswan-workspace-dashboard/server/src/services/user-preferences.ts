@@ -10,6 +10,13 @@ import { configDirNameFor, configRoot } from './vscode-sidebar.js';
  * directory that holds their Claude Code state and their OpenCode server, so
  * one directory per person carries everything the dashboard knows about them.
  * The dashboard already creates and owns that directory (services/vscode-sidebar.ts).
+ *
+ * Next to the per-user directories, at the root of the config root, the
+ * automation server may drop `dashboard-defaults.json`: settings that apply to
+ * everyone who has not chosen for themselves — today, OpenCode as the coding
+ * agent once an admin has given the server a model provider. A person's own
+ * choice always wins over it; the defaults only fill the gap where the tab
+ * would otherwise ask.
  */
 
 export const AGENT_KINDS = ['claude-code', 'opencode'] as const;
@@ -30,6 +37,14 @@ export interface UserPreferences {
 }
 
 export const PREFERENCES_FILE = 'dashboard-preferences.json';
+
+/** The server-wide defaults file, written by the automation server. */
+export const DEFAULTS_FILE = 'dashboard-defaults.json';
+
+/** Where the server-wide defaults live. */
+export function defaultsPath(): string {
+  return path.join(configRoot(), DEFAULTS_FILE);
+}
 
 /** Where `email`'s preferences file lives. */
 export function preferencesPath(email: string): string {
@@ -58,19 +73,43 @@ export function parsePreferences(text: string): UserPreferences {
 /** Short cache so the per-request forwarder does not hit the disk for every asset. */
 const CACHE_TTL_MS = 5_000;
 const cache = new Map<string, { at: number; prefs: UserPreferences }>();
+const DEFAULTS_CACHE_KEY = '\0defaults';
 
-/** Read `email`'s preferences; missing or unreadable files read as none. */
-export async function readPreferences(email: string): Promise<UserPreferences> {
-  const cached = cache.get(email);
+/** Forget every cached read; for tests that rewrite the files underneath. */
+export function resetPreferencesCache(): void {
+  cache.clear();
+}
+
+async function readCached(key: string, file: string): Promise<UserPreferences> {
+  const cached = cache.get(key);
   if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.prefs;
   let prefs: UserPreferences = {};
   try {
-    prefs = parsePreferences(await fs.readFile(preferencesPath(email), 'utf8'));
+    prefs = parsePreferences(await fs.readFile(file, 'utf8'));
   } catch {
     prefs = {};
   }
-  cache.set(email, { at: Date.now(), prefs });
+  cache.set(key, { at: Date.now(), prefs });
   return prefs;
+}
+
+/** The server-wide defaults; no file, or an unreadable one, reads as none. */
+export function readDefaults(): Promise<UserPreferences> {
+  return readCached(DEFAULTS_CACHE_KEY, defaultsPath());
+}
+
+/** What `email` chose themselves, and nothing else. */
+export function readOwnPreferences(email: string): Promise<UserPreferences> {
+  return readCached(email, preferencesPath(email));
+}
+
+/**
+ * `email`'s effective preferences: their own choices, with the server-wide
+ * defaults filling in whatever they have not chosen.
+ */
+export async function readPreferences(email: string): Promise<UserPreferences> {
+  const [defaults, own] = await Promise.all([readDefaults(), readOwnPreferences(email)]);
+  return { ...defaults, ...own };
 }
 
 /**
@@ -80,7 +119,7 @@ export async function readPreferences(email: string): Promise<UserPreferences> {
  */
 export async function writePreferences(email: string, patch: UserPreferences): Promise<UserPreferences> {
   cache.delete(email);
-  const current = await readPreferences(email);
+  const current = await readOwnPreferences(email);
   cache.delete(email);
   const next: UserPreferences = { ...current, ...patch };
   const file = preferencesPath(email);

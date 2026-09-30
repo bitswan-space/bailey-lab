@@ -32,7 +32,8 @@ export function CodingAgentCard() {
         <CardTitle>Coding agent</CardTitle>
         <CardDescription>
           Which agent the Coding Agent tab opens for you. This is your own setting; colleagues choose
-          theirs. Each agent keeps its own conversations, so switching does not carry them over.
+          theirs, and an admin may have set a server-wide default for anyone who has not. Each agent
+          keeps its own conversations, so switching does not carry them over.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

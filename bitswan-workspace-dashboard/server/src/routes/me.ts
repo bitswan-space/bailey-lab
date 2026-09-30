@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { GitopsClient } from '../services/gitops.js';
 import { copyNameForEmail, emailFromRequest, fwRoleFromRequest } from '../lib/user.js';
-import { isAgentKind, readPreferences, writePreferences } from '../services/user-preferences.js';
+import { isAgentKind, readDefaults, readPreferences, writePreferences } from '../services/user-preferences.js';
 
 export interface MeRoutesOptions {
   gitops: GitopsClient | null;
@@ -116,8 +116,11 @@ export function registerMeRoutes(
     }
 
     const role = await fwRoleFromRequest(req, gitops, app.log);
-    const preferences = await readPreferences(email);
-    return { email, copy, role, preferences };
+    // Effective preferences (their own, with the server-wide defaults filling
+    // the gaps) plus the defaults on their own, so Settings can say which of
+    // the two the person is looking at.
+    const [preferences, defaults] = await Promise.all([readPreferences(email), readDefaults()]);
+    return { email, copy, role, preferences, defaults };
   });
 
   /**

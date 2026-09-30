@@ -1259,7 +1259,10 @@ export interface Me {
   copy: string;
   created?: boolean;
   role?: 'admin' | 'auditor' | 'member';
+  /** Their own choices, with the server-wide defaults filling the gaps. */
   preferences?: UserPreferences;
+  /** The server-wide defaults alone (set by an admin in the Bailey console). */
+  defaults?: UserPreferences;
 }
 
 export const api = {

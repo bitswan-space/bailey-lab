@@ -5,10 +5,14 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { configDirNameFor } from './vscode-sidebar.js';
 import {
+  defaultsPath,
   isAgentKind,
   parsePreferences,
   preferencesPath,
+  readDefaults,
+  readOwnPreferences,
   readPreferences,
+  resetPreferencesCache,
   writePreferences,
 } from './user-preferences.js';
 
@@ -53,4 +57,34 @@ test('only the two agents are agent kinds', () => {
   assert.equal(isAgentKind('OpenCode'), false);
   assert.equal(isAgentKind(''), false);
   assert.equal(isAgentKind(undefined), false);
+});
+
+/**
+ * Once an admin gives the server a model provider and asks for OpenCode as
+ * the default agent, the automation server drops a defaults file at the
+ * config root. It fills in for people who have not chosen; it never
+ * overrides a choice.
+ */
+test('a server-wide default applies to whoever has not chosen, and never overrides a choice', async () => {
+  const dave = 'dave@example.com';
+  const erin = 'erin@example.com';
+  await writePreferences(erin, { codingAgent: 'claude-code' });
+  resetPreferencesCache();
+  assert.deepEqual(await readDefaults(), {});
+  assert.deepEqual(await readPreferences(dave), {});
+
+  await fs.writeFile(defaultsPath(), '{"codingAgent": "opencode"}\n');
+  resetPreferencesCache();
+  assert.deepEqual(await readDefaults(), { codingAgent: 'opencode' });
+  assert.deepEqual(await readPreferences(dave), { codingAgent: 'opencode' });
+  assert.deepEqual(await readOwnPreferences(dave), {}, 'the default is not written into the person’s own file');
+  assert.deepEqual(await readPreferences(erin), { codingAgent: 'claude-code' });
+
+  // A person's later choice is theirs, whatever the default says.
+  await writePreferences(dave, { codingAgent: 'claude-code' });
+  assert.deepEqual(await readPreferences(dave), { codingAgent: 'claude-code' });
+
+  await fs.rm(defaultsPath());
+  resetPreferencesCache();
+  assert.deepEqual(await readPreferences('frank@example.com'), {});
 });
