@@ -189,11 +189,24 @@ organisation decides where prompts go. The pieces, in the order a key travels:
   only that one is stored and its last four characters. A blank key on save
   keeps the stored one; `enabled: false` keeps everything and removes the
   files; `clear: true` forgets it all. The provider list is OpenCode's own
-  catalogue (models.dev, what `/connect` shows) reduced to the providers whose
-  credential is a single API key in one env var — 210 of 223 at generation
-  time; Bedrock, Azure, Vertex and the other multi-value ones are left out —
-  checked in as `opencode_catalog.go` by `gen_opencode_catalog.go`, with the
-  nine familiar providers marked popular. Two ways past the catalogue: an
+  catalogue, read live from models.dev by the daemon
+  (`internal/daemon/opencode_catalog.go`) exactly as OpenCode reads it at
+  start-up: fetched, served for an hour, kept on disk next to bailey.db as the
+  copy to serve when models.dev is unreachable, and an error when there is
+  neither — nothing is checked in and there is no built-in fallback, as there
+  is none in OpenCode. It offers what `/connect` offers minus the sign-in-only
+  providers (GitHub Copilot's device flow; a server cannot complete one). A
+  provider's fields are the environment variables the catalogue says it
+  reads, classified by name: keys, tokens and secrets are write-only, names
+  ending in a resource name, id, region, host or endpoint are plain settings
+  shown back for editing, and Google's application credentials are a document
+  the admin pastes. When every variable is a secret they are alternative
+  names for one key (Google's three) and one field is shown; otherwise each
+  plain setting is required and at least one secret must be given (Azure's
+  resource name plus key; Bedrock's region plus a bearer token or an access
+  key pair). Models come from the same catalogue, per provider on demand
+  (`GET /bailey/api/admin/opencode-provider/models?provider=`), and a saved
+  model must be one the catalogue lists. Two ways past the catalogue: an
   endpoint URL on a catalogue provider (its `settings.baseURL`, for a proxy
   or gateway with the provider's own models and API), and a custom provider —
   an id of its own, a display name, the API it speaks (one of OpenCode's
@@ -208,9 +221,15 @@ organisation decides where prompts go. The pieces, in the order a key travels:
   `BITSWAN_OPENCODE_RESTRICT`, an optional `BITSWAN_OPENCODE_BASE_URL`, for a
   custom provider `BITSWAN_OPENCODE_CUSTOM='true'` with `_NAME`, `_PACKAGE`,
   optionally `_CANONICAL`, and `_MODELS` (a JSON list of `{id, name}` inside
-  the quotes), then the env var the provider reads its key from — the
-  provider's own (`ANTHROPIC_API_KEY='…'`), or `BITSWAN_OPENCODE_API_KEY` for a
-  custom one — the only place the key appears. The daemon
+  the quotes), then every variable the provider reads that has a value —
+  `ANTHROPIC_API_KEY='…'`, or `AZURE_RESOURCE_NAME='…'` and `AZURE_API_KEY='…'`,
+  or `BITSWAN_OPENCODE_API_KEY` for a custom provider — the only place the
+  credentials appear; `BITSWAN_OPENCODE_PROVIDER_ENV` names the first secret
+  among them, the one the launcher checks. A document-valued variable
+  (Google's `GOOGLE_APPLICATION_CREDENTIALS`) is written to
+  `.bitswan/<VAR>.credential.json` next to the env file and the variable
+  points at that path inside the container; documents of a provider that is
+  no longer the one are pruned. The daemon
   writes it on save, when the agent is enabled in a workspace, and on every
   reconcile tick (60 s); only on a change, mode 600, owned by the agent user
   (the container's own chown runs only at its start), through a temp file and
@@ -317,8 +336,9 @@ What the dashboard depends on for a given version, all in one place each:
   `package`, `canonical`, `settings.baseURL`, `models`), the package names
   under `@opencode/ai/providers/` (`openCodePackages` in
   `internal/daemon/opencode_provider.go`; the binary's strings list them), and
-  the catalogue: run `go generate ./internal/daemon/` in
-  bitswan-automation-server to refresh `opencode_catalog.go` from models.dev.
+  the catalogue's shape (`internal/daemon/opencode_catalog.go` reads
+  `name`, `env` and `models` per provider from models.dev, and names the
+  sign-in-only providers to leave out).
 
 After a bump: run the pinned binary with `serve`, fetch `/openapi.json`, and
 diff the path list against the above; then walk the verification list in the
