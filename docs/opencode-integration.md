@@ -206,7 +206,17 @@ organisation decides where prompts go. The pieces, in the order a key travels:
   resource name plus key; Bedrock's region plus a bearer token or an access
   key pair). Models come from the same catalogue, per provider on demand
   (`GET /bailey/api/admin/opencode-provider/models?provider=`), and a saved
-  model must be one the catalogue lists. Two ways past the catalogue: an
+  model must be one the catalogue lists. Servers of your own — Ollama, LM
+  Studio, vLLM — are OpenCode's built-in providers, not catalogue entries:
+  the console offers them whether or not models.dev answers, they take the
+  server's URL (`BITSWAN_OPENCODE_SELF_HOSTED='true'` plus the base URL; the
+  launcher writes `providers.<id>.settings.baseURL` and, when a key was given,
+  `settings.apiKey: "{env:BITSWAN_OPENCODE_API_KEY}"`), a key is optional, and
+  OpenCode reads the models from the server itself, so the model is whatever
+  the server calls it. The catalogue's own key-based `lmstudio` gives way to
+  the self-hosted one. A custom endpoint's key is optional too, as OpenCode
+  says it is: with no key, `BITSWAN_OPENCODE_PROVIDER_ENV` is empty, the
+  launcher checks nothing and writes no `env` entry. Two ways past the catalogue: an
   endpoint URL on a catalogue provider (its `settings.baseURL`, for a proxy
   or gateway with the provider's own models and API), and a custom provider —
   an id of its own, a display name, the API it speaks (one of OpenCode's
