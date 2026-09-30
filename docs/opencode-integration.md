@@ -248,6 +248,18 @@ listed. A location's catalogue loads
 a few seconds after the location is first touched: the first `/api/provider`
 answer for a new directory is empty, then a `provider.updated` event follows.
 
+**Default agent.** The card's "Make OpenCode the default coding agent" toggle
+(on for a fresh configuration) makes the daemon also write
+`<ws>/claude-configs/dashboard-defaults.json` — `{"codingAgent": "opencode"}`,
+world-readable, at the root the dashboard mounts as `/claude-config` — for
+every workspace with the agent enabled, and only while the provider is enabled
+and complete. The dashboard's `readPreferences` merges that file under a
+person's own `dashboard-preferences.json`, so the Coding Agent tab opens
+OpenCode without asking anyone who has not chosen, while a choice already made
+(or made later in Settings) stays theirs. `/api/me` returns the effective
+`preferences` and the `defaults` on their own. The file goes with the toggle,
+and with the provider.
+
 What it does not do: a running server keeps the environment it started with.
 The dashboard stops idle servers after `OPENCODE_IDLE_TIMEOUT_MS` (30 minutes)
 and a server with active sessions runs until it goes idle, so a new or rotated
