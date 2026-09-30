@@ -134,7 +134,7 @@ function SearchPicker({ value, entries, onChange, placeholder, searchPlaceholder
           fontFamily: mono && selected ? 'Geist Mono, monospace' : 'inherit' }}>
           {selected ? selected.name : (value || placeholder)}
         </span>
-        {selected && selected.id !== selected.name && !mono && <span style={monoStyle}>{selected.id}</span>}
+        {selected && selected.code && !mono && <span style={monoStyle}>{selected.code}</span>}
         <IconChevron color={SC.mutedFg} />
       </button>
 
@@ -195,8 +195,8 @@ function SearchPicker({ value, entries, onChange, placeholder, searchPlaceholder
 function providerEntries(providers) {
   return [
     { id: CUSTOM, name: 'Custom endpoint', hint: 'an endpoint of your own', group: 'Your own' },
-    ...providers.filter((p) => p.popular).map((p) => ({ ...p, group: 'Popular' })),
-    ...providers.filter((p) => !p.popular).map((p) => ({ ...p, group: `All providers (${providers.filter((x) => !x.popular).length})` })),
+    ...providers.filter((p) => p.popular).map((p) => ({ ...p, code: p.id, group: 'Popular' })),
+    ...providers.filter((p) => !p.popular).map((p) => ({ ...p, code: p.id, group: `All providers (${providers.filter((x) => !x.popular).length})` })),
   ];
 }
 
