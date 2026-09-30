@@ -111,6 +111,9 @@ function OpenCodeProviderCard({ toast }) {
     setLoadErr(''); setErr('');
     try {
       const r = await SApi.openCodeProvider();
+      // A fresh configuration starts with OpenCode as the default agent: the
+      // point of giving the server a key is that nobody has to be asked.
+      if (!r.updated_at) r.default_agent = true;
       setCfg(r); setKey('');
     } catch (e) {
       setLoadErr(e.message || 'Could not load the OpenCode provider settings.');
@@ -154,6 +157,7 @@ function OpenCodeProviderCard({ toast }) {
     model: (cfg.model || '').trim(),
     api_key: key,
     restrict: !!cfg.restrict,
+    default_agent: !!cfg.default_agent,
     base_url: (cfg.base_url || '').trim(),
     custom: custom ? {
       name: custom.name || '',
@@ -265,6 +269,17 @@ function OpenCodeProviderCard({ toast }) {
             {cfg.restrict
               ? 'Restricted — OpenCode offers this provider only. Its built-in hosted provider and any provider a person connected themselves are hidden.'
               : 'Open — this provider is the default; OpenCode’s built-in hosted provider and any provider a person connects themselves stay available.'}
+          </div>
+        </div>
+      </Row>
+
+      <Row label="Default coding agent" hint="Whether workspaces open OpenCode for everyone, or ask each person to choose.">
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+          <SToggle label="Make OpenCode the default coding agent" on={!!cfg.default_agent} onChange={(on) => patch({ default_agent: on })} />
+          <div style={{ fontSize: 12.5, color: SC.fg, lineHeight: '18px' }}>
+            {cfg.default_agent
+              ? 'On — the Coding Agent tab opens OpenCode for anyone who has not chosen an agent, without asking. People can still pick Claude Code in their workspace settings, and a choice already made stays.'
+              : 'Off — the Coding Agent tab asks each person to choose between Claude Code and OpenCode on first open.'}
           </div>
         </div>
       </Row>
