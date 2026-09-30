@@ -6,7 +6,7 @@ const {
   Toggle: SToggle,
 } = window.SC_UI;
 const { Api: SApi } = window.SC_API;
-const { useState: useS, useEffect: useSE } = React;
+const { useState: useS, useEffect: useSE, useRef: useSR, useMemo: useSM } = React;
 
 // Coding agents — what this server hands the coding agents in every workspace.
 // One card today: the default model provider for OpenCode. The daemon side is
@@ -69,6 +69,147 @@ function ProviderOptions({ providers, withCustom, none }) {
       {popular.length > 0 && <optgroup label="Popular">{popular.map(opt)}</optgroup>}
       <optgroup label={popular.length > 0 ? `All providers (${rest.length})` : 'Providers'}>{rest.map(opt)}</optgroup>
     </>
+  );
+}
+
+// Inline SVGs, React-owned: the popover mounts and unmounts, and Lucide's
+// <i>→<svg> swap on a node React is about to remove crashes (see the shell's
+// worktree dropdown, which avoids it the same way).
+const IconChevron = ({ size = 14, color = 'currentColor' }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2"
+    strokeLinecap="round" strokeLinejoin="round" style={{ flex: '0 0 auto' }}><path d="m6 9 6 6 6-6" /></svg>
+);
+const IconSearch = ({ size = 13, color = 'currentColor' }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2"
+    strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+);
+const IconCheck = ({ size = 13, color = 'currentColor' }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2.5"
+    strokeLinecap="round" strokeLinejoin="round" style={{ flex: '0 0 auto' }}><path d="M20 6 9 17l-5-5" /></svg>
+);
+
+const CUSTOM_ENTRY = { id: CUSTOM, name: 'Custom endpoint', hint: 'an endpoint of your own', group: 'Your own' };
+
+// The provider picker: a button that opens a popover with a search box over
+// OpenCode's whole single-key catalogue (a couple of hundred entries), the
+// familiar few first. Typing filters by name or id; Enter takes the
+// highlighted row, Escape and a click outside close it.
+function ProviderPicker({ value, providers, onChange }) {
+  const [open, setOpen] = useS(false);
+  const [query, setQuery] = useS('');
+  const [active, setActive] = useS(0);
+  const rootRef = useSR(null);
+  const inputRef = useSR(null);
+  const listRef = useSR(null);
+
+  const entries = useSM(() => [
+    CUSTOM_ENTRY,
+    ...providers.filter((p) => p.popular).map((p) => ({ ...p, group: 'Popular' })),
+    ...providers.filter((p) => !p.popular).map((p) => ({ ...p, group: 'All providers' })),
+  ], [providers]);
+  const q = query.trim().toLowerCase();
+  const shown = q
+    ? entries.filter((e) => e.name.toLowerCase().includes(q) || e.id.toLowerCase().includes(q) || (e.hint || '').includes(q))
+    : entries;
+  const selected = entries.find((e) => e.id === value) || null;
+
+  useSE(() => {
+    if (!open) return;
+    setQuery(''); setActive(0);
+    const t = setTimeout(() => inputRef.current && inputRef.current.focus(), 0);
+    const onDown = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+  useSE(() => { setActive(0); }, [q]);
+  useSE(() => {
+    const el = listRef.current && listRef.current.querySelector(`[data-index="${active}"]`);
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+  }, [active]);
+
+  const pick = (entry) => { onChange(entry.id); setOpen(false); };
+  const onInputKey = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((i) => Math.min(i + 1, shown.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)); }
+    else if (e.key === 'Enter' && shown[active]) { e.preventDefault(); pick(shown[active]); }
+  };
+
+  let lastGroup = null;
+  return (
+    <div ref={rootRef} style={{ position: 'relative', maxWidth: 360 }}>
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-haspopup="listbox" aria-expanded={open} style={{
+        display: 'flex', alignItems: 'center', gap: 8, width: '100%', height: 36, padding: '0 10px 0 12px',
+        border: `1px solid ${open ? SC.primary : SC.border}`, borderRadius: 8, background: '#fff',
+        boxShadow: open ? `0 0 0 3px ${SC.primarySoft}` : 'none', fontFamily: 'inherit', fontSize: 13.5,
+        color: selected ? SC.fg : SC.muted, cursor: 'pointer', textAlign: 'left',
+      }}>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {selected ? selected.name : 'Choose a provider'}
+        </span>
+        {selected && selected.id !== CUSTOM && (
+          <span style={{ fontSize: 11.5, color: SC.mutedFg, fontFamily: 'Geist Mono, monospace' }}>{selected.id}</span>
+        )}
+        <IconChevron color={SC.mutedFg} />
+      </button>
+
+      {open && (
+        <div role="listbox" style={{
+          position: 'absolute', zIndex: 30, top: 40, left: 0, width: '100%', minWidth: 300,
+          background: '#fff', border: `1px solid ${SC.border}`, borderRadius: 10,
+          boxShadow: '0 10px 30px rgba(0,0,0,0.12)', overflow: 'hidden',
+        }}>
+          <div style={{ padding: 8, borderBottom: `1px solid ${SC.surface2}` }}>
+            <div style={{ position: 'relative' }}>
+              <span style={{ position: 'absolute', left: 9, top: 8 }}><IconSearch color={SC.mutedFg} /></span>
+              <input ref={inputRef} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={onInputKey}
+                placeholder={`Search ${providers.length} providers…`} style={{
+                  width: '100%', height: 30, paddingLeft: 28, paddingRight: 10, border: `1px solid ${SC.border}`,
+                  borderRadius: 6, background: '#fff', fontFamily: 'inherit', fontSize: 12.5, color: SC.fg, outline: 'none',
+                }} />
+            </div>
+          </div>
+          <div ref={listRef} style={{ maxHeight: 300, overflowY: 'auto', padding: 6 }}>
+            {shown.length === 0 && (
+              <div style={{ padding: '14px 10px', fontSize: 12.5, color: SC.muted }}>
+                No provider matches. Not in OpenCode's catalogue? Choose “Custom endpoint”.
+              </div>
+            )}
+            {shown.map((e, i) => {
+              const header = !q && e.group !== lastGroup ? e.group : null;
+              lastGroup = e.group;
+              const isSel = e.id === value;
+              const isAct = i === active;
+              return (
+                <React.Fragment key={e.id}>
+                  {header && (
+                    <div style={{ fontSize: 10, fontWeight: 600, color: SC.mutedFg, textTransform: 'uppercase',
+                      letterSpacing: 0.5, padding: '8px 10px 4px' }}>{header}</div>
+                  )}
+                  <div role="option" aria-selected={isSel} data-index={i}
+                    onMouseEnter={() => setActive(i)} onClick={() => pick(e)} style={{
+                      display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: 6,
+                      background: isAct ? SC.surface2 : 'transparent', cursor: 'pointer',
+                    }}>
+                    <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: SC.fg, fontWeight: isSel ? 600 : 400,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.name}</span>
+                    <span style={{ fontSize: 11, color: SC.mutedFg, fontFamily: 'Geist Mono, monospace' }}>
+                      {e.id === CUSTOM ? e.hint : e.id}
+                    </span>
+                    <span style={{ width: 13, display: 'inline-flex' }}>{isSel && <IconCheck color={SC.primary} />}</span>
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -176,6 +317,9 @@ function OpenCodeProviderCard({ toast }) {
   };
 
   const status = cfg.enabled ? 'Enabled' : cfg.key_set ? 'Turned off' : 'Not configured';
+  // Until a provider (or a custom endpoint) is picked, the picker is the whole
+  // form: there is nothing to say about a model or a key yet.
+  const chosen = !!custom || !!cfg.provider;
   const keyTarget = custom ? 'the endpoint below' : (provider ? provider.name : 'the provider');
 
   return (
@@ -199,12 +343,10 @@ function OpenCodeProviderCard({ toast }) {
       </div>
 
       <Row label="Provider" hint="Everything OpenCode's catalogue lists that takes one API key, or an endpoint of your own.">
-        <NativeSelect value={custom ? CUSTOM : (cfg.provider || '')} onChange={chooseProvider}>
-          <ProviderOptions providers={providers} withCustom none="Choose a provider…" />
-        </NativeSelect>
+        <ProviderPicker value={custom ? CUSTOM : (cfg.provider || '')} providers={providers} onChange={chooseProvider} />
       </Row>
 
-      {custom && (
+      {chosen && custom && (
         <>
           <Row label="Provider id" hint="Lowercase letters, digits, - and _. It prefixes model references, e.g. acme/qwen3-coder.">
             <STextInput value={cfg.provider || ''} onChange={(v) => patch({ provider: v })} mono
@@ -245,7 +387,7 @@ function OpenCodeProviderCard({ toast }) {
         </>
       )}
 
-      {!custom && (
+      {chosen && !custom && (
         <>
           <Row label="Model" hint="The provider's own model id. OpenCode uses it unless a person picks another.">
             <STextInput value={cfg.model || ''} onChange={(v) => patch({ model: v })} mono
@@ -258,6 +400,7 @@ function OpenCodeProviderCard({ toast }) {
         </>
       )}
 
+      {chosen && (<>
       <Row label="API key" hint={cfg.key_set ? `A key ending in …${cfg.key_hint || ''} is stored. Leave blank to keep it.` : 'Required.'}>
         <STextInput value={key} onChange={setKey} type="password" autoComplete="new-password" mono
           placeholder={cfg.key_set ? '••••••••  (unchanged)' : `Paste the API key for ${keyTarget}`} />
@@ -310,6 +453,7 @@ function OpenCodeProviderCard({ toast }) {
           </SBtn>
         )}
       </div>
+      </>)}
     </SCard>
   );
 }
