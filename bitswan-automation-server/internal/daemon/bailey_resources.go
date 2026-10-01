@@ -215,8 +215,12 @@ func (s *Server) handleBaileyResourcesSleep(w http.ResponseWriter, r *http.Reque
 	byWorkspace := map[string][]string{}
 	bps := map[string]bool{}
 	for _, c := range inv {
-		if !c.IsWorkload() || !c.Running || c.Policy == "always-on" {
-			continue // infra, stopped, and always-on are never slept
+		if !c.IsWorkload() || !c.Running {
+			continue
+		}
+		isProd := c.Stage == "" || c.Stage == "production" || c.Stage == "dr"
+		if c.Policy == "always-on" && (req.All || isProd) {
+			continue
 		}
 		if !req.All && (c.Workspace != req.Workspace || c.BP != req.BP || c.Stage != req.Stage) {
 			continue

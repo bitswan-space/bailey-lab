@@ -292,6 +292,7 @@ type bpMem struct {
 	Stage         string `json:"stage"`
 	Policy        string `json:"policy"`
 	ReservationMB int    `json:"reservation_mb"`
+	AlwaysOnMB    int    `json:"always_on_mb"`
 	UsageBytes    int64  `json:"usage_bytes"`
 	Running       bool   `json:"running"`
 	Containers    int    `json:"containers"`
@@ -359,16 +360,9 @@ func computeBudget(inv []memContainer, hostTotal, hostAvail uint64, workspaces i
 
 	var onDemandRes []int
 	groups := map[string]*bpMem{}
+	groupHasOnDemand := map[string]bool{}
 	var onDemandUsage int64
 	for _, c := range inv {
-		if c.IsWorkload() {
-			if c.Policy == "always-on" {
-				b.AlwaysOnMB += c.ReservationMB
-			} else {
-				onDemandRes = append(onDemandRes, c.ReservationMB)
-				onDemandUsage += c.UsageBytes
-			}
-		}
 		// Roll up per (workspace, bp, stage) for the page — workload only.
 		if !c.IsWorkload() {
 			continue
@@ -376,7 +370,7 @@ func computeBudget(inv []memContainer, hostTotal, hostAvail uint64, workspaces i
 		key := c.Workspace + "\x00" + c.BP + "\x00" + c.Stage
 		g := groups[key]
 		if g == nil {
-			g = &bpMem{Workspace: c.Workspace, BP: c.BP, Stage: c.Stage, Policy: c.Policy}
+			g = &bpMem{Workspace: c.Workspace, BP: c.BP, Stage: c.Stage}
 			groups[key] = g
 		}
 		g.ReservationMB += c.ReservationMB
@@ -385,9 +379,27 @@ func computeBudget(inv []memContainer, hostTotal, hostAvail uint64, workspaces i
 		if c.Running {
 			g.Running = true
 		}
+		if c.Policy == "always-on" {
+			b.AlwaysOnMB += c.ReservationMB
+			g.AlwaysOnMB += c.ReservationMB
+		} else {
+			onDemandRes = append(onDemandRes, c.ReservationMB)
+			onDemandUsage += c.UsageBytes
+			groupHasOnDemand[key] = true
+		}
 		// A group is "over" if its actual usage exceeds its reservation.
 		if g.UsageBytes > int64(g.ReservationMB)*1024*1024 {
 			g.Over = true
+		}
+	}
+	for key, g := range groups {
+		switch {
+		case g.AlwaysOnMB > 0 && groupHasOnDemand[key]:
+			g.Policy = "mixed"
+		case g.AlwaysOnMB > 0:
+			g.Policy = "always-on"
+		default:
+			g.Policy = "on-demand"
 		}
 	}
 
