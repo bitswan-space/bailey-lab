@@ -109,6 +109,13 @@ type AutomationOperationsCenterSettings struct {
 	// set the TLS mode explicitly) if the domain later changes hands.
 	DNSManaged *bool `toml:"dns_managed,omitempty"`
 
+	// Where this server pulls its images from, and the key that lets it. Both
+	// come from the AOC's licence endpoint rather than from anyone configuring
+	// them, because the server already authenticates there and the AOC is the
+	// only thing that knows which registry serves it.
+	RegistryHost string `toml:"registry_host,omitempty"`
+	RegistryKey  string `toml:"registry_key,omitempty"`
+
 	// Proxied means this server has no public inbound route (NAT) — or was
 	// forced onto the relay path with `register --force-proxy` — so instead of
 	// the AOC pointing an A record straight at us, the AOC points our wildcard
@@ -238,6 +245,11 @@ func (m *AutomationServerConfig) saveTOMLConfig(config *Config) error {
 		return fmt.Errorf("failed to create TOML config file: %w", err)
 	}
 	defer file.Close()
+
+	// This file holds the registry key, so nobody else on the box reads it.
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("failed to restrict the config file: %w", err)
+	}
 
 	if err := toml.NewEncoder(file).Encode(config); err != nil {
 		return fmt.Errorf("failed to encode TOML config: %w", err)

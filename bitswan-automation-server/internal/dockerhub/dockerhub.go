@@ -75,6 +75,9 @@ func ResolveGitopsImage(staging, dev bool) (string, error) {
 	if img := imageOverride("BITSWAN_GITOPS_IMAGE"); img != "" {
 		return img, nil
 	}
+	if reference, found := fromTheAOC(aocRepository("gitops-staging", "gitops", staging, dev)); found {
+		return reference, nil
+	}
 	if dev {
 		return "bitswan/gitops-dev:latest", nil
 	}
@@ -106,6 +109,9 @@ func GetLatestDashboardStagingVersion() (string, error) {
 func ResolveDashboardImage(staging, dev bool) (string, error) {
 	if img := imageOverride("BITSWAN_DASHBOARD_IMAGE"); img != "" {
 		return img, nil
+	}
+	if reference, found := fromTheAOC(aocRepository("workspace-dashboard-staging", "workspace-dashboard", staging, dev)); found {
+		return reference, nil
 	}
 	if dev {
 		return "bitswan/workspace-dashboard-dev:latest", nil
@@ -139,6 +145,9 @@ func ResolveCodingAgentImage(staging, dev bool) (string, error) {
 	if img := imageOverride("BITSWAN_CODING_AGENT_IMAGE"); img != "" {
 		return img, nil
 	}
+	if reference, found := fromTheAOC(aocRepository("coding-agent-staging", "coding-agent", staging, dev)); found {
+		return reference, nil
+	}
 	if dev {
 		return "bitswan/coding-agent-dev:latest", nil
 	}
@@ -170,6 +179,9 @@ func GetLatestEgressGatewayStagingVersion() (string, error) {
 func ResolveEgressGatewayImage(staging, dev bool) (string, error) {
 	if img := imageOverride("BITSWAN_EGRESS_GATEWAY_IMAGE"); img != "" {
 		return img, nil
+	}
+	if reference, found := fromTheAOC(aocRepository("egress-gateway-staging", "egress-gateway", staging, dev)); found {
+		return reference, nil
 	}
 	if dev {
 		return "bitswan/egress-gateway-dev:latest", nil
@@ -203,6 +215,9 @@ func ResolveInfraDriverImage(staging, dev bool) (string, error) {
 	if img := imageOverride("BITSWAN_INFRA_DRIVER_IMAGE"); img != "" {
 		return img, nil
 	}
+	if reference, found := fromTheAOC(aocRepository("infra-driver-staging", "infra-driver", staging, dev)); found {
+		return reference, nil
+	}
 	if dev {
 		return "bitswan/infra-driver-dev:latest", nil
 	}
@@ -218,4 +233,18 @@ func ResolveInfraDriverImage(staging, dev bool) (string, error) {
 		return "", err
 	}
 	return "bitswan/infra-driver:" + version, nil
+}
+
+// aocRepository is the repository a track maps to in the AOC's registry.
+//
+// A dev image is built on somebody's laptop and never published, so it is left
+// to Docker Hub where it has always been.
+func aocRepository(staging, stable string, isStaging, isDev bool) string {
+	if isDev {
+		return ""
+	}
+	if isStaging {
+		return staging
+	}
+	return stable
 }
