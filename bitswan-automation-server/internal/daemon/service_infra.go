@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 	"github.com/bitswan-space/bitswan-workspaces/internal/workspace"
 	"gopkg.in/yaml.v3"
 )
@@ -127,7 +127,7 @@ func (s *Server) updateInfraService(serviceType string, req ServiceUpdateRequest
 		img := req.InfraDriverImage
 		if img == "" {
 			var err error
-			if img, err = dockerhub.ResolveInfraDriverImage(req.Staging, false); err != nil {
+			if img, err = images.ResolveInfraDriverImage(req.Staging, false); err != nil {
 				return fmt.Errorf("failed to resolve infra-driver image: %w", err)
 			}
 		}
@@ -136,7 +136,7 @@ func (s *Server) updateInfraService(serviceType string, req ServiceUpdateRequest
 		img := req.EgressGatewayImage
 		if img == "" {
 			var err error
-			if img, err = dockerhub.ResolveEgressGatewayImage(req.Staging, false); err != nil {
+			if img, err = images.ResolveEgressGatewayImage(req.Staging, false); err != nil {
 				return fmt.Errorf("failed to resolve egress-gateway image: %w", err)
 			}
 		}

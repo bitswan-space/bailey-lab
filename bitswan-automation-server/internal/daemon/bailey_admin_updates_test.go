@@ -211,11 +211,11 @@ func TestUpdateWorkspace_OwnerWithDeploymentStreams(t *testing.T) {
 	}
 }
 
-func TestFetchDockerHubTags_BadRepo(t *testing.T) {
-	// A clearly bogus repo path should surface an error (HTTP non-200 or a
-	// network failure), never a panic.
-	if _, err := fetchDockerHubTags("definitely/not-a-real-repo-xyz-123456", 1); err == nil {
-		t.Skip("docker hub reachable and returned a result for the bogus repo")
+func TestFetchRegistryTags_WithoutAnAOC(t *testing.T) {
+	// A server with no AOC has no registry to ask, which is an error the
+	// caller renders around rather than a panic.
+	if _, err := fetchRegistryTags("bitswan/definitely-not-a-real-repo-xyz", 1); err == nil {
+		t.Skip("this machine is registered to an AOC that answered")
 	}
 }
 

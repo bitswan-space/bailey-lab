@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 	"gopkg.in/yaml.v3"
 )
 
@@ -81,10 +81,10 @@ func resolveLatestVersions() latestVersions {
 	}
 	staging := useStagingTrack()
 	lv := latestVersions{at: time.Now()}
-	if img, err := dockerhub.ResolveGitopsImage(staging, false); err == nil {
+	if img, err := images.ResolveGitopsImage(staging, false); err == nil {
 		lv.gitops = tagOf(img)
 	}
-	if img, err := dockerhub.ResolveDashboardImage(staging, false); err == nil {
+	if img, err := images.ResolveDashboardImage(staging, false); err == nil {
 		lv.dashboard = tagOf(img)
 	}
 	// Only cache a fully-resolved set; a transient Docker Hub failure shouldn't

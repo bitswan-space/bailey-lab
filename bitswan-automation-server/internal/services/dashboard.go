@@ -10,7 +10,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/certauthority"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 	"gopkg.in/yaml.v3"
 )
 
@@ -353,7 +353,7 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 	if dashboardImage != "" {
 		bitswanDashboardImage = dashboardImage
 	} else {
-		bitswanDashboardImage, err = dockerhub.ResolveDashboardImage(staging, dev)
+		bitswanDashboardImage, err = images.ResolveDashboardImage(staging, dev)
 		if err != nil {
 			return fmt.Errorf("failed to get latest workspace-dashboard image: %w", err)
 		}
@@ -385,11 +385,11 @@ func (d *DashboardService) RegenerateDockerCompose(dashboardImage string, stagin
 // Used by `bitswan service dashboard update --dashboard-image`.
 func (d *DashboardService) UpdateImage(newImage string) error {
 	if newImage == "" {
-		v, err := dockerhub.GetLatestDashboardVersion()
+		resolved, err := images.ResolveDashboardImage(false, false)
 		if err != nil {
-			return fmt.Errorf("failed to get latest dashboard version: %w", err)
+			return fmt.Errorf("failed to resolve the dashboard image: %w", err)
 		}
-		newImage = "bitswan/workspace-dashboard:" + v
+		newImage = resolved
 	}
 
 	composePath := filepath.Join(d.WorkspacePath, "deployment", "docker-compose-dashboard.yml")

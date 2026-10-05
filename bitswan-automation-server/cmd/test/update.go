@@ -9,7 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/daemon"
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 	"github.com/spf13/cobra"
 )
 
@@ -60,9 +60,9 @@ func runTestUpdate(noRemove bool, customGitopsImage string) error {
 	workspaceName := fmt.Sprintf("test-update-%d", time.Now().Unix())
 	fmt.Printf("Test workspace name: %s\n", workspaceName)
 
-	// Step 1: Get latest versions from DockerHub
-	fmt.Println("\n[1/6] Getting latest versions from DockerHub...")
-	latestGitopsVersion, err := dockerhub.GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/gitops/tags/")
+	// Step 1: Get latest versions from this server's AOC
+	fmt.Println("\n[1/6] Getting latest versions from the AOC's registry...")
+	latestGitopsVersion, err := images.LatestBuild(images.GitopsRepository, false)
 	if err != nil {
 		return fmt.Errorf("failed to get latest gitops version: %w", err)
 	}
@@ -124,8 +124,8 @@ func runTestUpdate(noRemove bool, customGitopsImage string) error {
 	fmt.Println("\n[5/6] Verifying images were updated to latest...")
 
 	// Re-fetch latest versions after update (in case new versions were published)
-	fmt.Println("Re-fetching latest versions from DockerHub...")
-	updatedLatestGitopsVersion, err := dockerhub.GetLatestDockerHubVersion("https://hub.docker.com/v2/repositories/bitswan/gitops/tags/")
+	fmt.Println("Re-fetching latest versions from the AOC's registry...")
+	updatedLatestGitopsVersion, err := images.LatestBuild(images.GitopsRepository, false)
 	if err != nil {
 		fmt.Printf("Warning: failed to re-fetch latest gitops version, using previous: %v\n", err)
 		updatedLatestGitopsVersion = latestGitopsVersion

@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 )
 
 // The daemon owns the grype vulnerability DB: it downloads + refreshes it once
@@ -107,7 +107,7 @@ func gitopsImageForGrype() string {
 	if img := os.Getenv("BITSWAN_GITOPS_IMAGE"); img != "" {
 		return img
 	}
-	img, err := dockerhub.ResolveGitopsImage(useStagingTrack(), false)
+	img, err := images.ResolveGitopsImage(useStagingTrack(), false)
 	if err != nil {
 		return ""
 	}

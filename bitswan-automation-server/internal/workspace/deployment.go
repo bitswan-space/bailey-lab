@@ -10,7 +10,7 @@ import (
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
 	"github.com/bitswan-space/bitswan-workspaces/internal/dockercompose"
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 	"gopkg.in/yaml.v3"
 )
 
@@ -187,7 +187,7 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 		fmt.Printf("Using custom gitops image: %s\n", gitopsImage)
 	} else {
 		var err error
-		gitopsImage, err = dockerhub.ResolveGitopsImage(staging, dev)
+		gitopsImage, err = images.ResolveGitopsImage(staging, dev)
 		if err != nil {
 			fmt.Printf("    ⚠️  Failed to get latest gitops image, using 'latest': %v\n", err)
 			if dev {
@@ -206,7 +206,7 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 	infraDriverImage := customInfraDriverImage
 	if infraDriverImage == "" {
 		var err error
-		infraDriverImage, err = dockerhub.ResolveInfraDriverImage(staging, dev)
+		infraDriverImage, err = images.ResolveInfraDriverImage(staging, dev)
 		if err != nil {
 			fmt.Printf("    ⚠️  Failed to get latest infra-driver image, using 'latest': %v\n", err)
 			if dev {
@@ -221,7 +221,7 @@ func UpdateWorkspaceDeployment(workspaceName string, customGitopsImage string, c
 	egressGatewayImage := customEgressGatewayImage
 	if egressGatewayImage == "" {
 		var err error
-		egressGatewayImage, err = dockerhub.ResolveEgressGatewayImage(staging, dev)
+		egressGatewayImage, err = images.ResolveEgressGatewayImage(staging, dev)
 		if err != nil {
 			fmt.Printf("    ⚠️  Failed to get latest egress-gateway image, using 'latest': %v\n", err)
 			if dev {

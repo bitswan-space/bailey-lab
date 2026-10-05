@@ -12,7 +12,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/automations"
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 	"github.com/bitswan-space/bitswan-workspaces/internal/services"
 	"github.com/google/uuid"
 )
@@ -810,7 +810,7 @@ func (s *Server) enableCodingAgentService(req ServiceEnableRequest) error {
 
 	image := req.CodingAgentImage
 	if image == "" {
-		resolved, err := dockerhub.ResolveCodingAgentImage(req.Staging, false)
+		resolved, err := images.ResolveCodingAgentImage(req.Staging, false)
 		if err != nil {
 			return fmt.Errorf("failed to resolve coding-agent image: %w", err)
 		}

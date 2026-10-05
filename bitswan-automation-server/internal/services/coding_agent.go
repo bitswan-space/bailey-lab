@@ -11,7 +11,7 @@ import (
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
 	"github.com/bitswan-space/bitswan-workspaces/internal/docker"
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 	"gopkg.in/yaml.v3"
 )
 
@@ -259,7 +259,7 @@ func (c *CodingAgentService) RegenerateDockerCompose(codingAgentImage string, st
 
 	image := codingAgentImage
 	if image == "" {
-		image, err = dockerhub.ResolveCodingAgentImage(staging, dev)
+		image, err = images.ResolveCodingAgentImage(staging, dev)
 		if err != nil {
 			// Hub is unreachable or has no matching tag. Keep what the
 			// workspace is running rather than reaching for a floating tag —
@@ -553,19 +553,19 @@ func (c *CodingAgentService) UpdateImage(newImage string) error {
 	return nil
 }
 
-// UpdateToLatest updates the coding-agent service to the latest version from DockerHub
+// UpdateToLatest updates the coding-agent service to the newest build its AOC serves
 func (c *CodingAgentService) UpdateToLatest() error {
 	return c.UpdateImage("")
 }
 
-// UpdateToLatestWithStaging updates the coding-agent service to the latest version from DockerHub, optionally using staging
+// UpdateToLatestWithStaging does the same, optionally on the staging track
 func (c *CodingAgentService) UpdateToLatestWithStaging(staging bool) error {
 	if staging {
-		version, err := dockerhub.GetLatestCodingAgentStagingVersion()
+		resolved, err := images.ResolveCodingAgentImage(true, false)
 		if err != nil {
-			return fmt.Errorf("failed to get latest staging version: %w", err)
+			return fmt.Errorf("failed to resolve the staging coding-agent image: %w", err)
 		}
-		return c.UpdateImage("bitswan/coding-agent-staging:" + version)
+		return c.UpdateImage(resolved)
 	}
 	return c.UpdateToLatest()
 }

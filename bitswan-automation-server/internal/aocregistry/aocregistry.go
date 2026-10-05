@@ -170,3 +170,25 @@ func (c *Client) DockerLogin() error {
 	}
 	return nil
 }
+
+// Tags lists the builds of a repository, newest first.
+//
+// Only build tags: the moving ones say nothing about which build they point
+// at, and offering them as choices is how an operator pins something that
+// moves under them later.
+func (c *Client) Tags(repository string) ([]string, error) {
+	token, err := c.token(repository)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := c.tags(token, repository)
+	if err != nil {
+		return nil, err
+	}
+	return BuildTagsNewestFirst(tags), nil
+}
+
+// Reference is a fully qualified name for one build in this registry.
+func (c *Client) Reference(repository, tag string) string {
+	return fmt.Sprintf("%s/%s:%s", c.Host, repository, tag)
+}

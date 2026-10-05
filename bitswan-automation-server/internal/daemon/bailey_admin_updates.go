@@ -12,7 +12,7 @@ import (
 	"sync"
 
 	"github.com/bitswan-space/bitswan-workspaces/internal/config"
-	"github.com/bitswan-space/bitswan-workspaces/internal/dockerhub"
+	"github.com/bitswan-space/bitswan-workspaces/internal/images"
 )
 
 // Bailey admin /updates endpoints.
@@ -28,66 +28,54 @@ import (
 //      dev tags like bitswan/gitops:bailey-dev).
 //      POST /bailey/api/admin/default-images
 //        body: {"gitops_image":"...", "dashboard_image":"..."}
-//        empty string clears the setting (falls back to Docker Hub
-//        latest at next workspace init).
+//        empty string clears the setting (the image is resolved from the
+//        AOC's registry at next workspace init).
 //
 //   3. Update a single workspace's running containers in place
 //      (pulls new image + recreates the affected service). Owner-only
 //      since it disrupts the workspace's deploys.
 //      POST /bailey/api/workspaces/<name>/update
 
-// dockerHubTagsResponse is the slice of fields we care about from the
-// Docker Hub v2 tags list response. The full payload has many more
-// fields but we only need name + last_updated for the dropdown.
-type dockerHubTagsResponse struct {
-	Results []struct {
-		Name        string `json:"name"`
-		LastUpdated string `json:"last_updated"`
-	} `json:"results"`
-}
-
 // imageSettingResponse is one row in the GET /default-images payload.
-// suggestions are Docker Hub tags sorted newest-first; current is the
-// effective value (server_settings override OR the Docker Hub latest
-// fallback that workspace_init would pick).
+// suggestions are the builds the AOC's registry holds, newest first; current
+// is the effective value (server_settings override, or what workspace_init
+// would resolve).
 type imageSettingResponse struct {
 	Key         string         `json:"key"`
 	Configured  *settingRecord `json:"configured,omitempty"`
 	Effective   string         `json:"effective"`
-	Suggestions []dockerHubTag `json:"suggestions,omitempty"`
+	Suggestions []imageTag     `json:"suggestions,omitempty"`
 }
 
-type dockerHubTag struct {
-	Name        string `json:"name"`
-	LastUpdated string `json:"last_updated,omitempty"`
+type imageTag struct {
+	Name string `json:"name"`
 }
 
-// fetchDockerHubTags returns up to `max` tags for a repository,
-// newest-first. Best-effort: a Docker Hub outage returns nil + the
-// error so the caller can render the UI without suggestions but with
-// the configured/effective value still visible.
-func fetchDockerHubTags(repo string, max int) ([]dockerHubTag, error) {
-	url := fmt.Sprintf("https://hub.docker.com/v2/repositories/%s/tags/?page_size=%d&ordering=last_updated", repo, max)
-	resp, err := http.Get(url) //nolint:gosec
+// fetchRegistryTags returns the builds of a repository, newest first.
+//
+// Best-effort: a registry this server cannot reach returns the error so the
+// caller still renders the configured and effective values, just without
+// anything to choose from.
+func fetchRegistryTags(repo string, max int) ([]imageTag, error) {
+	registry, err := images.Registry()
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("docker hub %s: HTTP %d", repo, resp.StatusCode)
-	}
-	var parsed dockerHubTagsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	tags, err := registry.Tags(repo)
+	if err != nil {
 		return nil, err
 	}
-	out := make([]dockerHubTag, 0, len(parsed.Results))
-	for _, t := range parsed.Results {
-		out = append(out, dockerHubTag{Name: t.Name, LastUpdated: t.LastUpdated})
+	if len(tags) > max {
+		tags = tags[:max]
+	}
+	out := make([]imageTag, 0, len(tags))
+	for _, tag := range tags {
+		out = append(out, imageTag{Name: registry.Reference(repo, tag)})
 	}
 	return out, nil
 }
 
-// imageKindToRepo maps the well-known setting key to the Docker Hub
+// imageKindToRepo maps the well-known setting key to the registry
 // repository the UI should fetch tag suggestions from. Centralised so
 // the same mapping is used by GET (suggestions) and POST (validation
 // — currently free-form so we don't reject, but kept for future use).
@@ -111,17 +99,17 @@ func (s *Server) handleAdminDefaultImagesGet(w http.ResponseWriter, r *http.Requ
 			// from Docker Hub: <tag>)" instead of just blank.
 			switch key {
 			case settingDefaultGitopsImage:
-				if img, err := dockerhub.ResolveGitopsImage(false, false); err == nil {
+				if img, err := images.ResolveGitopsImage(false, false); err == nil {
 					entry.Effective = img
 				}
 			case settingDefaultDashboardImage:
-				if img, err := dockerhub.ResolveDashboardImage(false, false); err == nil {
+				if img, err := images.ResolveDashboardImage(false, false); err == nil {
 					entry.Effective = img
 				}
 			}
 		}
 		if repo, ok := imageKindToRepo[key]; ok {
-			if tags, err := fetchDockerHubTags(repo, 20); err == nil {
+			if tags, err := fetchRegistryTags(repo, 20); err == nil {
 				entry.Suggestions = tags
 			}
 		}
