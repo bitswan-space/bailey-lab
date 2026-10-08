@@ -802,3 +802,61 @@ func TestBuildDexConfig_LetsGroupsThroughOnEveryConnector(t *testing.T) {
 		}
 	}
 }
+
+func dexSSOConnectorConfig(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var cfg struct {
+		Connectors []struct {
+			ID     string         `yaml:"id"`
+			Config map[string]any `yaml:"config"`
+		} `yaml:"connectors"`
+	}
+	if err := yaml.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("rendered config is not valid YAML: %v", err)
+	}
+	for _, c := range cfg.Connectors {
+		if c.ID == dexConnectorSSO {
+			return c.Config
+		}
+	}
+	t.Fatal("no SSO connector rendered")
+	return nil
+}
+
+func TestBuildDexConfig_KeepsConsentAndEmailVerificationByDefault(t *testing.T) {
+	sso := ssoConfig{
+		DisplayName: "Acme SSO", IssuerURL: "https://id.acme.example",
+		ClientID: "bailey", ClientSecret: "s3cret",
+	}
+	raw, err := buildDexConfig("acme.bswn.io", nil, sso, "proxy-secret")
+	if err != nil {
+		t.Fatalf("buildDexConfig: %v", err)
+	}
+	c := dexSSOConnectorConfig(t, raw)
+	if c["promptType"] != "consent" {
+		t.Errorf("promptType = %v, want consent — Google only issues refresh tokens when asked for consent", c["promptType"])
+	}
+	if c["insecureSkipEmailVerified"] != false {
+		t.Errorf("insecureSkipEmailVerified = %v, want false unless an admin opts in", c["insecureSkipEmailVerified"])
+	}
+}
+
+func TestBuildDexConfig_EntraTogglesReachDex(t *testing.T) {
+	sso := ssoConfig{
+		DisplayName: "Acme SSO", IssuerURL: "https://login.microsoftonline.com/tenant/v2.0",
+		ClientID: "bailey", ClientSecret: "s3cret",
+		SkipConsentPrompt: true, SkipEmailVerified: true,
+	}
+	raw, err := buildDexConfig("acme.bswn.io", nil, sso, "proxy-secret")
+	if err != nil {
+		t.Fatalf("buildDexConfig: %v", err)
+	}
+	c := dexSSOConnectorConfig(t, raw)
+	prompt, ok := c["promptType"]
+	if !ok || prompt != "" {
+		t.Errorf("promptType = %v (present %v), want an explicit empty string — left out, Dex falls back to consent", prompt, ok)
+	}
+	if c["insecureSkipEmailVerified"] != true {
+		t.Errorf("insecureSkipEmailVerified = %v, want true", c["insecureSkipEmailVerified"])
+	}
+}

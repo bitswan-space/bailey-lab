@@ -63,13 +63,15 @@ func buildDexConfig(domain string, aocClient *aoc.OAuthClientResponse, sso ssoCo
 	}
 
 	ssoCfg := map[string]any{
-		"issuer":               sso.IssuerURL,
-		"clientID":             sso.ClientID,
-		"clientSecret":         sso.ClientSecret,
-		"redirectURI":          callback,
-		"scopes":               dexUpstreamScopes,
-		"userNameKey":          "email",
-		"insecureEnableGroups": true,
+		"issuer":                    sso.IssuerURL,
+		"clientID":                  sso.ClientID,
+		"clientSecret":              sso.ClientSecret,
+		"redirectURI":               callback,
+		"scopes":                    dexUpstreamScopes,
+		"userNameKey":               "email",
+		"insecureEnableGroups":      true,
+		"promptType":                ssoPromptType(sso),
+		"insecureSkipEmailVerified": sso.SkipEmailVerified,
 	}
 	if claim := strings.TrimSpace(sso.GroupsClaim); claim != "" && claim != "groups" {
 		ssoCfg["claimMapping"] = map[string]any{"groups": claim}
@@ -112,6 +114,13 @@ func buildDexConfig(domain string, aocClient *aoc.OAuthClientResponse, sso ssoCo
 		return "", fmt.Errorf("render dex config: %w", err)
 	}
 	return string(b), nil
+}
+
+func ssoPromptType(sso ssoConfig) string {
+	if sso.SkipConsentPrompt {
+		return ""
+	}
+	return "consent"
 }
 
 func dexProxyRedirectURL(domain string) string {

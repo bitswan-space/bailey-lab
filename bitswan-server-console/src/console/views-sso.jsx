@@ -86,6 +86,8 @@ function SSOView({ ctx }) {
         client_secret: secret,
         groups_claim: cfg.groups_claim || '',
         role_mappings: cfg.role_mappings || [],
+        skip_consent_prompt: !!cfg.skip_consent_prompt,
+        skip_email_verified: !!cfg.skip_email_verified,
       });
       setCfg(r); setSecret('');
       toast(enabled ? 'Single sign-on enabled' : 'Single sign-on disabled', 'success');
@@ -182,6 +184,35 @@ function SSOView({ ctx }) {
         </Row>
         <Row label="Groups claim" hint="Only if your provider does not use “groups”.">
           <STextInput value={cfg.groups_claim || ''} onChange={(v) => patch({ groups_claim: v })} placeholder="groups" />
+        </Row>
+        <Row label="Consent prompt" hint="Turn off for Microsoft Entra ID.">
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+            <SToggle label="Ask for consent" on={!cfg.skip_consent_prompt} onChange={(on) => patch({ skip_consent_prompt: !on })} />
+            <div style={{ fontSize: 12.5, color: SC.fg, lineHeight: '18px' }}>
+              {cfg.skip_consent_prompt
+                ? 'Off — no consent screen. Entra ID otherwise asks for admin approval even when it is already granted.'
+                : 'On — the provider asks for consent at sign-in. Google needs this to keep sessions alive.'}
+            </div>
+          </div>
+        </Row>
+        <Row label="Email verification" hint="Turn off only if your provider never sends “email_verified”, like Entra ID.">
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+            <SToggle label="Require verified email" on={!cfg.skip_email_verified} onChange={(on) => patch({ skip_email_verified: !on })} />
+            <div style={{ fontSize: 12.5, color: SC.fg, lineHeight: '18px' }}>
+              {cfg.skip_email_verified
+                ? 'Off — any email address the provider sends is trusted.'
+                : 'On — sign-in fails unless the provider vouches for the email address.'}
+            </div>
+          </div>
+          {cfg.skip_email_verified && (
+            <div style={{ display: 'flex', gap: 10, padding: 12, marginTop: 10, borderRadius: 10, background: '#fffbeb', border: `1px solid ${SC.amber}55` }}>
+              <SIcon name="shield-alert" size={15} color={SC.amber} style={{ marginTop: 1, flex: '0 0 auto' }} />
+              <span style={{ fontSize: 12, color: SC.fg, lineHeight: '17px' }}>
+                Bailey recognises people by email. Only do this when your provider controls the address and users
+                cannot set it themselves — for Entra ID, use your own tenant's issuer, not <code style={{ fontFamily: 'Geist Mono, monospace' }}>/common</code>.
+              </span>
+            </div>
+          )}
         </Row>
         <Row label="Role mapping" hint="Optional. Strongest match wins.">
           <MappingEditor mappings={cfg.role_mappings || []} onChange={(m) => patch({ role_mappings: m })} />

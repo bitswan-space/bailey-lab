@@ -22,16 +22,18 @@ type ssoRoleMapping struct {
 }
 
 type ssoConfig struct {
-	Enabled      bool             `json:"enabled"`
-	SSOOnly      bool             `json:"sso_only"`
-	DisplayName  string           `json:"display_name"`
-	IssuerURL    string           `json:"issuer_url"`
-	ClientID     string           `json:"client_id"`
-	ClientSecret string           `json:"client_secret"`
-	GroupsClaim  string           `json:"groups_claim"`
-	RoleMappings []ssoRoleMapping `json:"role_mappings"`
-	UpdatedAt    string           `json:"updated_at"`
-	UpdatedBy    string           `json:"updated_by"`
+	Enabled           bool             `json:"enabled"`
+	SSOOnly           bool             `json:"sso_only"`
+	DisplayName       string           `json:"display_name"`
+	IssuerURL         string           `json:"issuer_url"`
+	ClientID          string           `json:"client_id"`
+	ClientSecret      string           `json:"client_secret"`
+	GroupsClaim       string           `json:"groups_claim"`
+	RoleMappings      []ssoRoleMapping `json:"role_mappings"`
+	SkipConsentPrompt bool             `json:"skip_consent_prompt"`
+	SkipEmailVerified bool             `json:"skip_email_verified"`
+	UpdatedAt         string           `json:"updated_at"`
+	UpdatedBy         string           `json:"updated_by"`
 }
 
 func getSSOConfig() (ssoConfig, error) {
@@ -148,17 +150,19 @@ func ssoRoleForGroups(c ssoConfig, groups []string) string {
 }
 
 type ssoConfigDTO struct {
-	Enabled      bool             `json:"enabled"`
-	SSOOnly      bool             `json:"sso_only"`
-	DisplayName  string           `json:"display_name"`
-	IssuerURL    string           `json:"issuer_url"`
-	ClientID     string           `json:"client_id"`
-	SecretSet    bool             `json:"secret_set"`
-	GroupsClaim  string           `json:"groups_claim"`
-	RoleMappings []ssoRoleMapping `json:"role_mappings"`
-	UpdatedAt    string           `json:"updated_at,omitempty"`
-	UpdatedBy    string           `json:"updated_by,omitempty"`
-	CallbackURL  string           `json:"callback_url"`
+	Enabled           bool             `json:"enabled"`
+	SSOOnly           bool             `json:"sso_only"`
+	DisplayName       string           `json:"display_name"`
+	IssuerURL         string           `json:"issuer_url"`
+	ClientID          string           `json:"client_id"`
+	SecretSet         bool             `json:"secret_set"`
+	GroupsClaim       string           `json:"groups_claim"`
+	RoleMappings      []ssoRoleMapping `json:"role_mappings"`
+	SkipConsentPrompt bool             `json:"skip_consent_prompt"`
+	SkipEmailVerified bool             `json:"skip_email_verified"`
+	UpdatedAt         string           `json:"updated_at,omitempty"`
+	UpdatedBy         string           `json:"updated_by,omitempty"`
+	CallbackURL       string           `json:"callback_url"`
 }
 
 func ssoCallbackURL() string {
@@ -184,17 +188,19 @@ func writeSSOConfigDTO(w http.ResponseWriter) {
 		return
 	}
 	writeJSON(w, ssoConfigDTO{
-		Enabled:      c.Enabled,
-		SSOOnly:      c.SSOOnly,
-		DisplayName:  c.DisplayName,
-		IssuerURL:    c.IssuerURL,
-		ClientID:     c.ClientID,
-		SecretSet:    c.ClientSecret != "",
-		GroupsClaim:  c.GroupsClaim,
-		RoleMappings: c.RoleMappings,
-		UpdatedAt:    c.UpdatedAt,
-		UpdatedBy:    c.UpdatedBy,
-		CallbackURL:  ssoCallbackURL(),
+		Enabled:           c.Enabled,
+		SSOOnly:           c.SSOOnly,
+		DisplayName:       c.DisplayName,
+		IssuerURL:         c.IssuerURL,
+		ClientID:          c.ClientID,
+		SecretSet:         c.ClientSecret != "",
+		GroupsClaim:       c.GroupsClaim,
+		RoleMappings:      c.RoleMappings,
+		SkipConsentPrompt: c.SkipConsentPrompt,
+		SkipEmailVerified: c.SkipEmailVerified,
+		UpdatedAt:         c.UpdatedAt,
+		UpdatedBy:         c.UpdatedBy,
+		CallbackURL:       ssoCallbackURL(),
 	})
 }
 

@@ -81,6 +81,20 @@ describe('SSOView', () => {
     });
   });
 
+  it('the Entra ID fixes are two labelled toggles that reach the server', async () => {
+    const { fetchMock } = mount();
+    await screen.findByDisplayValue('Acme single sign-on');
+    expect(screen.queryByText(/Bailey recognises people by email/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Ask for consent' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Require verified email' }));
+    expect(screen.getByText(/Bailey recognises people by email/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Save changes/i }));
+    await waitFor(() => {
+      const post = fetchMock.mock.calls.find(([, init]) => init && init.method === 'POST');
+      expect(JSON.parse(post[1].body)).toMatchObject({ skip_consent_prompt: true, skip_email_verified: true });
+    });
+  });
+
   it('surfaces a save failure instead of pretending it worked', async () => {
     installFetch({
       '/bailey/api/admin/sso': (url, init) => (init && init.method === 'POST'
